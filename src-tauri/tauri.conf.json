@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HarnessStudio",
+  "version": "0.1.0",
+  "identifier": "com.harnessstudio.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm tauri:before-dev",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "pnpm tauri:before-build",
+    "frontendDist": "../out"
+  },
+  "app": {
+    "windows": [],
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../out": "web/"
+    },
+    "externalBin": ["binaries/codeg-mcp", "binaries/codeg-computer-helper"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "./linux/main.desktop"
+      },
+      "rpm": {
+        "desktopTemplate": "./linux/main.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["harnessstudio"]
+      }
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": [],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
