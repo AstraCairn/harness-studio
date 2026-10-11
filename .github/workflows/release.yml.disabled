@@ -1,3 +1,5 @@
+# Temporarily disabled: GitHub Actions only loads .yml and .yaml workflows.
+# Rename this file to release.yml to restore automatic tag-triggered releases.
 name: Release
 
 on:

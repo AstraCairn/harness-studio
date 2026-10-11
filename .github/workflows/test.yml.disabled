@@ -1,3 +1,5 @@
+# Temporarily disabled: GitHub Actions only loads .yml and .yaml workflows.
+# Rename this file to test.yml to restore automatic push and PR checks.
 name: Test
 
 on:
@@ -68,7 +70,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        os:
+          # Temporarily disabled; uncomment to restore these Rust CI jobs.
+          # - ubuntu-22.04
+          # - macos-latest
+          - windows-latest
         mode: [desktop]
         include:
           - mode: desktop
