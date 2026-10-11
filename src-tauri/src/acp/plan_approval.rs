@@ -6,7 +6,7 @@
 //! `ExitPlanModeExtRequest { sessionId, toolCallId, planContent }`) to the client
 //! to get the user's approval before leaving plan mode. Grok waits for the reply.
 //!
-//! Codeg bridges that ext request into an interactive **plan-approval card**
+//! HarnessStudio bridges that ext request into an interactive **plan-approval card**
 //! rendered above the composer — the SAME shape as the `ask_user_question` bridge
 //! ([`crate::acp::question`]) and the permission dialog: a pending request is
 //! captured onto [`crate::acp::session_state::SessionState`] (in-memory, turn
@@ -158,7 +158,7 @@ pub trait SessionPlanApprovalAccess: Send + Sync {
 }
 
 /// Parse Grok's `_x.ai/exit_plan_mode` ext-request params into the plan markdown
-/// and `toolCallId` codeg needs to render the approval card. Grok's wire shape is
+/// and `toolCallId` harness_studio needs to render the approval card. Grok's wire shape is
 /// `{ sessionId, toolCallId, planContent }`. Lenient: an empty / missing
 /// `planContent` is valid (the empty-plan approval surface), so the only hard
 /// error is a non-object payload. The markdown is length-bounded to
@@ -239,8 +239,7 @@ mod tests {
         assert_eq!(plan, "");
         assert_eq!(tc, "call-42");
         // Missing planContent + toolCallId → empty strings, still Ok.
-        let (plan, tc) =
-            parse_grok_exit_plan_request(&json!({ "sessionId": "s-1" })).unwrap();
+        let (plan, tc) = parse_grok_exit_plan_request(&json!({ "sessionId": "s-1" })).unwrap();
         assert!(plan.is_empty());
         assert!(tc.is_empty());
     }
@@ -266,7 +265,10 @@ mod tests {
             decision: PlanApprovalDecision::Approve,
             feedback: None,
         };
-        assert_eq!(build_grok_exit_plan_response(&approve)["outcome"], "approved");
+        assert_eq!(
+            build_grok_exit_plan_response(&approve)["outcome"],
+            "approved"
+        );
         assert_eq!(build_grok_exit_plan_response(&approve)["feedback"], "");
         // The obsolete `decision` field must be gone (it was silently defaulted).
         assert!(build_grok_exit_plan_response(&approve)

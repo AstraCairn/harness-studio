@@ -306,7 +306,7 @@ export interface ConnectionState {
    */
   steeredMessageIds: string[]
   pendingQuestion: PendingQuestion | null
-  /** Awaiting-answer multiple-choice `ask_user_question` (the codeg-mcp blocking
+  /** Awaiting-answer multiple-choice `ask_user_question` (the harness-studio-mcp blocking
    *  tool). Set from a `question_request` event or a snapshot's
    *  `pending_question`; cleared on `question_resolved` or turn end. Distinct
    *  from the free-text `pendingQuestion` above. */
@@ -337,7 +337,7 @@ export interface ConnectionState {
   /** `error` (red) or `warning` (amber) — how the popover tints `error`. */
   errorLevel: AcpErrorLevel
   /**
-   * Set when the agent rejected `session/load` in a way codeg cannot paper
+   * Set when the agent rejected `session/load` in a way harness_studio cannot paper
    * over: no record of the session, the session/process died, or it is
    * archived. Distinct from `error` because the UI surfaces it inline in the
    * message list with reload / new-conversation actions, instead of as a
@@ -1126,7 +1126,7 @@ function parseInputRecord(value: unknown): Record<string, unknown> | null {
  * A permission request's file-tool input with the edit text put back from the
  * live call, or `null` when nothing is missing.
  *
- * claude-agent-acp 0.82.0 sends an AIR client (codeg) an approval whose
+ * claude-agent-acp 0.82.0 sends an AIR client (harness_studio) an approval whose
  * `toolCall` is a bare update — `{toolCallId, title, rawInput}`, and for an
  * Edit/Write `rawInput` is `{file_path}` alone: the text lives only in the
  * diff the live call already carries, which the backend rebuilds into the live
@@ -3347,7 +3347,7 @@ function isAlertedError(error: unknown): error is AlertedError {
 
 /**
  * One account of a failed turn (see `notifyTurnFailure`): an AIR terminal
- * record — the adapter's own wording and recovery buttons — or codeg's
+ * record — the adapter's own wording and recovery buttons — or harness_studio's
  * `turn_failed_*` verdict, which may carry the agent's stderr tail.
  */
 type TurnFailurePart =
@@ -3384,7 +3384,7 @@ interface TurnFailureState {
     description?: string
     actions: NotifyAction[]
   }
-  /** codeg's verdict; `paired` once a typed account carries it. */
+  /** harness_studio's verdict; `paired` once a typed account carries it. */
   verdict?: { key: string; evidence?: string; paired: boolean }
 }
 
@@ -3651,7 +3651,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         kind: "sdk_missing",
         // Claude Code / Codex install a separate ACP adapter package, not the
         // vendor CLI — saying "{agent} is not installed" to someone who has
-        // `claude` on their PATH reads as a bug in codeg. Name what's actually
+        // `claude` on their PATH reads as a bug in harness_studio. Name what's actually
         // missing instead.
         reason: agent.is_acp_adapter
           ? t("blocked.adapterMissing", { agent: agentLabel })
@@ -4013,7 +4013,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
    * in one conversation held every OTHER conversation's deltas for up to
    * `STREAM_FLUSH_MAX_MS` — including a background conversation with no panel
    * mounted, which costs nothing to flush and so bought nothing by waiting.
-   * Codeg runs several agents at once by design, so that is the normal case,
+   * HarnessStudio runs several agents at once by design, so that is the normal case,
    * not a corner of one.
    *
    * Connections are independent — own wire, own seq cursor, own
@@ -4193,7 +4193,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
 
   /**
    * Tell a failed turn once. claude and codex report one failure twice — their
-   * typed AIR record, and codeg's `turn_failed_*` verdict on the same turn —
+   * typed AIR record, and harness_studio's `turn_failed_*` verdict on the same turn —
    * in either order; the two are shown as ONE toast and ONE alert: the typed
    * account's wording and buttons, the verdict's evidence behind the alert's
    * disclosure. A verdict after the typed account only adds that evidence to
@@ -4395,7 +4395,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
    * Say so when the agent settled a config-option pick somewhere else.
    *
    * `session/set_config_option` is advisory: the agent answers with the option
-   * list it adopted and codeg renders that verbatim, so a refused or downgraded
+   * list it adopted and harness_studio renders that verbatim, so a refused or downgraded
    * pick reads as the selector springing back for no reason. pi does this for a
    * model whose reasoning it can't honour; grok does it for a model switch
    * mid-conversation.
@@ -4478,7 +4478,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         // The agent refused to OPEN a session for want of a credential.
         // Deliberately drops the agent's own wording: cursor-agent's
         // says to run `agent login`, which is not a command that exists
-        // (the binary is `cursor-agent`, and codeg's managed copy is not
+        // (the binary is `cursor-agent`, and harness_studio's managed copy is not
         // on PATH) — so echoing it sends the user somewhere they cannot
         // go. The agent's settings panel is where the real command, and
         // the API-key alternative, live. The raw refusal is not lost —
@@ -4568,7 +4568,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           return t("backendErrors.goalControlFailed", { agent: agentLabel })
         case "image_dropped":
           return t("backendErrors.imageDropped", { agent: agentLabel })
-        // `session/load` failed in a way codeg could not classify, so the
+        // `session/load` failed in a way harness_studio could not classify, so the
         // backend started a NEW session to keep the conversation usable —
         // without the context the agent had before.
         case "session_load_fallback":
@@ -4930,7 +4930,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             }
             // 4. flip each async sub-agent's launch card to its terminal
             //    (completed + result) state IN-MEMORY, by rewriting the
-            //    launching tool call's `[[codeg-background-task]]` marker from
+            //    launching tool call's `[[harness-studio-background-task]]` marker from
             //    the settle payload's own `tool_use_id`/`status`/`result`. This
             //    deliberately replaces the `refetchDetail` this used to do: that
             //    refetch re-parsed the still-open transcript mid-#870-hold,
@@ -5595,7 +5595,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
               // Codex client with the same session open (the app, the CLI or an
               // IDE extension), where freeing it can take quitting that client
               // because closing its tab does not always unload the thread; or
-              // a fork codeg just made from it, which closes the parent and
+              // a fork harness_studio just made from it, which closes the parent and
               // leaves codex to unload it about a minute later.
               case "session_busy":
                 return t("backendErrors.sessionLoadBusy", {
@@ -5793,7 +5793,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
   // snapshot-fetch + global-listener flow).
   //
   // The subscription survives WS reconnects automatically — see
-  // `WebEventStream.reattachAll`. Detach reasons are handled here:
+  // `AppEventStream.reattachAll`. Detach reasons are handled here:
   //   - lagged / server_shutdown: re-attach with current cursor so the
   //     consumer doesn't have to think about transient disconnects
   //   - connection_gone: terminal; clean up store entry and let the next
@@ -6110,7 +6110,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
   // ── Backend keepalive + liveness reconciliation timer ──
   // Frontend is the only side that knows which conversation tabs the
   // user has open. Without this, the backend's idle sweep
-  // (CODEG_ACP_IDLE_TIMEOUT_SECS, default 180s) would reap connections
+  // (HARNESS_STUDIO_ACP_IDLE_TIMEOUT_SECS, default 180s) would reap connections
   // backing visible tabs whenever the user was just reading without
   // sending — forcing them to re-spawn the agent on next message.
   // Touching only bumps last_activity_at; it does not emit any event.

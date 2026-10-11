@@ -116,12 +116,9 @@ impl TelegramBackend {
                 ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
             })?;
 
-        let result: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
-            })?;
+        let result: serde_json::Value = resp.json().await.map_err(|e| {
+            ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
+        })?;
 
         if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let desc = result
@@ -217,12 +214,9 @@ impl ChatChannelBackend for TelegramBackend {
                 ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
             })?;
 
-        let me_body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
-            })?;
+        let me_body: serde_json::Value = resp.json().await.map_err(|e| {
+            ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
+        })?;
 
         if me_body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             *self.status.lock().await = ChannelConnectionStatus::Error;
@@ -514,12 +508,9 @@ impl ChatChannelBackend for TelegramBackend {
             .map_err(|e| {
                 ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
             })?;
-        let result: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
-            })?;
+        let result: serde_json::Value = resp.json().await.map_err(|e| {
+            ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
+        })?;
         if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let desc = result
                 .get("description")
@@ -572,12 +563,9 @@ impl ChatChannelBackend for TelegramBackend {
             .map_err(|e| {
                 ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
             })?;
-        let result: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
-            })?;
+        let result: serde_json::Value = resp.json().await.map_err(|e| {
+            ChatChannelError::SendFailed(redact_token(e.to_string(), &self.bot_token))
+        })?;
         if result.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             Ok(())
         } else {
@@ -599,12 +587,9 @@ impl ChatChannelBackend for TelegramBackend {
                 ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
             })?;
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| {
-                ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
-            })?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            ChatChannelError::ConnectionFailed(redact_token(e.to_string(), &self.bot_token))
+        })?;
 
         if body.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             Ok(())
@@ -773,7 +758,7 @@ fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
 fn telegram_topic_title(title: &str) -> String {
     let title = title.trim();
     let title = if title.is_empty() {
-        "Codeg session"
+        "harness studio session"
     } else {
         title
     };
@@ -909,7 +894,10 @@ mod tests {
             "error sending request for url (https://api.telegram.org/bot{token}/createForumTopic)"
         );
         let scrubbed = redact_token(leaked, token);
-        assert!(!scrubbed.contains(token), "token must be scrubbed: {scrubbed}");
+        assert!(
+            !scrubbed.contains(token),
+            "token must be scrubbed: {scrubbed}"
+        );
         assert!(scrubbed.contains("bot***/createForumTopic"), "{scrubbed}");
     }
 
@@ -941,11 +929,17 @@ mod tests {
     #[test]
     fn chat_filter_matches_configured_username_case_insensitively() {
         let message = serde_json::json!({
-            "chat": { "id": -100123, "username": "CodegTopics" }
+            "chat": { "id": -100123, "username": "HarnessStudioTopics" }
         });
 
-        assert!(telegram_message_chat_matches(&message, "@codegtopics"));
-        assert!(telegram_message_chat_matches(&message, "CODEGTOPICS"));
+        assert!(telegram_message_chat_matches(
+            &message,
+            "@harness_studiotopics"
+        ));
+        assert!(telegram_message_chat_matches(
+            &message,
+            "HARNESS_STUDIOTOPICS"
+        ));
         assert!(!telegram_message_chat_matches(&message, "other"));
     }
 
@@ -983,14 +977,14 @@ mod tests {
     fn text_filter_preserves_legacy_group_mention_requirement() {
         assert!(telegram_should_process_text_message(
             "supergroup",
-            "/task@codeg_bot build",
-            "codeg_bot",
+            "/task@harness_studio_bot build",
+            "harness_studio_bot",
             false
         ));
         assert!(!telegram_should_process_text_message(
             "supergroup",
             "/task build",
-            "codeg_bot",
+            "harness_studio_bot",
             false
         ));
     }
@@ -998,15 +992,21 @@ mod tests {
     #[test]
     fn strip_bot_mention_removes_the_mention_in_either_case() {
         assert_eq!(
-            strip_bot_mention("/task@codeg_bot build", "codeg_bot"),
+            strip_bot_mention("/task@harness_studio_bot build", "harness_studio_bot"),
             "/task build"
         );
         assert_eq!(
-            strip_bot_mention("/task@CodeG_Bot build", "codeg_bot"),
+            strip_bot_mention("/task@Harness_Studio_Bot build", "harness_studio_bot"),
             "/task build"
         );
-        assert_eq!(strip_bot_mention("/task build", "codeg_bot"), "/task build");
-        assert_eq!(strip_bot_mention("/task@codeg_bot", ""), "/task@codeg_bot");
+        assert_eq!(
+            strip_bot_mention("/task build", "harness_studio_bot"),
+            "/task build"
+        );
+        assert_eq!(
+            strip_bot_mention("/task@harness_studio_bot", ""),
+            "/task@harness_studio_bot"
+        );
     }
 
     /// The long-poll loop runs unattended, and any member of a bound group
@@ -1019,33 +1019,36 @@ mod tests {
     fn strip_bot_mention_survives_text_whose_lowercase_is_a_different_length() {
         // capital I with dot above, 2 bytes -> 3
         assert_eq!(
-            strip_bot_mention("\u{130}@codeg_bot hi", "codeg_bot"),
+            strip_bot_mention("\u{130}@harness_studio_bot hi", "harness_studio_bot"),
             "\u{130} hi"
         );
         // Kelvin sign, 3 bytes -> 1
         assert_eq!(
-            strip_bot_mention("\u{212A}@codeg_bot hi", "codeg_bot"),
+            strip_bot_mention("\u{212A}@harness_studio_bot hi", "harness_studio_bot"),
             "\u{212A} hi"
         );
         // capital sharp s, 3 bytes -> 2
         assert_eq!(
-            strip_bot_mention("\u{1E9E}@codeg_bot hi", "codeg_bot"),
+            strip_bot_mention("\u{1E9E}@harness_studio_bot hi", "harness_studio_bot"),
             "\u{1E9E} hi"
         );
         // Enough drift to run the old offset off the end of the string.
         assert_eq!(
-            strip_bot_mention("\u{130}\u{130}@codeg_bot", "codeg_bot"),
+            strip_bot_mention("\u{130}\u{130}@harness_studio_bot", "harness_studio_bot"),
             "\u{130}\u{130}"
         );
         assert_eq!(
-            strip_bot_mention("\u{212A}\u{212A}@codeg_bot x", "codeg_bot"),
+            strip_bot_mention(
+                "\u{212A}\u{212A}@harness_studio_bot x",
+                "harness_studio_bot"
+            ),
             "\u{212A}\u{212A} x"
         );
         // A mention whose tail is a wide character is not a mention, and
         // deciding that must not slice through the character.
         assert_eq!(
-            strip_bot_mention("@codeg_bo\u{65E5}", "codeg_bot"),
-            "@codeg_bo\u{65E5}"
+            strip_bot_mention("@harness_studio_bo\u{65E5}", "harness_studio_bot"),
+            "@harness_studio_bo\u{65E5}"
         );
     }
 
@@ -1054,7 +1057,7 @@ mod tests {
         assert!(telegram_should_process_text_message(
             "supergroup",
             "plain follow-up",
-            "codeg_bot",
+            "harness_studio_bot",
             true
         ));
     }

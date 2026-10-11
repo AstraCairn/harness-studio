@@ -170,7 +170,7 @@ mod tauri_commands {
 
     // ── By-content variants ──
     //
-    // A Tauri window connected to a REMOTE codeg server routes these over
+    // A Tauri window connected to a REMOTE harness_studio server routes these over
     // HTTP, where there is no shared filesystem to name a path on. Registering
     // them on the desktop too keeps one frontend code path for both.
 
@@ -202,8 +202,8 @@ mod tauri_commands {
     // were a safety net that existed on disk and nowhere in the product.
 
     #[tauri::command]
-    pub async fn config_sync_list_rollbacks(
-    ) -> Result<Vec<RollbackSnapshotInfo>, AppCommandError> {
+    pub async fn config_sync_list_rollbacks() -> Result<Vec<RollbackSnapshotInfo>, AppCommandError>
+    {
         Ok(list_rollbacks_core(&rollback_dir()))
     }
 

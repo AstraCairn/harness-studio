@@ -152,12 +152,13 @@ const RUN_OPTIONS_DECL: &str = r"\w+=(?:Object\.assign\()*\{conversationId:";
 /// Declarator that binds the `ConversationAction` the run options are built
 /// for. Its local is the one thing the injected policy has to name, so it is
 /// read out of the bundle rather than remembered.
-const ACTION_LOCAL_DECL: &str = r#"(\w+)=new \w+\.ConversationAction\(\{action:\{case:"userMessageAction""#;
+const ACTION_LOCAL_DECL: &str =
+    r#"(\w+)=new \w+\.ConversationAction\(\{action:\{case:"userMessageAction""#;
 
-/// codeg's own earlier splice, which named the local from a table instead of
+/// harness_studio's own earlier splice, which named the local from a table instead of
 /// from the bundle. Matched so the wrong-local installs it left behind can be
 /// repaired in place; see [`repair_range`].
-const LEGACY_CODEG_POLICY: &str = concat!(
+const LEGACY_HARNESS_STUDIO_POLICY: &str = concat!(
     r#"enableAgentRetries:"shellCommandAction"!==(\w+)\.action\.case"#,
     r#"&&"backgroundTaskCompletionAction"!==(\w+)\.action\.case"#,
     r#"&&"goalContinuationAction"!==(\w+)\.action\.case,"#,
@@ -178,7 +179,7 @@ pub enum CompatPatchStatus {
     NotApplicable,
     AlreadyFixed,
     Applied,
-    /// An earlier codeg splice was found and rewritten against the local this
+    /// An earlier harness_studio splice was found and rewritten against the local this
     /// bundle actually declares. Distinct from [`Self::Applied`] only so the
     /// log says which of the two happened.
     Repaired,
@@ -220,9 +221,11 @@ fn run_options_decl() -> &'static Regex {
     })
 }
 
-fn legacy_codeg_policy() -> &'static Regex {
+fn legacy_harness_studio_policy() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(LEGACY_CODEG_POLICY).expect("legacy policy is a valid regex"))
+    RE.get_or_init(|| {
+        Regex::new(LEGACY_HARNESS_STUDIO_POLICY).expect("legacy policy is a valid regex")
+    })
 }
 
 /// The inlined equivalent of upstream's `w5(<action>.case)`, whose body in
@@ -235,7 +238,7 @@ fn legacy_codeg_policy() -> &'static Regex {
 /// today the policy is always `true`. The call is wrapped in a closure that the
 /// subagent completion drain reuses, options and all, for
 /// `backgroundTaskCompletionAction` follow-ups that `w5` would answer `false`;
-/// that drain only runs once the client negotiates `subagents`, which codeg
+/// that drain only runs once the client negotiates `subagents`, which harness_studio
 /// never advertises (see `build_client_capabilities`). The policy is written
 /// out rather than as a bare `true` so that a bundle which later builds these
 /// options for another action still gets upstream's answer.
@@ -262,7 +265,7 @@ fn retry_policy_expression(action_local: &str) -> String {
 struct BundleSplice {
     range: std::ops::Range<usize>,
     action_local: String,
-    /// True when `range` covers an earlier codeg splice being rewritten.
+    /// True when `range` covers an earlier harness_studio splice being rewritten.
     repair: bool,
 }
 
@@ -364,7 +367,7 @@ fn no_enclosing_scope_closes(between: &str) -> bool {
     true
 }
 
-/// The range of an earlier codeg splice, when the bundle carries one.
+/// The range of an earlier harness_studio splice, when the bundle carries one.
 ///
 /// Matched by its exact shape rather than by the marker, so a splice upstream
 /// wrote (`enableAgentRetries:(0,w5.w5)(…)`) is never mistaken for ours and
@@ -372,7 +375,7 @@ fn no_enclosing_scope_closes(between: &str) -> bool {
 /// does, and requires the three locals the old policy reads to agree — a
 /// half-rewritten splice is not something to rewrite the rest of.
 fn repair_range(content: &str) -> Option<std::ops::Range<usize>> {
-    let mut matches = legacy_codeg_policy().captures_iter(content);
+    let mut matches = legacy_harness_studio_policy().captures_iter(content);
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;
@@ -390,7 +393,7 @@ fn repair_range(content: &str) -> Option<std::ops::Range<usize>> {
 fn plan_splice(content: &str) -> Option<BundleSplice> {
     let (decl_start, action_local) = unique_action_local(content)?;
 
-    // Repair first: an install carrying codeg's earlier splice no longer has
+    // Repair first: an install carrying harness_studio's earlier splice no longer has
     // the bare anchor to insert at, and its marker would otherwise read as
     // "already fixed".
     if let Some(range) = repair_range(content) {
@@ -502,9 +505,9 @@ pub fn maybe_apply(platform_dir: &Path, version: &str) -> CompatPatchStatus {
         // "already fixed" would both log a lie and let the memo settle on it.
         // Report the mismatch instead, so it stays inside the attempt budget
         // and the log names something a maintainer can act on.
-        let status = if legacy_codeg_policy().is_match(&content) {
+        let status = if legacy_harness_studio_policy().is_match(&content) {
             tracing::error!(
-                "Cursor ACP retry compatibility patch: bundle carries codeg's earlier \
+                "Cursor ACP retry compatibility patch: bundle carries harness_studio's earlier \
                  wrong-local splice but no repair could be planned \
                  (version={}, bundle={})",
                 normalized,
@@ -689,7 +692,7 @@ fn write_atomically(path: &Path, content: &str) -> Result<(), AcpError> {
     // file another is still filling, and the first `rename` then publishes a
     // half-written bundle over Cursor's chunk.
     let tmp = parent.join(format!(
-        ".codeg-acp-retry-patch-{}-{}.tmp",
+        ".harness-studio-acp-retry-patch-{}-{}.tmp",
         std::process::id(),
         TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
@@ -832,7 +835,9 @@ mod tests {
     );
 
     fn chunk(run_options: &str) -> String {
-        format!("exports.modules={{{AGENT_SESSION_MODULE}(e,t,o){{placeholder {run_options} end}}}}")
+        format!(
+            "exports.modules={{{AGENT_SESSION_MODULE}(e,t,o){{placeholder {run_options} end}}}}"
+        )
     }
 
     fn write_bundle(dir: &Path, content: &str) -> PathBuf {
@@ -916,12 +921,15 @@ mod tests {
             "backgroundTaskCompletionAction",
             "goalContinuationAction",
         ] {
-            assert!(policy.contains(&format!("\"{case}\"!==y.action.case")), "{case}");
+            assert!(
+                policy.contains(&format!("\"{case}\"!==y.action.case")),
+                "{case}"
+            );
         }
     }
 
     // Installs that already took the bad splice answer the marker check with
-    // "already fixed", so the repair has to recognise codeg's own handiwork and
+    // "already fixed", so the repair has to recognise harness_studio's own handiwork and
     // rewrite it against the local the bundle actually declares. Without this
     // every Linux install stays broken until its agent cache is cleared.
     #[test]
@@ -934,7 +942,10 @@ mod tests {
              &&\"backgroundTaskCompletionAction\"!==y.action.case\
              &&\"goalContinuationAction\"!==y.action.case,onConnectionStateChange",
         );
-        assert!(broken.contains("enableAgentRetries:"), "fixture must be spliced");
+        assert!(
+            broken.contains("enableAgentRetries:"),
+            "fixture must be spliced"
+        );
         write_bundle(tmp.path(), &chunk(&broken));
 
         assert_eq!(

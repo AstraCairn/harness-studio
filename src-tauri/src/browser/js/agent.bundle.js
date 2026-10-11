@@ -3802,5 +3802,11 @@
       truncated: true
     };
   }
-  globalThis.__codegAgent = { snapshot, elementForRef, act, locate, rectOf };
+  globalThis.__harnessStudioAgent = {
+    snapshot,
+    elementForRef,
+    act,
+    locate,
+    rectOf
+  };
 })();

@@ -3,9 +3,9 @@
 /**
  * The mark an agent's action leaves where it landed: a ring that opens and
  * fades around the spot, with a pointer for a click or a scroll and a caret
- * for typing. Drawn in its own small window (`computer-marker`) that codeg
+ * for typing. Drawn in its own small window (`computer-marker`) that harness_studio
  * moves onto the spot, shows for a moment and hides again; clicks pass
- * through it. Violet, the colour codeg marks an agent's doings with.
+ * through it. Violet, the colour harness_studio marks an agent's doings with.
  *
  * Each mark carries a new id, so a second click on the same spot plays
  * again rather than being taken for the first.

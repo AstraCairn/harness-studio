@@ -1,127 +1,66 @@
 # AGENTS.md
 
-This file provides guidance to Code Agent when working with code in this repository.
+## 项目约束
 
-## 二次开发约束
+本仓库为独立桌面项目 **harness studio**，版本 0.1.0。保留原有 UI 风格和多智能体能力，不得重新引入欢迎页三类快捷卡片、远端工作区打开/管理入口、Web 服务、浏览器登录、独立服务器、Docker 部署或上游自动更新源。
 
-本仓库是 HarnessStudio（基于 Codeg）的独立项目，版本 0.1.0。沿用 Codeg UI 和架构，但不得重新引入欢迎页的三类快捷卡片、远端工作区打开/管理入口或上游自动更新源。侧边栏文件夹分区展示名为「项目」。桌面标识为 com.harnessstudio.desktop，用户级目录为 ~/.harnessstudio；内部 codeg 二进制与 CODEG_* 配置名称暂时保留兼容。来源与变更记录见 UPSTREAM.md。
+侧边栏文件夹分区展示为「项目」。显示名称统一为 `harness studio`；包和主程序为 `harness-studio`，Rust 库为 `harness_studio_lib`，辅助程序为 `harness-studio-mcp` 和 `harness-studio-computer-helper`。环境变量使用 `HARNESS_STUDIO_*`，深链接使用 `harnessstudio://`。桌面标识为 `com.harnessstudio.desktop`，用户目录为 `~/.harnessstudio`。
 
-## 项目概述
-
-Codeg（Code Generation）是一个多智能体编码工作台，它将多个智能体（Claude Code、Codex CLI、OpenCode、Gemini CLI、OpenClaw、Cline 等）统一到一个工作区中，支持会话聚合和多智能体协作，支持桌面安装，服务器/Docker 部署。
+旧项目品牌只保留在必要的来源及许可证记录中，见 UPSTREAM.md。不得删除第三方版权或许可证声明。
 
 ## 技术栈
 
-- **桌面运行时**: Tauri 2（Rust 后端 + webview 前端）
-- **服务器运行时**: 独立 Rust 二进制（Axum HTTP + WebSocket）
-- **前端**: Next.js 16（静态导出模式）+ React 19 + TypeScript（strict）
-- **样式**: Tailwind CSS v4 + shadcn/ui（radix-maia 风格）
-- **国际化**: next-intl
-- **数据库**: SeaORM + SQLite
-- **包管理器**: pnpm
+- Tauri 2：Rust 桌面后端和 WebView 前端。
+- Next.js 16 静态导出、React 19、TypeScript strict。
+- Tailwind CSS v4、shadcn/ui、next-intl（10 种语言）。
+- SeaORM 与 SQLite，pnpm 包管理器。
+- Rust 版本由 rust-toolchain.toml 固定；Windows 组件见 .vsconfig。
 
-## 代码检查与测试（任务完成后进行必要的检查）
+## 检查
 
-### 前端
+根据改动范围执行必要检查：
 
-```bash
-pnpm lint .                    # lint
-pnpm test                      # vitest 全跑（CI 用同一条命令）
-pnpm test:watch                # 开发时增量重跑
-pnpm test:coverage             # 覆盖率报告（输出到 coverage/index.html）
-pnpm build                     # 静态导出构建
+```powershell
+pnpm lint .
+pnpm test
+pnpm build
+pnpm browser:agent:check
 ```
 
-### 后端 Rust（在 `src-tauri/` 目录下执行）
+在 src-tauri/ 目录执行：
 
-```bash
-# 桌面模式（默认 feature）
-cargo check
+```powershell
+cargo check --all-targets --features test-utils
 cargo test --features test-utils
 cargo clippy --all-targets --features test-utils -- -D warnings
-
-# 服务器模式
-cargo check --no-default-features --features server-bin --bin codeg-server
-cargo test --no-default-features --features server-bin --bin codeg-server --lib
-cargo clippy --no-default-features --features server-bin --bin codeg-server --lib -- -D warnings
-
-# codeg-mcp 协作伴生进程（多智能体委托）
-cargo check --no-default-features --features mcp-bin --bin codeg-mcp
-cargo clippy --no-default-features --features mcp-bin --bin codeg-mcp -- -D warnings
-
-# 解析器快照评审（输出变化时）
-cargo insta review
-INSTA_UPDATE=auto cargo test --features test-utils     # 自动写新 .snap
+cargo check --no-default-features --features mcp-bin --bin harness-studio-mcp
+cargo clippy --no-default-features --features mcp-bin --bin harness-studio-mcp -- -D warnings
 ```
+
+Windows 单元测试的 Common Controls manifest 限制及本机验证方式见 docs/VALIDATION.md。解析器快照变化时使用 cargo insta review。
 
 ## 架构
 
-### 双模式运行
+- `src-tauri/src/lib.rs`：桌面启动和 Tauri 命令注册。
+- `src-tauri/src/events.rs`：桌面与进程内事件分发，不提供 HTTP 服务。
+- `src-tauri/src/app_state.rs`：核心状态及测试装配。
+- `src-tauri/src/acp/`：Agent Client Protocol、智能体连接和 MCP 委托。
+- `src-tauri/src/commands/`：业务逻辑；`_core` 函数接受普通引用，Tauri 包装接收 State。
+- `src-tauri/src/db/`：数据库；`parsers/`：本地智能体会话解析。
+- `src-tauri/src/browser/`：桌面内置浏览器；`computer/`：电脑操作。
+- `src/lib/transport/`：通过 Tauri IPC 调用后端，不创建浏览器 WebTransport。
+- `src/lib/types.ts`：Rust 数据模型的 TypeScript 镜像。
+- `src/i18n/messages/`：10 种语言的界面文案。
 
-项目通过 Cargo feature flags 支持三种二进制：
+三个二进制分别为桌面主程序、stdio MCP 伴生进程和电脑操作辅助进程。后二者必须保持独立 feature（mcp-bin、computer-helper），由 prepare-sidecars 脚本构建，避免 Tauri 将启用桌面依赖的辅助目标打进安装包。
 
-- **`codeg`**（`tauri-runtime`，默认）：完整桌面应用，包含 Tauri 窗口管理、系统通知、自动更新等
-- **`codeg-server`**（`--no-default-features --features server-bin`）：独立服务器模式，仅编译 Axum HTTP API + WebSocket
-- **`codeg-mcp`**（`--no-default-features --features mcp-bin`）：per-launch stdio MCP 伴生进程，被注入到代理 CLI 的 MCP 配置中，向 LLM 暴露**异步**子智能体委托工具。
+`#[cfg(feature = "tauri-runtime")]` 用于桌面专有代码，MCP 和电脑辅助进程可在不启用默认 feature 时编译。静态前端仍需要 Node.js 开发服务器；智能体协作、文档预览等本地通信不属于已移除的远程 Web 工作台服务。
 
-后两个（以及 `codeg-computer-helper` 的 `computer-helper`）各要一个默认不开的 feature：Tauri CLI 会把所有 feature 已开的二进制目标打进桌面安装包，不开就不进包。
+## 代码约定
 
-### 共享核心
-
-- **`app_state.rs`** — `AppState` 共享状态结构，两种模式通过 `EventEmitter` 枚举区分事件发射方式
-- **`web/event_bridge.rs`** — `EventEmitter::Tauri(AppHandle)` 或 `EventEmitter::WebOnly(Arc<WebEventBroadcaster>)`
-- **`web/router.rs`** — Axum 路由，接受 `Arc<AppState>`
-- **`web/handlers/`** — HTTP API 端点，全部使用 `Extension<Arc<AppState>>`
-
-### Rust 后端（`src-tauri/src/`）
-
-后端负责读取和解析本地文件系统上的代理会话文件：
-
-- **`app_state.rs`** — 共享状态（db、连接管理器、终端管理器、事件广播器）
-- **`models/`** — 共享数据结构
-- **`parsers/`** — 每个智能体一个解析器
-- **`commands/`** — 业务逻辑，`_core` 函数供两种模式共用，`#[tauri::command]` 函数仅桌面模式
-- **`web/`** — Axum HTTP API + WebSocket + 静态文件服务 + 认证中间件
-- **`acp/`** — Agent Client Protocol 连接管理
-- **`db/`** — SeaORM + SQLite
-
-### 前端（`src/`）
-
-#### 核心库（`lib/`）
-
-- **`transport/`** — Transport 抽象层（自动检测 Tauri/Web 环境切换 `invoke()`/`fetch()`）
-- **`adapters/`** — AI 响应到组件渲染的适配器
-- **`types.ts`** — Rust 模型的 TypeScript 镜像
-- **`api.ts`** — 主 API 客户端
-- **`tauri.ts`** — Tauri API 封装
-
-#### 国际化（`i18n/`）
-
-- 支持 10 种语言：英语、简体中文、繁体中文、日语、韩语、西班牙语、德语、法语、葡萄牙语、阿拉伯语
-- 使用 next-intl 框架，消息文件存放在 `i18n/messages/`
-
-### 数据流
-
-桌面模式：前端 `invoke()` → Tauri 命令 → 业务逻辑 → 返回数据
-服务器模式：前端 `fetch()` → Axum HTTP API → 同一业务逻辑 → 返回 JSON
-实时通信：后端事件 → EventEmitter（Tauri 事件 / WebSocket 广播）→ 前端
-
-### 条件编译约定
-
-- `#[cfg(feature = "tauri-runtime")]` — 仅桌面模式编译（Tauri 窗口、通知、`tauri::State` 参数等）
-- `#[cfg_attr(feature = "tauri-runtime", tauri::command)]` — 函数始终可用，仅在桌面模式标记为 Tauri 命令
-- `_core` 后缀函数 — 接受普通引用参数（`&AppDatabase`、`&EventEmitter`），供 Web handlers 和 Tauri 命令共用
-
-## 关键约束
-
-- **仅支持静态导出**：`next.config.ts` 设置 `output: "export"`，不支持动态路由（`[param]`），必须使用查询参数替代
-- **路径别名**：`@/*` 映射到 `./src/*`，导入写法为 `@/lib/utils`、`@/components/ui/button`
-- **服务器部署**：通过环境变量配置（`CODEG_PORT`、`CODEG_HOST`、`CODEG_TOKEN`、`CODEG_DATA_DIR`、`CODEG_STATIC_DIR`）
-- **Docker 支持**：多阶段构建（Node.js + Rust），支持 `docker-compose` 一键部署
-
-## 代码风格
-
-- Prettier：无分号、尾逗号（es5）、2 空格缩进、80 字符宽度
-- ESLint：next/core-web-vitals + typescript + prettier
-- TypeScript：strict 模式，启用 `noUnusedLocals` 和 `noUnusedParameters`
-- Rust：2021 edition，使用 `thiserror` 定义错误类型
+- Next.js 仅允许 `output: "export"`，使用查询参数而非动态路由。
+- `@/*` 映射到 `./src/*`。
+- Prettier：无分号、ES5 尾逗号、2 空格、80 字符宽度。
+- ESLint：Next.js、TypeScript 和 Prettier。
+- TypeScript strict，启用 noUnusedLocals 和 noUnusedParameters。
+- Rust 2021 edition，错误类型使用 thiserror。

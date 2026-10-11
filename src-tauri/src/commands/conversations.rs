@@ -13,15 +13,15 @@ use crate::models::*;
 // Concrete parser type only for `load_thread_name_index`, which is codex's own
 // index reader and not part of the `AgentParser` trait. Every history read goes
 // through `build_agent_parser`.
+use crate::events::{
+    emit_event, ConversationChange, ConversationsBulkChanged, EventEmitter, ImportScanProgress,
+    TabsChanged, CONVERSATIONS_BULK_CHANGED_EVENT, CONVERSATION_CHANGED_EVENT,
+    IMPORT_SCAN_PROGRESS_EVENT, TABS_CHANGED_EVENT,
+};
 use crate::parsers::codex::CodexParser;
 use crate::parsers::{
     build_agent_parser, folder_name_from_path, normalize_path_for_matching, path_eq_for_matching,
     AgentParser, ParseError,
-};
-use crate::web::event_bridge::{
-    emit_event, ConversationChange, ConversationsBulkChanged, EventEmitter, ImportScanProgress,
-    TabsChanged, CONVERSATIONS_BULK_CHANGED_EVENT, CONVERSATION_CHANGED_EVENT,
-    IMPORT_SCAN_PROGRESS_EVENT, TABS_CHANGED_EVENT,
 };
 
 #[derive(Default)]
@@ -113,8 +113,7 @@ pub async fn list_all_conversations(
 ) -> Result<Vec<DbConversationSummary>, AppCommandError> {
     let emitter = EventEmitter::Tauri(app.clone());
     let db = app.state::<AppDatabase>();
-    let chat_channel_manager =
-        app.state::<crate::chat_channel::manager::ChatChannelManager>();
+    let chat_channel_manager = app.state::<crate::chat_channel::manager::ChatChannelManager>();
     list_all_conversations_core(
         &db.conn,
         &emitter,
@@ -232,7 +231,7 @@ fn list_conversations_sync(
             .iter()
             .map(|&at| (at, build_agent_parser(at)))
             .collect();
-    // Registered custom agents read back from codeg's own ACP transcripts, so
+    // Registered custom agents read back from harness_studio's own ACP transcripts, so
     // their sessions participate in folder grouping and stats like any other.
     for custom in crate::acp::custom_registry::all() {
         parsers.push((custom, build_agent_parser(custom)));
@@ -447,11 +446,9 @@ pub async fn import_local_conversations_core(
     // Broadcast a sidebar upsert for every title refreshed in place, so other
     // windows and web clients converge live, and propagate the new name to any
     // bound chat thread — the same treatment the scan and list paths give a
-    // title discovered outside codeg. The importing client refetches the list
+    // title discovered outside harness_studio. The importing client refetches the list
     // itself, which also covers the newly imported rows.
-    drop(
-        notify_conversation_title_updates(conn, emitter, chat_channel_manager, updated_ids).await,
-    );
+    drop(notify_conversation_title_updates(conn, emitter, chat_channel_manager, updated_ids).await);
 
     Ok(result)
 }
@@ -529,7 +526,9 @@ async fn load_folder_rows(
 fn index_folder_rows(rows: &[ScanFolderRow]) -> HashMap<String, &ScanFolderRow> {
     let mut index: HashMap<String, &ScanFolderRow> = HashMap::new();
     for row in rows {
-        let slot = index.entry(normalize_path_for_matching(&row.path)).or_insert(row);
+        let slot = index
+            .entry(normalize_path_for_matching(&row.path))
+            .or_insert(row);
         if slot.deleted && !row.deleted {
             *slot = row;
         }
@@ -543,7 +542,7 @@ fn index_folder_rows(rows: &[ScanFolderRow]) -> HashMap<String, &ScanFolderRow> 
 /// top-level by definition.
 ///
 /// Resolving the ROOT rather than a folder id keeps the "is this a worktree"
-/// question separate from "is that repo a folder codeg has", which the importer
+/// question separate from "is that repo a folder harness_studio has", which the importer
 /// answers later and against folders it may not have created yet.
 fn worktree_root_key(path: &str) -> Option<String> {
     let root = crate::git_repo::main_worktree_root(std::path::Path::new(path))?;
@@ -589,7 +588,7 @@ fn build_scan_result(
     struct GroupAcc {
         path: String,
         name: String,
-        exists_in_codeg: bool,
+        exists_in_harness_studio: bool,
         folder_id: Option<i32>,
         agent_types: Vec<AgentType>,
         sessions: Vec<ScanSession>,
@@ -614,12 +613,14 @@ fn build_scan_result(
                 // Reuse the stored row's exact path string so the import-side
                 // add_folder upsert hits the same UNIQUE(path) key instead of
                 // minting a near-duplicate from a trailing-slash/case variant.
-                path: row.map(|r| r.path.clone()).unwrap_or_else(|| raw_path.clone()),
+                path: row
+                    .map(|r| r.path.clone())
+                    .unwrap_or_else(|| raw_path.clone()),
                 name: row
                     .map(|r| r.name.clone())
                     .or_else(|| summary.folder_name.clone())
                     .unwrap_or_else(|| folder_name_from_path(&raw_path)),
-                exists_in_codeg: row.map(|r| !r.deleted).unwrap_or(false),
+                exists_in_harness_studio: row.map(|r| !r.deleted).unwrap_or(false),
                 folder_id: row.map(|r| r.id),
                 agent_types: Vec::new(),
                 sessions: Vec::new(),
@@ -649,12 +650,11 @@ fn build_scan_result(
     let mut folders: Vec<ScanFolder> = groups
         .into_values()
         .map(|mut g| {
-            g.sessions
-                .sort_by_key(|s| std::cmp::Reverse(s.started_at));
+            g.sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
             ScanFolder {
                 path: g.path,
                 name: g.name,
-                exists_in_codeg: g.exists_in_codeg,
+                exists_in_harness_studio: g.exists_in_harness_studio,
                 folder_id: g.folder_id,
                 agent_types: g.agent_types,
                 sessions: g.sessions,
@@ -927,7 +927,7 @@ pub(crate) async fn import_selected_from_summaries(
         // a partial failure still commits and reports its good rows and still
         // broadcasts the folder it created.
         //
-        // A cwd that is a linked worktree of a repo codeg has goes in as a CHILD
+        // A cwd that is a linked worktree of a repo harness_studio has goes in as a CHILD
         // of that repo, the way `open_worktree_folder_core` records one. Plain
         // `add_folder` leaves `parent_id` NULL, which is exactly the sidebar's
         // test for "top-level folder", so the same worktree lands beside its
@@ -939,9 +939,8 @@ pub(crate) async fn import_selected_from_summaries(
         let target_row = folder_index.get(&norm_key).copied();
         let target_folder_id = target_row.map(|row| row.id);
         let existing_parent_id = target_row.and_then(|row| row.parent_id);
-        let target_has_children = target_folder_id.is_some_and(|folder_id| {
-            folder_child_counts.get(&folder_id).copied().unwrap_or(0) > 0
-        });
+        let target_has_children = target_folder_id
+            .is_some_and(|folder_id| folder_child_counts.get(&folder_id).copied().unwrap_or(0) > 0);
         let parent_id = root_key
             .as_ref()
             .and_then(|key| worktree_parents.get(key).copied())
@@ -1026,9 +1025,9 @@ pub(crate) async fn import_selected_from_summaries(
                     restored: tally.restored,
                 });
                 if failed_in_group > 0 && result.errors.len() < MAX_ERRORS {
-                    result
-                        .errors
-                        .push(format!("{target_path}: {failed_in_group} session(s) failed"));
+                    result.errors.push(format!(
+                        "{target_path}: {failed_in_group} session(s) failed"
+                    ));
                 }
                 // Broadcast every touched folder: even a pre-existing row may
                 // have flipped is_open/deleted_at in add_folder, and clients
@@ -1100,7 +1099,7 @@ pub async fn import_selected_sessions(
     import_selected_sessions_core(&db.conn, &EventEmitter::Tauri(app), selections).await
 }
 
-/// Build the `meta["codeg.delegation"]` value for a delegation child loaded
+/// Build the `meta["harness_studio.delegation"]` value for a delegation child loaded
 /// from the DB. Mirrors the shape produced at runtime by
 /// `acp::delegation::meta_writer::build_delegation_meta`, but only includes
 /// the fields the DB can vouch for: `status`, `child_conversation_id`,
@@ -1152,7 +1151,12 @@ fn build_historical_delegation_meta(child: &DbConversationSummary) -> serde_json
     }
     // The child row's title was seeded from the original task text — the same
     // substitute the broker uses for `task_preview` when it resumes a task.
-    if let Some(title) = child.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+    if let Some(title) = child
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
         obj.insert(
             "task_preview".into(),
             serde_json::Value::String(title.into()),
@@ -1189,7 +1193,7 @@ fn parse_delegate_task_id(output: &str) -> Option<String> {
 /// so re-parse those. Depth-capped like the frontend walker.
 ///
 /// Shares `acp::lifecycle`'s key list rather than restating it: that list, its
-/// frontend twins in `delegation-card.ts` / `codeg-mcp-tool.ts`, and this
+/// frontend twins in `delegation-card.ts` / `harness-studio-mcp-tool.ts`, and this
 /// walker must peel the same envelopes, or a card and the meta injected beneath
 /// it disagree about which task a call names.
 fn find_task_id_in_value(value: &serde_json::Value, depth: u8) -> Option<String> {
@@ -1248,10 +1252,10 @@ fn parse_resume_task_id(input: &str) -> Option<String> {
 
 /// Walk every `delegate_to_agent` / `resume_delegation` ToolUse block in
 /// `turns` and, when it can be matched to a child conversation in `children`,
-/// set `meta["codeg.delegation"]` to the DB-derived snapshot. Skips blocks
+/// set `meta["harness_studio.delegation"]` to the DB-derived snapshot. Skips blocks
 /// whose meta is already populated so the live-broker write (when present)
 /// always wins. Tool-name match is by substring to cover the MCP-prefixed
-/// (`mcp__codeg-mcp__delegate_to_agent`) and bare forms the host may have
+/// (`mcp__harness-studio-mcp__delegate_to_agent`) and bare forms the host may have
 /// emitted.
 ///
 /// For `delegate_to_agent`, matching is by `parent_tool_use_id` first, then by
@@ -1317,29 +1321,28 @@ fn inject_delegation_meta(turns: &mut [MessageTurn], children: &[DbConversationS
             if meta.is_some() {
                 continue;
             }
-            let child: Option<&DbConversationSummary> =
-                if tool_name.contains("delegate_to_agent") {
-                    tool_use_id.as_deref().and_then(|tu| {
-                        by_parent_tool_use_id
-                            .get(tu)
-                            .or_else(|| {
-                                task_id_by_call
-                                    .get(tu)
-                                    .and_then(|task_id| by_task_id.get(task_id.as_str()))
-                            })
-                            .copied()
-                    })
-                } else if tool_name.contains("resume_delegation") {
-                    input_preview
-                        .as_deref()
-                        .and_then(parse_resume_task_id)
-                        .and_then(|task_id| by_task_id.get(task_id.as_str()).copied())
-                } else {
-                    continue;
-                };
+            let child: Option<&DbConversationSummary> = if tool_name.contains("delegate_to_agent") {
+                tool_use_id.as_deref().and_then(|tu| {
+                    by_parent_tool_use_id
+                        .get(tu)
+                        .or_else(|| {
+                            task_id_by_call
+                                .get(tu)
+                                .and_then(|task_id| by_task_id.get(task_id.as_str()))
+                        })
+                        .copied()
+                })
+            } else if tool_name.contains("resume_delegation") {
+                input_preview
+                    .as_deref()
+                    .and_then(parse_resume_task_id)
+                    .and_then(|task_id| by_task_id.get(task_id.as_str()).copied())
+            } else {
+                continue;
+            };
             if let Some(child) = child {
                 *meta = Some(serde_json::json!({
-                    "codeg.delegation": build_historical_delegation_meta(child),
+                    "harness_studio.delegation": build_historical_delegation_meta(child),
                 }));
             }
         }
@@ -1361,8 +1364,14 @@ pub async fn get_folder_conversation_core(
         .await
         .map_err(AppCommandError::from)?;
 
-    let (mut turns, session_stats, resolved_ext_id, parsed_title, parsed_model, transcript_watermark) =
-        if let Some(ref ext_id) = summary.external_id {
+    let (
+        mut turns,
+        session_stats,
+        resolved_ext_id,
+        parsed_title,
+        parsed_model,
+        transcript_watermark,
+    ) = if let Some(ref ext_id) = summary.external_id {
         let at = summary.agent_type;
         let eid = ext_id.clone();
         let db_created_at = summary.created_at;
@@ -1524,7 +1533,7 @@ pub async fn get_folder_conversation_core(
     }
 
     // Historical recovery for the read-only sub-agent viewer: JSONL parsers
-    // don't carry `meta["codeg.delegation"]`, so a reloaded conversation
+    // don't carry `meta["harness_studio.delegation"]`, so a reloaded conversation
     // can't drive the parent UI's child-conversation lookup. Join on
     // `parent_id = summary.id` to repopulate it from the DB. Failure to
     // fetch children silently degrades to "no button on the card" (the
@@ -2127,12 +2136,11 @@ pub(crate) fn spawn_sync_conversation_title_until_current(
     conversation_id: i32,
 ) {
     tokio::spawn(async move {
-        sync_conversation_title_until_current(&conn, &chat_channel_manager, conversation_id)
-            .await;
+        sync_conversation_title_until_current(&conn, &chat_channel_manager, conversation_id).await;
     });
 }
 
-/// Broadcast and propagate title changes discovered outside codeg (for
+/// Broadcast and propagate title changes discovered outside harness_studio (for
 /// example, Codex's session index or an import scan). Both operations are
 /// best-effort: the database update has already committed, so notification
 /// failures must not turn the originating list/scan request into an error.
@@ -2316,7 +2324,7 @@ const CHAT_SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(1
 /// Layout-invariant key for a chat scratch dir: its trailing `(<date>, <uuid>)`
 /// path components. The GC matches live dirs by this tail rather than the full
 /// path string, so a different *spelling* of the same data_dir (e.g. a symlinked
-/// vs canonical `CODEG_DATA_DIR` naming the same storage) still matches — a live
+/// vs canonical `HARNESS_STUDIO_DATA_DIR` naming the same storage) still matches — a live
 /// dir must never be misclassified as an orphan and deleted. `<uuid>` is a v4
 /// UUID (globally unique), so the tail is collision-free in practice. Returns
 /// `None` if the path lacks a leaf or parent component.
@@ -2362,7 +2370,7 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
     // Dirs bound to a live chat conversation, keyed by their layout-invariant
     // `(<date>, <uuid>)` tail (see `chat_dir_key`) rather than the full path
     // string. This survives a data_dir spelled differently across runs (e.g. a
-    // symlinked vs canonical `CODEG_DATA_DIR` pointing at the same storage),
+    // symlinked vs canonical `HARNESS_STUDIO_DATA_DIR` pointing at the same storage),
     // which a full-string compare would miss — misclassifying the live dir as an
     // orphan and deleting it. We deliberately do NOT canonicalize (it fails on
     // missing paths and could itself alias two distinct dirs); keying by the tail
@@ -2487,19 +2495,20 @@ pub async fn create_chat_conversation_core(
     // soft-deleting the just-created hidden folder — otherwise it would linger as
     // an orphan (active, conversation-less, never reached by the delete path) and
     // pollute the active-folder scope.
-    let model =
-        match conversation_service::create_chat(conn, folder.id, agent_type, title, None).await {
-            Ok(model) => model,
-            Err(create_err) => {
-                if let Err(cleanup_err) = folder_service::remove_folder(conn, &folder.path).await {
-                    tracing::error!(
+    let model = match conversation_service::create_chat(conn, folder.id, agent_type, title, None)
+        .await
+    {
+        Ok(model) => model,
+        Err(create_err) => {
+            if let Err(cleanup_err) = folder_service::remove_folder(conn, &folder.path).await {
+                tracing::error!(
                         "[conversations] failed to clean up orphan chat folder {} after conversation create error: {cleanup_err}",
                         folder.id
                     );
-                }
-                return Err(AppCommandError::from(create_err));
             }
-        };
+            return Err(AppCommandError::from(create_err));
+        }
+    };
 
     Ok(CreateChatConversationResult {
         conversation_id: model.id,
@@ -2541,7 +2550,9 @@ pub async fn create_chat_conversation(
 /// conversation are still created lazily on first send (reusing this dir).
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn create_chat_dir(app: tauri::AppHandle) -> Result<CreateChatDirResult, AppCommandError> {
+pub async fn create_chat_dir(
+    app: tauri::AppHandle,
+) -> Result<CreateChatDirResult, AppCommandError> {
     use tauri::Manager;
     let data_dir = app
         .path()
@@ -2637,7 +2648,8 @@ pub async fn update_conversation_title(
 ) -> Result<(), AppCommandError> {
     update_conversation_title_core(&db.conn, conversation_id, title).await?;
     emit_conversation_upsert(&EventEmitter::Tauri(app), &db.conn, conversation_id).await;
-    sync_conversation_title_to_channels_core(&db.conn, &chat_channel_manager, conversation_id).await;
+    sync_conversation_title_to_channels_core(&db.conn, &chat_channel_manager, conversation_id)
+        .await;
     Ok(())
 }
 
@@ -2744,8 +2756,12 @@ pub async fn delete_conversation_with_cleanup_core(
     // Canvas references (pinned cards, custom-region memberships) survive the
     // soft delete for the same reason tabs do — no FK cascade ever fires — so
     // they get the same explicit scrub, at the same funnel.
-    crate::commands::canvas::cleanup_canvas_for_deleted_conversation(emitter, conn, conversation_id)
-        .await;
+    crate::commands::canvas::cleanup_canvas_for_deleted_conversation(
+        emitter,
+        conn,
+        conversation_id,
+    )
+    .await;
     if let Some(folder_id) = folder_id {
         cleanup_chat_folder_for_deleted_conversation(conn, folder_id).await;
     }
@@ -2881,7 +2897,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -2920,7 +2936,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -2939,7 +2955,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: completed.then_some(ts),
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -2959,11 +2975,21 @@ mod tests {
             assistant_text_turn("turn-1", "reply", at(-29), true),
             user_text_turn("turn-2", "hello", at(1)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(stamped.as_deref(), Some("msg-live"), "reports the stamped id");
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            stamped.as_deref(),
+            Some("msg-live"),
+            "reports the stamped id"
+        );
         assert_eq!(turns[2].id, "msg-live");
-        assert_eq!(turns[0].id, "turn-0", "earlier identical-position turn intact");
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "earlier identical-position turn intact"
+        );
         assert_eq!(turns[1].id, "turn-1");
     }
 
@@ -2982,11 +3008,18 @@ mod tests {
             user_text_turn("turn-0", "hello", at(1)),
             assistant_text_turn("turn-1", "partial...", at(2), true),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live");
-        assert_eq!(turns.len(), 2, "the partial reply is preserved (not dropped)");
+        assert_eq!(
+            turns.len(),
+            2,
+            "the partial reply is preserved (not dropped)"
+        );
         assert_eq!(turns[1].id, "turn-1", "the partial reply is untouched");
     }
 
@@ -3017,10 +3050,16 @@ mod tests {
             assistant_text_turn("turn-1", "reply", at(-29), true),
             user_text_turn("turn-2", "hello", at(1)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("turn-0", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("turn-0", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "colliding broadcast id → no stamp");
-        assert_eq!(turns[2].id, "turn-2", "the in-flight prompt keeps its parser id");
+        assert_eq!(
+            turns[2].id, "turn-2",
+            "the in-flight prompt keeps its parser id"
+        );
         assert_eq!(turns[0].id, "turn-0", "the colliding turn is untouched");
     }
 
@@ -3037,11 +3076,17 @@ mod tests {
             user_text_turn("turn-2", "ok", at(1)),
             assistant_text_turn("turn-3", "b", at(2), false),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "nothing in the running turn matches");
         assert_eq!(turns[0].id, "turn-0");
-        assert_eq!(turns[2].id, "turn-2", "non-matching tail user turn untouched");
+        assert_eq!(
+            turns[2].id, "turn-2",
+            "non-matching tail user turn untouched"
+        );
     }
 
     #[test]
@@ -3106,15 +3151,13 @@ mod tests {
             user_text_turn("turn-0", "hello", at(1)),
         ];
         for i in 0..400 {
-            turns.push(assistant_text_turn(
-                &format!("a-{i}"),
-                "step",
-                at(2),
-                false,
-            ));
+            turns.push(assistant_text_turn(&format!("a-{i}"), "step", at(2), false));
         }
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[2].id, "msg-live");
     }
@@ -3131,16 +3174,22 @@ mod tests {
         for i in 0..MAX_IN_FLIGHT_WALK_USER_TURNS {
             turns.push(user_text_turn(&format!("u-{i}"), "filler", parsed_at));
         }
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None, "past the cost bound, stamp nothing");
         assert_eq!(turns[0].id, "wanted", "untouched");
 
         // One fewer and the same transcript is inside the bound, so it is the
         // bound that refused above and not some other gate.
         turns.pop();
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
     }
 
@@ -3161,8 +3210,11 @@ mod tests {
             assistant_text_turn("turn-1", "a", at(2), false),
             assistant_text_turn("turn-2", "b", at(3), false),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live");
     }
@@ -3178,8 +3230,11 @@ mod tests {
             assistant_text_turn("turn-1", "first half", at(2), false),
             user_text_turn("turn-2", "also check the tests", at(3)),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped.as_deref(), Some("msg-live"));
         assert_eq!(turns[0].id, "msg-live", "the prompt keeps the stamp");
         assert_eq!(turns[2].id, "turn-2", "the mid-turn message is untouched");
@@ -3231,32 +3286,45 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         };
-        let pending_image = |message_id: &str, data: &str| {
-            crate::acp::session_state::PendingUserMessage {
+        let pending_image =
+            |message_id: &str, data: &str| crate::acp::session_state::PendingUserMessage {
                 message_id: message_id.into(),
                 blocks: vec![crate::acp::types::UserMessageBlock::Image {
                     data: data.into(),
                     mime_type: "image/png".into(),
                 }],
-            }
-        };
+            };
 
         let mut turns = vec![image_turn("turn-0", "AAAA")];
-        apply_in_flight_message_id(&mut turns, &pending_image("msg-live", "AAAA"), Some(turn_started()));
-        assert_eq!(turns[0].id, "msg-live", "uri difference is ignored, data matches");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_image("msg-live", "AAAA"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "msg-live",
+            "uri difference is ignored, data matches"
+        );
 
         let mut turns = vec![image_turn("turn-0", "AAAA")];
-        apply_in_flight_message_id(&mut turns, &pending_image("msg-live", "BBBB"), Some(turn_started()));
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_image("msg-live", "BBBB"),
+            Some(turn_started()),
+        );
         assert_eq!(turns[0].id, "turn-0", "different image bytes → no stamp");
     }
 
     #[test]
     fn empty_turns_is_a_noop() {
         let mut turns: Vec<MessageTurn> = vec![];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
         assert_eq!(stamped, None);
         assert!(turns.is_empty());
     }
@@ -3274,7 +3342,11 @@ mod tests {
             user_text_turn("turn-0", "continue", at(-60)),
             assistant_text_turn("turn-1", "done", at(-58), true),
         ];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "continue"), Some(turn_started()));
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "continue"),
+            Some(turn_started()),
+        );
         assert_eq!(turns[0].id, "turn-0", "older identical prompt → untouched");
     }
 
@@ -3293,8 +3365,15 @@ mod tests {
         // backend broadcasts `UserMessage` before issuing the agent request), so
         // a turn exactly at the start qualifies — the boundary is inclusive.
         let mut turns = vec![user_text_turn("turn-0", "hello", at(0))];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(turns[0].id, "msg-live", "persisted exactly at the start is in-flight");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "msg-live",
+            "persisted exactly at the start is in-flight"
+        );
     }
 
     #[test]
@@ -3302,8 +3381,15 @@ mod tests {
         // Strict gate, no backward tolerance: a turn even one second before the
         // start belongs to an earlier turn, never the in-flight prompt.
         let mut turns = vec![user_text_turn("turn-0", "hello", at(-1))];
-        apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "hello"), Some(turn_started()));
-        assert_eq!(turns[0].id, "turn-0", "one second before the start is not in-flight");
+        apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "hello"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "one second before the start is not in-flight"
+        );
     }
 
     #[test]
@@ -3319,10 +3405,19 @@ mod tests {
             user_text_turn("turn-0", "continue", at(-1)),
             assistant_text_turn("turn-1", "done", at(0), true),
         ];
-        let stamped =
-            apply_in_flight_message_id(&mut turns, &pending_text("msg-live", "continue"), Some(turn_started()));
-        assert_eq!(stamped, None, "fast prior identical prompt → nothing reported");
-        assert_eq!(turns[0].id, "turn-0", "fast prior identical prompt → untouched");
+        let stamped = apply_in_flight_message_id(
+            &mut turns,
+            &pending_text("msg-live", "continue"),
+            Some(turn_started()),
+        );
+        assert_eq!(
+            stamped, None,
+            "fast prior identical prompt → nothing reported"
+        );
+        assert_eq!(
+            turns[0].id, "turn-0",
+            "fast prior identical prompt → untouched"
+        );
         assert_eq!(turns.len(), 2, "the prior completed reply is preserved");
     }
 
@@ -3330,12 +3425,14 @@ mod tests {
     fn inject_delegation_meta_populates_completed_child() {
         let mut turns = vec![tool_use_turn(
             Some("tu-1"),
-            "mcp__codeg-mcp__delegate_to_agent",
+            "mcp__harness-studio-mcp__delegate_to_agent",
         )];
         let children = vec![summary_child(42, "tu-1", "completed")];
         inject_delegation_meta(&mut turns, &children);
         let meta = first_block_meta(&turns[0]).expect("meta should be set");
-        let inner = meta.get("codeg.delegation").expect("codeg.delegation key");
+        let inner = meta
+            .get("harness_studio.delegation")
+            .expect("harness_studio.delegation key");
         assert_eq!(inner["status"], "completed");
         assert_eq!(inner["child_conversation_id"], 42);
         assert!(
@@ -3361,7 +3458,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }
     }
 
@@ -3372,20 +3469,27 @@ mod tests {
     #[test]
     fn inject_delegation_meta_falls_back_to_the_task_id() {
         let mut turns = vec![
-            tool_use_turn(Some("call_73UFK2"), "mcp__codeg_mcp__delegate_to_agent"),
+            tool_use_turn(
+                Some("call_73UFK2"),
+                "mcp__harness_studio_mcp__delegate_to_agent",
+            ),
             tool_result_turn(
                 "call_73UFK2",
                 "Delegation successful. task_id=8ff4c14c-740c-4482-b758-8f2091f97063. \
                  Call get_delegation_status with this id in the task_ids array.",
             ),
         ];
-        let mut child = summary_child(2890, "exec-0fb6db94-3042-4cc4-b492-2edd1804c1fa", "completed");
+        let mut child = summary_child(
+            2890,
+            "exec-0fb6db94-3042-4cc4-b492-2edd1804c1fa",
+            "completed",
+        );
         child.delegation_call_id = Some("8ff4c14c-740c-4482-b758-8f2091f97063".into());
 
         inject_delegation_meta(&mut turns, &[child]);
 
         let inner = first_block_meta(&turns[0])
-            .and_then(|m| m.get("codeg.delegation").cloned())
+            .and_then(|m| m.get("harness_studio.delegation").cloned())
             .expect("meta should be set");
         assert_eq!(inner["child_conversation_id"], 2890);
     }
@@ -3416,7 +3520,7 @@ mod tests {
     fn inject_delegation_meta_binds_a_resume_call_by_its_task_id_argument() {
         let mut turns = vec![tool_use_turn_with_input(
             Some("tu-resume"),
-            "mcp__codeg-mcp__resume_delegation",
+            "mcp__harness-studio-mcp__resume_delegation",
             Some(r#"{"task_id":"b0858712-9257","reason":"the app was killed"}"#),
         )];
         let mut child = summary_child(9, "tu-original-delegate", "completed");
@@ -3426,7 +3530,7 @@ mod tests {
         inject_delegation_meta(&mut turns, &[child]);
 
         let inner = first_block_meta(&turns[0])
-            .and_then(|m| m.get("codeg.delegation").cloned())
+            .and_then(|m| m.get("harness_studio.delegation").cloned())
             .expect("meta should be set");
         // The CHILD's real status, not the `running` the resume ack froze.
         assert_eq!(inner["status"], "completed");
@@ -3475,7 +3579,7 @@ mod tests {
         // `params` on `input_preview` on purpose, for readers to peel.
         assert_eq!(
             parse_resume_task_id(
-                r#"{"toolName":"mcp__codeg-mcp__resume_delegation","params":{"task_id":"abc-123"}}"#
+                r#"{"toolName":"mcp__harness-studio-mcp__resume_delegation","params":{"task_id":"abc-123"}}"#
             )
             .as_deref(),
             Some("abc-123")
@@ -3488,7 +3592,7 @@ mod tests {
         // Cursor's `{providerIdentifier, toolName, args}`.
         assert_eq!(
             parse_resume_task_id(
-                r#"{"providerIdentifier":"codeg-mcp","toolName":"resume_delegation","args":{"task_id":"abc-123"}}"#
+                r#"{"providerIdentifier":"harness-studio-mcp","toolName":"resume_delegation","args":{"task_id":"abc-123"}}"#
             )
             .as_deref(),
             Some("abc-123")
@@ -3534,7 +3638,7 @@ mod tests {
         inject_delegation_meta(&mut turns, &children);
         let inner = first_block_meta(&turns[0])
             .unwrap()
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap();
         assert_eq!(inner["status"], "running");
         assert_eq!(inner["child_conversation_id"], 7);
@@ -3553,7 +3657,7 @@ mod tests {
         inject_delegation_meta(&mut turns, &children);
         let inner = first_block_meta(&turns[0])
             .unwrap()
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap();
         assert_eq!(inner["status"], "completed");
         assert_eq!(inner["child_conversation_id"], 11);
@@ -3572,7 +3676,7 @@ mod tests {
         inject_delegation_meta(&mut turns, &children);
         let inner = first_block_meta(&turns[0])
             .unwrap()
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap();
         assert_eq!(inner["status"], "failed");
         assert!(
@@ -3604,7 +3708,7 @@ mod tests {
     fn inject_delegation_meta_preserves_live_broker_meta() {
         // Defensive: even though parsers always emit `meta: None`, a future
         // snapshot path could carry a live broker write. Don't clobber it.
-        let pre_existing = serde_json::json!({ "codeg.delegation": { "status": "running", "child_conversation_id": 999 } });
+        let pre_existing = serde_json::json!({ "harness_studio.delegation": { "status": "running", "child_conversation_id": 999 } });
         let mut turns = vec![MessageTurn {
             id: "t1".into(),
             role: TurnRole::Assistant,
@@ -3620,14 +3724,14 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: None,
-        agent_message_id: None,
+            agent_message_id: None,
         }];
         let children = vec![summary_child(42, "tu-1", "completed")];
         inject_delegation_meta(&mut turns, &children);
         // The 999 (broker-written) survives — DB-derived 42 is not used here.
         let inner = first_block_meta(&turns[0])
             .unwrap()
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap();
         assert_eq!(inner["child_conversation_id"], 999);
         assert_eq!(inner["status"], "running");
@@ -3657,7 +3761,7 @@ mod tests {
         // tests above; here we just verify the wiring inside the _core fn
         // doesn't error on the join path.
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-inject-test").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-inject-test").await;
         let parent_id = create_conversation_core(
             &db.conn,
             folder_id,
@@ -3694,7 +3798,7 @@ mod tests {
     #[tokio::test]
     async fn create_conversation_core_happy_path() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-conv-test-1").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-conv-test-1").await;
         let id = create_conversation_core(
             &db.conn,
             folder_id,
@@ -3999,7 +4103,10 @@ mod tests {
         .await
         .expect("gc");
 
-        assert_eq!(removed, 0, "a fresh dir below the staleness threshold is spared");
+        assert_eq!(
+            removed, 0,
+            "a fresh dir below the staleness threshold is spared"
+        );
         assert!(
             std::path::Path::new(&fresh).is_dir(),
             "fresh dir retained (anti-race)"
@@ -4079,13 +4186,10 @@ mod tests {
         symlink(real.path(), &link).expect("symlink");
 
         // GC runs under the symlinked spelling; the live dir must still be spared.
-        let removed = gc_orphan_chat_dirs_core_with_threshold(
-            &db.conn,
-            &link,
-            std::time::Duration::ZERO,
-        )
-        .await
-        .expect("gc");
+        let removed =
+            gc_orphan_chat_dirs_core_with_threshold(&db.conn, &link, std::time::Duration::ZERO)
+                .await
+                .expect("gc");
 
         assert_eq!(
             removed, 0,
@@ -4142,7 +4246,7 @@ mod tests {
     async fn chat_folders_excluded_from_user_facing_lists_but_in_all_details() {
         let db = fresh_in_memory_db().await;
         let data_dir = tempfile::tempdir().expect("tempdir");
-        let normal_id = seed_folder(&db, "/tmp/codeg-chat-list-test").await;
+        let normal_id = seed_folder(&db, "/tmp/harness-studio-chat-list-test").await;
         let chat_id =
             create_chat_conversation_core(&db.conn, data_dir.path(), AgentType::Codex, None, None)
                 .await
@@ -4208,7 +4312,7 @@ mod tests {
     #[tokio::test]
     async fn list_all_conversations_core_syncs_codex_index_title_before_search() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-codex-index").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-codex-index").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4277,7 +4381,7 @@ mod tests {
     #[tokio::test]
     async fn list_all_conversations_core_preserves_locked_codex_title() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-codex-locked").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-codex-locked").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4321,7 +4425,7 @@ mod tests {
     #[tokio::test]
     async fn list_all_conversations_core_keeps_title_when_codex_index_is_missing() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-codex-no-index").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-codex-no-index").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4368,7 +4472,7 @@ mod tests {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-codex-sync-failure").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-codex-sync-failure").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4419,7 +4523,7 @@ mod tests {
     #[tokio::test]
     async fn scan_importable_sessions_syncs_title_and_notifies_clients() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-scan-codex-title-sync").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-scan-codex-title-sync").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4438,7 +4542,7 @@ mod tests {
         let mut summary = scan_summary(
             "scan-session",
             AgentType::Codex,
-            Some("/tmp/codeg-scan-codex-title-sync"),
+            Some("/tmp/harness-studio-scan-codex-title-sync"),
             at(0),
         );
         summary.1.title = Some("Codex index title".into());
@@ -4482,7 +4586,7 @@ mod tests {
     #[tokio::test]
     async fn notify_conversation_title_updates_detaches_channel_sync_from_the_caller() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-notify-detached").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-notify-detached").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4530,7 +4634,7 @@ mod tests {
     #[tokio::test]
     async fn detached_title_sync_converges_on_a_rename_that_lands_mid_flight() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-notify-late-rename").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-notify-late-rename").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4583,7 +4687,7 @@ mod tests {
     #[tokio::test]
     async fn detached_title_sync_converges_after_a_run_of_mid_flight_renames() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-notify-rename-run").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-notify-rename-run").await;
         let row = conversation_service::create(
             &db.conn,
             folder_id,
@@ -4606,15 +4710,10 @@ mod tests {
         )
         .await;
 
-        notify_conversation_title_updates(
-            &db.conn,
-            &emitter,
-            &chat_channel_manager,
-            vec![row.id],
-        )
-        .await
-        .await
-        .expect("detached title sync task");
+        notify_conversation_title_updates(&db.conn, &emitter, &chat_channel_manager, vec![row.id])
+            .await
+            .await
+            .expect("detached title sync task");
 
         let recorded = title_edits.recorded().await;
         let current = conversation_service::get_by_id(&db.conn, row.id)
@@ -4666,7 +4765,7 @@ mod tests {
     #[tokio::test]
     async fn save_opened_tabs_core_persists_only_conversation_tabs_and_bumps_version() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tabs-test").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tabs-test").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4711,7 +4810,7 @@ mod tests {
     #[tokio::test]
     async fn save_opened_tabs_core_rejects_stale_version_without_emitting() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tabs-stale").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tabs-stale").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4757,7 +4856,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_tabs_for_deleted_conversation_removes_tab_and_emits() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tab-conv-del").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tab-conv-del").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4773,7 +4872,9 @@ mod tests {
 
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
-        delete_conversation_core(&db.conn, c1).await.expect("delete");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete");
         cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
 
         let snap = list_opened_tabs_core(&db.conn).await.expect("list");
@@ -4788,9 +4889,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_tabs_for_deleted_conversation_bumps_barrier_without_emitting_when_no_open_tab() {
+    async fn cleanup_tabs_for_deleted_conversation_bumps_barrier_without_emitting_when_no_open_tab()
+    {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tab-conv-del-noop").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tab-conv-del-noop").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4813,7 +4915,7 @@ mod tests {
     #[tokio::test]
     async fn remove_folder_from_workspace_cleans_tabs_and_emits() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-folder-remove-tabs").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-folder-remove-tabs").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4845,7 +4947,7 @@ mod tests {
     #[tokio::test]
     async fn stale_save_after_conversation_cleanup_is_rejected_no_resurrection() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tab-cleanup-race").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tab-cleanup-race").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4869,7 +4971,9 @@ mod tests {
         assert_eq!(saved.version, 1);
 
         // Server deletes c1 and atomically cleans its tab → v2 (only c2 remains).
-        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete c1");
         cleanup_tabs_for_deleted_conversation(&EventEmitter::Noop, &db.conn, c1).await;
 
         // A client still on the pre-cleanup version re-saves the OLD set (with c1
@@ -4901,7 +5005,7 @@ mod tests {
     #[tokio::test]
     async fn stale_save_after_folder_removal_is_rejected_no_resurrection() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-folder-remove-race").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-folder-remove-race").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4935,7 +5039,10 @@ mod tests {
         )
         .await
         .expect("stale save returns Ok");
-        assert!(!stale.accepted, "save on the pre-removal version must be rejected");
+        assert!(
+            !stale.accepted,
+            "save on the pre-removal version must be rejected"
+        );
 
         let snap = list_opened_tabs_core(&db.conn).await.expect("list");
         assert!(
@@ -4952,7 +5059,7 @@ mod tests {
         // (built on the pre-deletion version, still listing c1) is then rejected,
         // so a tab for the soft-deleted conversation is never persisted.
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-tab-zero-row-race").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-tab-zero-row-race").await;
         let c1 = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("c1");
@@ -4974,11 +5081,16 @@ mod tests {
 
         // c1 deleted with no persisted c1 tab → zero rows removed, but the
         // version barrier still advances (v1 → v2) and nothing is broadcast.
-        delete_conversation_core(&db.conn, c1).await.expect("delete c1");
+        delete_conversation_core(&db.conn, c1)
+            .await
+            .expect("delete c1");
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
         cleanup_tabs_for_deleted_conversation(&emitter, &db.conn, c1).await;
-        assert!(rx.try_recv().is_err(), "zero-row cleanup must not broadcast");
+        assert!(
+            rx.try_recv().is_err(),
+            "zero-row cleanup must not broadcast"
+        );
 
         // A's debounced save (built on v1, still including the now-deleted c1) is
         // rejected by the barrier — c1 must not be persisted as a ghost.
@@ -5017,8 +5129,8 @@ mod tests {
             &crate::chat_channel::manager::ChatChannelManager::new(),
             999_999,
         )
-            .await
-            .expect_err("missing folder must surface as error");
+        .await
+        .expect_err("missing folder must surface as error");
         let msg = format!("{err:?}");
         assert!(
             msg.to_lowercase().contains("not found") || msg.to_lowercase().contains("999999"),
@@ -5029,7 +5141,7 @@ mod tests {
     #[tokio::test]
     async fn update_conversation_status_core_invalid_string_errors() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-status-test").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-status-test").await;
         let conv_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("create");
@@ -5047,7 +5159,7 @@ mod tests {
     #[tokio::test]
     async fn update_conversation_title_core_roundtrip() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-title-test").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-title-test").await;
         let conv_id = create_conversation_core(&db.conn, folder_id, AgentType::Gemini, None)
             .await
             .expect("create");
@@ -5063,7 +5175,7 @@ mod tests {
     #[tokio::test]
     async fn delete_conversation_core_soft_deletes() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-delete-test").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-delete-test").await;
         let conv_id = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
             .await
             .expect("create");
@@ -5092,7 +5204,7 @@ mod tests {
     #[tokio::test]
     async fn list_child_conversations_core_returns_empty_for_no_parent() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-children-empty").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-children-empty").await;
         let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
             .await
             .expect("create parent");
@@ -5108,7 +5220,7 @@ mod tests {
         use crate::db::service::conversation_service;
 
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-list-children-match").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-list-children-match").await;
         let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("create parent");
@@ -5161,11 +5273,11 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────
 
     fn sync_test_emitter() -> (
-        std::sync::Arc<crate::web::event_bridge::WebEventBroadcaster>,
+        std::sync::Arc<crate::events::EventBroadcaster>,
         EventEmitter,
     ) {
-        let broadcaster = std::sync::Arc::new(crate::web::event_bridge::WebEventBroadcaster::new());
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let broadcaster = std::sync::Arc::new(crate::events::EventBroadcaster::new());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
         (broadcaster, emitter)
     }
 
@@ -5385,7 +5497,7 @@ mod tests {
     #[tokio::test]
     async fn emit_conversation_upsert_broadcasts_full_root_summary() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-sync-upsert").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-sync-upsert").await;
         let id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("create");
@@ -5420,7 +5532,7 @@ mod tests {
     #[tokio::test]
     async fn emit_conversation_upsert_carries_new_status_after_update() {
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-sync-status").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-sync-status").await;
         let id = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
             .await
             .expect("create");
@@ -5439,7 +5551,7 @@ mod tests {
         // Anti-resurrection: get_by_id filters deleted_at, so an upsert that
         // races a delete emits nothing instead of re-inserting a tombstone.
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-sync-deleted-silent").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-sync-deleted-silent").await;
         let id = create_conversation_core(&db.conn, folder_id, AgentType::Gemini, None)
             .await
             .expect("create");
@@ -5464,7 +5576,7 @@ mod tests {
         // chevron), unlike a root whose `parent_id` is omitted.
         use crate::acp::delegation::spawner::DelegationLink;
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-sync-child-broadcast").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-sync-child-broadcast").await;
         let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("parent");
@@ -5508,7 +5620,7 @@ mod tests {
         // symmetric with the create-time parent re-emit.
         use crate::acp::delegation::spawner::DelegationLink;
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-delete-child-reemit").await;
+        let folder_id = seed_folder(&db, "/tmp/harness-studio-delete-child-reemit").await;
         let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("parent");
@@ -5608,7 +5720,7 @@ mod tests {
         assert_eq!(result.folders.len(), 1);
         let folder = &result.folders[0];
         assert_eq!(folder.path, "/tmp/proj");
-        assert!(!folder.exists_in_codeg);
+        assert!(!folder.exists_in_harness_studio);
         assert_eq!(folder.folder_id, None);
         assert_eq!(
             folder.agent_types,
@@ -5692,7 +5804,7 @@ mod tests {
         let folder = &result.folders[0];
         assert_eq!(folder.path, "/tmp/proj", "live row's stored path wins");
         assert_eq!(folder.name, "proj");
-        assert!(folder.exists_in_codeg);
+        assert!(folder.exists_in_harness_studio);
         assert_eq!(folder.folder_id, Some(2));
     }
 
@@ -5715,7 +5827,7 @@ mod tests {
 
         let folder = &result.folders[0];
         assert!(
-            !folder.exists_in_codeg,
+            !folder.exists_in_harness_studio,
             "a soft-deleted row is not a live folder — import will reopen it"
         );
         assert_eq!(folder.folder_id, Some(9));
@@ -5769,7 +5881,10 @@ mod tests {
             .unwrap();
         assert_eq!(folder_rows.len(), 1);
         assert_eq!(folder_rows[0].path, "/tmp/proj-a");
-        assert!(folder_rows[0].is_open, "created folder must open in sidebar");
+        assert!(
+            folder_rows[0].is_open,
+            "created folder must open in sidebar"
+        );
 
         let convs = conversation::Entity::find().all(&db.conn).await.unwrap();
         assert_eq!(convs.len(), 2);
@@ -6096,7 +6211,7 @@ mod tests {
         assert_eq!(repo_row.parent_id, None);
     }
 
-    // Grouping under a repo codeg has never opened would invent a workspace row
+    // Grouping under a repo harness_studio has never opened would invent a workspace row
     // the user did not ask for, so an unknown repo leaves the folder top-level.
     #[tokio::test]
     async fn batch_import_leaves_a_worktree_top_level_when_its_repo_is_unopened() {
@@ -6337,8 +6452,9 @@ mod tests {
 
     #[tokio::test]
     async fn batch_import_restores_a_deleted_conversation_in_place() {
-        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-            Set};
+        use sea_orm::{
+            ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+        };
         let db = fresh_in_memory_db().await;
 
         let make = || {
@@ -6394,8 +6510,9 @@ mod tests {
 
     #[tokio::test]
     async fn whole_folder_import_still_never_resurrects_a_deleted_conversation() {
-        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter,
-            Set};
+        use sea_orm::{
+            ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+        };
         let db = fresh_in_memory_db().await;
         let folder_id = seed_folder(&db, "/tmp/proj-sweep").await;
         let items = vec![scan_summary(
@@ -6467,15 +6584,15 @@ mod tests {
 
     #[tokio::test]
     async fn batch_import_emits_folder_upserts_and_one_bulk_event() {
-        use crate::web::event_bridge::{
-            WebEventBroadcaster, CONVERSATIONS_BULK_CHANGED_EVENT, FOLDER_CHANGED_EVENT,
+        use crate::events::{
+            EventBroadcaster, CONVERSATIONS_BULK_CHANGED_EVENT, FOLDER_CHANGED_EVENT,
         };
         use std::sync::Arc;
 
         let db = fresh_in_memory_db().await;
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
 
         let summaries = vec![
             scan_summary("s1", AgentType::ClaudeCode, Some("/tmp/proj-g"), at(0)),
@@ -6554,8 +6671,8 @@ mod tests {
             &crate::chat_channel::manager::ChatChannelManager::new(),
             folder_id,
         )
-            .await
-            .expect_err("legacy import must be rejected while an import is in progress");
+        .await
+        .expect_err("legacy import must be rejected while an import is in progress");
         let msg = format!("{err:?}").to_lowercase();
         assert!(
             msg.contains("already in progress"),
@@ -6575,14 +6692,13 @@ mod tests {
             scan_summary("s2", AgentType::Codex, Some("/tmp/x"), at(1)),
         ];
 
-        let (tally, updated_ids, failed) =
-            import_service::import_summaries_resilient(
-                &db.conn,
-                999_999,
-                &items,
-                import_service::DeletedPolicy::Skip,
-            )
-            .await;
+        let (tally, updated_ids, failed) = import_service::import_summaries_resilient(
+            &db.conn,
+            999_999,
+            &items,
+            import_service::DeletedPolicy::Skip,
+        )
+        .await;
         assert_eq!(failed, 2, "both rows fail the folder FK and are counted");
         assert_eq!(tally.imported, 0);
         assert_eq!(tally.updated, 0);
@@ -6591,14 +6707,13 @@ mod tests {
         // Same items into a real folder import cleanly — the resilient loop did
         // not corrupt state or leave a half-open transaction.
         let folder_id = seed_folder(&db, "/tmp/x").await;
-        let (tally2, _ids, failed2) =
-            import_service::import_summaries_resilient(
-                &db.conn,
-                folder_id,
-                &items,
-                import_service::DeletedPolicy::Skip,
-            )
-            .await;
+        let (tally2, _ids, failed2) = import_service::import_summaries_resilient(
+            &db.conn,
+            folder_id,
+            &items,
+            import_service::DeletedPolicy::Skip,
+        )
+        .await;
         assert_eq!(failed2, 0);
         assert_eq!(tally2.imported, 2);
     }
@@ -6700,7 +6815,11 @@ mod tests {
         assert_eq!(detail.turns_total, Some(4));
         assert_eq!(detail.assistant_turns_before_offset, Some(1));
         assert_eq!(
-            detail.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            detail
+                .turns
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["turn-2", "turn-3"]
         );
         // The windowed turns are the same objects the full response carries.
@@ -6784,7 +6903,10 @@ mod tests {
         assert_eq!((start, end), (0, 2));
         let own = crate::commands::turn_window::window_meta(&turns, start);
         let seam = crate::commands::turn_window::window_meta(&turns, 2);
-        assert_eq!(own.prefix_hash, crate::commands::turn_window::prefix_fingerprint(&[]));
+        assert_eq!(
+            own.prefix_hash,
+            crate::commands::turn_window::prefix_fingerprint(&[])
+        );
         assert_eq!(
             seam.prefix_hash,
             crate::commands::turn_window::prefix_fingerprint(&turns[..2])

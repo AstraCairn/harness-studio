@@ -53,8 +53,12 @@ pub enum LiveContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_tool_use_id: Option<String>,
     },
-    ToolCallRef { tool_call_id: String },
-    Plan { entries: serde_json::Value },
+    ToolCallRef {
+        tool_call_id: String,
+    },
+    Plan {
+        entries: serde_json::Value,
+    },
 }
 
 /// 工具调用的运行态。turn 完成时统一 clear。
@@ -80,9 +84,9 @@ pub struct ToolCallState {
     /// extraction. `None` if the agent didn't supply it. Same partial-update
     /// preservation semantic as `locations`.
     ///
-    /// Convention used by codeg's multi-agent delegation (the `delegate_to_agent`
+    /// Convention used by harness_studio's multi-agent delegation (the `delegate_to_agent`
     /// MCP tool) — `DelegationBroker` writes the following object under
-    /// `meta["codeg.delegation"]` on the parent's active tool call:
+    /// `meta["harness_studio.delegation"]` on the parent's active tool call:
     ///
     /// ```jsonc
     /// {
@@ -199,7 +203,7 @@ pub struct UsageInfo {
 ///
 /// Completed delegations are recovered without this field: a live page keeps the
 /// binding in `DelegationProvider` for its lifetime, and a cold load / refresh
-/// rebuilds `meta["codeg.delegation"]` (status + child id) from the child's
+/// rebuilds `meta["harness_studio.delegation"]` (status + child id) from the child's
 /// persisted DB row via `commands::conversations::inject_delegation_meta`
 /// (authoritative, uncapped). The snapshot only has to recover the *running*
 /// binding, which the transient `DelegationStarted` event cannot supply on the
@@ -364,7 +368,7 @@ pub struct SessionState {
     /// Backend-internal — not serialized.
     pub pi_startup_banner: Option<String>,
 
-    /// Config-option values codeg asserted while establishing this session
+    /// Config-option values harness_studio asserted while establishing this session
     /// (`apply_preferred_session_options`) and the agent confirmed — the user's
     /// saved preferences on a connect, the parent's selectors on a fork.
     ///
@@ -385,7 +389,7 @@ pub struct SessionState {
     /// Config-option ids this launch pinned through the environment, which the
     /// agent will therefore refuse to change for as long as the process lives.
     ///
-    /// Cline forced this. codeg pins the provider with `CLINE_PROVIDER` — the
+    /// Cline forced this. harness_studio pins the provider with `CLINE_PROVIDER` — the
     /// only way a bring-your-own provider clears cline's ACP auth gate — and
     /// cline then answers `set_config_option("provider", …)` with `Invalid
     /// params: Cannot change provider: CLINE_PROVIDER environment variable is
@@ -394,7 +398,7 @@ pub struct SessionState {
     /// preference saved from one of those clicks is replayed — and fails —
     /// on every later connect.
     ///
-    /// codeg is what disabled the control, so codeg is what withholds it: these
+    /// harness_studio is what disabled the control, so harness_studio is what withholds it: these
     /// ids are dropped from what the frontend is told about and skipped when
     /// saved preferences are replayed.
     ///
@@ -452,7 +456,7 @@ pub struct SessionState {
     pub(crate) recent_events: RecentEventsBuffer,
 
     /// Per-launch token registered with the delegation broker's
-    /// `TokenRegistry` when `codeg-mcp` is injected at init.
+    /// `TokenRegistry` when `harness-studio-mcp` is injected at init.
     /// Revoked when the connection tears down so a leaked binary can't
     /// keep round-tripping after the parent session ends.
     pub delegation_token: Option<String>,
@@ -1975,7 +1979,7 @@ impl SessionState {
     /// ## Assumption this rests on
     ///
     /// Bounding only terminal calls assumes the agent reports one. Every agent
-    /// codeg ships does (`upsert_tool_call` inserts at `Pending` and the
+    /// harness_studio ships does (`upsert_tool_call` inserts at `Pending` and the
     /// adapter's completion update moves it), but one that never did would
     /// leave the table untrimmable at any length. Pinned by
     /// `snapshot_ships_an_all_unsettled_table_whole` so a future change has to
@@ -2025,12 +2029,10 @@ impl SessionState {
         // Both halves, because the question the early return answers is
         // "would shipping this whole be over budget", and the image bytes are
         // part of what ships either way.
-        let total = ordered
-            .iter()
-            .fold(0usize, |acc, (_, id, bytes)| {
-                acc.saturating_add(*bytes)
-                    .saturating_add(images_slice_size(&self.active_tool_calls[*id].images))
-            });
+        let total = ordered.iter().fold(0usize, |acc, (_, id, bytes)| {
+            acc.saturating_add(*bytes)
+                .saturating_add(images_slice_size(&self.active_tool_calls[*id].images))
+        });
         if total <= MAX_SNAPSHOT_TOOL_PAYLOAD_BYTES {
             // The ordinary turn: nothing to trim, wire shape byte-identical.
             return self.active_tool_calls.values().cloned().collect();
@@ -2077,7 +2079,7 @@ impl SessionState {
                     content: None,
                     locations: None,
                     // Kept: the delegation broker writes the parent↔child
-                    // binding here (`meta["codeg.delegation"]`), which is what
+                    // binding here (`meta["harness_studio.delegation"]`), which is what
                     // re-anchors an inline sub-thread on a mid-turn attach.
                     // Bounded by contract — a small status object, not output.
                     meta: tc.meta.clone(),
@@ -2133,12 +2135,12 @@ impl SessionState {
 /// Max age of the background keep-alive: how long a connection with
 /// launched-but-unresolved background work stays exempt from the idle sweeps
 /// after the LAST `BackgroundActivity` event. Configurable via
-/// `CODEG_ACP_BACKGROUND_KEEPALIVE_MAX_SECS` (seconds; invalid → default 3600;
+/// `HARNESS_STUDIO_ACP_BACKGROUND_KEEPALIVE_MAX_SECS` (seconds; invalid → default 3600;
 /// `0` disables the exemption entirely). Read once per process.
 pub(crate) fn background_keepalive_max_age() -> chrono::Duration {
     static SECS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     let secs = *SECS.get_or_init(|| {
-        std::env::var("CODEG_ACP_BACKGROUND_KEEPALIVE_MAX_SECS")
+        std::env::var("HARNESS_STUDIO_ACP_BACKGROUND_KEEPALIVE_MAX_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<i64>().ok())
             // `chrono::Duration::seconds` below is an `expect` over
@@ -2567,7 +2569,7 @@ mod tests {
 
     /// Only the spawn frame carries a task's identity, so it is the only one
     /// allowed to create a row: a progress delta for an id we never saw
-    /// announced means codeg failed to read the announcement, and a row with a
+    /// announced means harness_studio failed to read the announcement, and a row with a
     /// placeholder name and no type is worse than no row at all.
     #[test]
     fn async_task_rows_are_created_only_by_a_spawn_delta() {
@@ -2624,7 +2626,10 @@ mod tests {
         assert_eq!(row.task_type, "shell");
         assert_eq!(row.last_tool_name.as_deref(), Some("Bash"));
         assert_eq!(row.usage.as_ref().unwrap().total_tokens, 1200);
-        assert_eq!(row.output_file_path.as_deref(), Some("/tmp/tasks/t1.output"));
+        assert_eq!(
+            row.output_file_path.as_deref(),
+            Some("/tmp/tasks/t1.output")
+        );
 
         // The adapter revises a task AFTER it settles — correcting a
         // best-effort `stopped` into the real outcome, or attaching a late
@@ -2754,7 +2759,10 @@ mod tests {
             parent_tool_use_id: None,
         });
         assert!(s.begin_agent_initiated_turn());
-        assert!(s.live_message.is_none(), "the turn starts from a clean slate");
+        assert!(
+            s.live_message.is_none(),
+            "the turn starts from a clean slate"
+        );
         s.apply_event(&AcpEvent::StatusChanged {
             status: ConnectionStatus::Prompting,
         });
@@ -2819,7 +2827,12 @@ mod tests {
             }
         }
         let mut s = fresh_state();
-        s.apply_event(&failure("t1:error", 5, "warning", "Reconnecting, attempt 5 of 5."));
+        s.apply_event(&failure(
+            "t1:error",
+            5,
+            "warning",
+            "Reconnecting, attempt 5 of 5.",
+        ));
 
         // A cancelled/failed/empty exit is NOT recovery — the incident (e.g.
         // reconnect attempts with the network still down) must stay active
@@ -3271,7 +3284,10 @@ mod tests {
             text: "Answer ".into(),
             parent_tool_use_id: None,
         });
-        s.apply_event(&AcpEvent::Thinking { text: "hmm".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::Thinking {
+            text: "hmm".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::ContentDelta {
             text: "continues here".into(),
             parent_tool_use_id: None,
@@ -3467,9 +3483,18 @@ mod tests {
     #[test]
     fn thinking_delta_creates_separate_block_from_text() {
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "T".into(), parent_tool_use_id: None });
-        s.apply_event(&AcpEvent::Thinking { text: "X".into(), parent_tool_use_id: None });
-        s.apply_event(&AcpEvent::ContentDelta { text: "Y".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "T".into(),
+            parent_tool_use_id: None,
+        });
+        s.apply_event(&AcpEvent::Thinking {
+            text: "X".into(),
+            parent_tool_use_id: None,
+        });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "Y".into(),
+            parent_tool_use_id: None,
+        });
         let live = s.live_message.as_ref().unwrap();
         assert_eq!(live.content.len(), 3);
         match &live.content[0] {
@@ -3764,7 +3789,9 @@ mod tests {
             raw_input: Some(format!("{{\"file_path\":\"src/{id}.rs\"}}")),
             raw_output: None,
             locations: Some(serde_json::json!([{ "path": format!("src/{id}.rs") }])),
-            meta: Some(serde_json::json!({ "codeg.delegation": { "status": "completed" } })),
+            meta: Some(
+                serde_json::json!({ "harness_studio.delegation": { "status": "completed" } }),
+            ),
             images: None,
         });
         let status = if settled { "completed" } else { "in_progress" };
@@ -3873,7 +3900,9 @@ mod tests {
         // The running call keeps its partial output at any size — nothing else
         // has it. So does the newest finished one.
         assert!(by_id["tc-running"].output.is_some());
-        assert!(by_id[format!("tc-{:04}", CALLS - 1).as_str()].output.is_some());
+        assert!(by_id[format!("tc-{:04}", CALLS - 1).as_str()]
+            .output
+            .is_some());
 
         // The oldest finished calls ship without the payload, but keep every
         // field that identifies the card.
@@ -3912,7 +3941,12 @@ mod tests {
         for i in 0..200 {
             run_tool_call(&mut s, &format!("tc-{i:04}"), 16 * 1024, true);
         }
-        run_tool_call(&mut s, "tc-huge", MAX_SNAPSHOT_TOOL_PAYLOAD_BYTES + 1024, false);
+        run_tool_call(
+            &mut s,
+            "tc-huge",
+            MAX_SNAPSHOT_TOOL_PAYLOAD_BYTES + 1024,
+            false,
+        );
 
         let snap = s.to_snapshot();
         let huge = snap
@@ -3990,7 +4024,7 @@ mod tests {
     /// The bound covers terminal calls only, so a table that never reaches one
     /// ships whole however long it gets.
     ///
-    /// Every agent codeg ships reports a terminal status, which is what makes
+    /// Every agent harness_studio ships reports a terminal status, which is what makes
     /// the carve-out for in-flight calls safe. This pins the assumption rather
     /// than leaving it implicit: an agent that stopped reporting one would
     /// turn this test red instead of silently restoring #380.
@@ -4087,7 +4121,10 @@ mod tests {
     #[test]
     fn turn_complete_clears_live_and_tool_calls_and_pending_permission() {
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "hi".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "hi".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::ToolCall {
             tool_call_id: "tc-1".into(),
             title: "x".into(),
@@ -4456,7 +4493,10 @@ mod tests {
             text: String::new(),
             parent_tool_use_id: None,
         });
-        assert!(s.live_message.is_none(), "empty chunk opens no live message");
+        assert!(
+            s.live_message.is_none(),
+            "empty chunk opens no live message"
+        );
         s.apply_event(&AcpEvent::TurnComplete {
             session_id: "ext".into(),
             stop_reason: "end_turn".into(),
@@ -4538,7 +4578,10 @@ mod tests {
         s.apply_event(&AcpEvent::PermissionQueueDepth { depth: 2 });
         let p = s.pending_permission.as_ref().expect("card still up");
         assert_eq!(p.queued, 2);
-        assert_eq!(p.request_id, "p-1", "depth must not change which card is up");
+        assert_eq!(
+            p.request_id, "p-1",
+            "depth must not change which card is up"
+        );
     }
 
     #[test]
@@ -5140,7 +5183,10 @@ mod tests {
     fn plan_update_appends_at_end_replacing_existing() {
         use crate::acp::types::PlanEntryInfo;
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "A".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "A".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
                 content: "step v1".into(),
@@ -5148,7 +5194,10 @@ mod tests {
                 status: "pending".into(),
             }],
         });
-        s.apply_event(&AcpEvent::ContentDelta { text: "B".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "B".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
                 content: "step v2".into(),
@@ -5210,7 +5259,10 @@ mod tests {
     fn turn_complete_clears_plan_and_tool_refs() {
         use crate::acp::types::PlanEntryInfo;
         let mut s = fresh_state();
-        s.apply_event(&AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None });
+        s.apply_event(&AcpEvent::ContentDelta {
+            text: "x".into(),
+            parent_tool_use_id: None,
+        });
         s.apply_event(&tool_call_event("tc-1", "ls"));
         s.apply_event(&AcpEvent::PlanUpdate {
             entries: vec![PlanEntryInfo {
@@ -5240,7 +5292,10 @@ mod tests {
         let env = EventEnvelope {
             seq: 7,
             connection_id: "conn-x".into(),
-            payload: AcpEvent::ContentDelta { text: "abc".into(), parent_tool_use_id: None },
+            payload: AcpEvent::ContentDelta {
+                text: "abc".into(),
+                parent_tool_use_id: None,
+            },
         };
         let json = serde_json::to_string(&env).unwrap();
         let back: EventEnvelope = serde_json::from_str(&json).unwrap();

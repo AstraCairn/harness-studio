@@ -24,8 +24,14 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::app_error::AppCommandError;
-use crate::update::runtime::UpdateCapability;
-use crate::web::event_bridge::{emit_event, EventEmitter};
+// Kept in the serialized update-state shape for desktop consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCapability {
+    Supervised,
+    Reexec,
+}
+use crate::events::{emit_event, EventEmitter};
 
 /// Channel name shared by the live event and the snapshot query.
 pub const APP_UPDATE_STATE_CHANNEL: &str = "app_update_state";
@@ -384,7 +390,7 @@ impl ProgressEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::web::event_bridge::EventEmitter;
+    use crate::events::EventEmitter;
 
     #[test]
     fn try_begin_starts_once_then_attaches() {
@@ -445,12 +451,17 @@ mod tests {
     fn a_command_error_publishes_its_explanation_alongside_the_message() {
         let h = new_handle();
         let e = EventEmitter::Noop;
-        let err = AppCommandError::permission_denied("Update target is not writable: /opt/codeg")
-            .with_detail("Permission denied (os error 13)")
-            .with_i18n(
-                "SystemSettings.updateErrors.permissionDenied",
-                std::collections::BTreeMap::from([("path".to_string(), "/opt/codeg".to_string())]),
-            );
+        let err = AppCommandError::permission_denied(
+            "Update target is not writable: /opt/harness_studio",
+        )
+        .with_detail("Permission denied (os error 13)")
+        .with_i18n(
+            "SystemSettings.updateErrors.permissionDenied",
+            std::collections::BTreeMap::from([(
+                "path".to_string(),
+                "/opt/harness_studio".to_string(),
+            )]),
+        );
 
         assert!(try_begin(&h, &e).0);
         let snap = set_command_error(&h, &e, &err);
@@ -459,19 +470,28 @@ mod tests {
         // clients that only classify strings, `errorInfo` carries the rest.
         let wire = serde_json::to_value(&snap).unwrap();
         assert_eq!(wire["status"], "error");
-        assert_eq!(wire["error"], "Update target is not writable: /opt/codeg");
+        assert_eq!(
+            wire["error"],
+            "Update target is not writable: /opt/harness_studio"
+        );
         assert_eq!(wire["errorInfo"]["code"], "permission_denied");
         assert_eq!(
             wire["errorInfo"]["i18n_key"],
             "SystemSettings.updateErrors.permissionDenied"
         );
-        assert_eq!(wire["errorInfo"]["i18n_params"]["path"], "/opt/codeg");
+        assert_eq!(
+            wire["errorInfo"]["i18n_params"]["path"],
+            "/opt/harness_studio"
+        );
 
         // A retry must not carry the old explanation into the new attempt.
         let (started, retry) = try_begin(&h, &e);
         assert!(started);
         assert!(retry.error_info.is_none());
-        assert!(serde_json::to_value(&retry).unwrap().get("errorInfo").is_none());
+        assert!(serde_json::to_value(&retry)
+            .unwrap()
+            .get("errorInfo")
+            .is_none());
     }
 
     #[test]
@@ -503,10 +523,7 @@ mod tests {
         set_ready(&h, &e, None, None, None, None);
         // Staged: the claim succeeds and flips to Restarting…
         assert!(try_claim_restart(&h, &e));
-        assert_eq!(
-            snapshot(&h).status,
-            AppUpdateLifecycle::Restarting
-        );
+        assert_eq!(snapshot(&h).status, AppUpdateLifecycle::Restarting);
         // …and a second (concurrent) restart click can no longer claim it.
         assert!(!try_claim_restart(&h, &e));
     }

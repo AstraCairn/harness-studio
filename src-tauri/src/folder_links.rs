@@ -48,7 +48,9 @@ fn with_links<R>(f: impl FnOnce(&mut Vec<LinkEntry>) -> R) -> R {
 /// Load every persisted link into the registry, replacing whatever was there.
 /// Called once per process right after migrations, on the single chokepoint
 /// both runtimes go through.
-pub async fn hydrate(conn: &sea_orm::DatabaseConnection) -> Result<usize, crate::db::error::DbError> {
+pub async fn hydrate(
+    conn: &sea_orm::DatabaseConnection,
+) -> Result<usize, crate::db::error::DbError> {
     let rows = crate::db::service::folder_link_service::list_all_with_root(conn).await?;
     let entries: Vec<LinkEntry> = rows
         .into_iter()
@@ -150,8 +152,8 @@ mod tests {
 
     #[test]
     fn register_is_idempotent_and_unregister_removes() {
-        let root = Path::new("/tmp/codeg-registry-a/root");
-        let target = Path::new("/tmp/codeg-registry-a/target");
+        let root = Path::new("/tmp/harness-studio-registry-a/root");
+        let target = Path::new("/tmp/harness-studio-registry-a/target");
         register(root, target);
         register(root, target);
         assert_eq!(count(root, target), 1);
@@ -163,8 +165,8 @@ mod tests {
     fn unknown_paths_are_denied() {
         // Neither path exists, so canonicalization fails and no entry can match.
         assert!(!is_allowed(
-            Path::new("/tmp/codeg-registry-b/root"),
-            Path::new("/tmp/codeg-registry-b/elsewhere/file.txt")
+            Path::new("/tmp/harness-studio-registry-b/root"),
+            Path::new("/tmp/harness-studio-registry-b/elsewhere/file.txt")
         ));
     }
 }

@@ -3,25 +3,24 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::acp::agent_process::AcpAgent;
+use crate::acp::agent_session::AgentSession;
 use agent_client_protocol::schema::v1::{
     BlobResourceContents, CancelNotification, ClientCapabilities, ClientSessionCapabilities,
-    CloseSessionRequest, CompactionCapabilities, ContentBlock, ContentChunk,
-    CreateTerminalRequest, CreateTerminalResponse, ElicitationCapabilities,
-    ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource,
-    FileSystemCapabilities, ImageContent, InitializeRequest,
-    KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, NoticeCapabilities, PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus,
-    PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
+    CloseSessionRequest, CompactionCapabilities, ContentBlock, ContentChunk, CreateTerminalRequest,
+    CreateTerminalResponse, ElicitationCapabilities, ElicitationFormCapabilities, EmbeddedResource,
+    EmbeddedResourceResource, FileSystemCapabilities, ImageContent, InitializeRequest,
+    KillTerminalRequest, KillTerminalResponse, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, NoticeCapabilities, PermissionOptionKind, Plan, PlanEntryPriority,
+    PlanEntryStatus, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, ResourceLink, ResumeSessionRequest,
     ResumeSessionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectGroup,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionId, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TerminalExitStatus,
-    TerminalOutputRequest, TerminalOutputResponse, TextContent, TextResourceContents,
-    ToolCallContent, ToolCallLocation, ToolKind, WaitForTerminalExitRequest,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    StopReason, TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse, TextContent,
+    TextResourceContents, ToolCallContent, ToolCallLocation, ToolKind, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::schema::v1::{
@@ -34,8 +33,6 @@ use agent_client_protocol::{
     HandleDispatchFrom, Handled, JsonRpcRequest, RequestCancellation, Responder, Role,
     UntypedMessage,
 };
-use crate::acp::agent_process::AcpAgent;
-use crate::acp::agent_session::AgentSession;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::acp::agent_mentions::append_agent_routes;
@@ -63,13 +60,11 @@ use crate::acp::types::{
     SessionConfigSelectInfo, SessionConfigSelectOptionInfo, SessionFailureRecord, SessionModeInfo,
     SessionModeStateInfo, SessionNotice, ToolCallImageInfo, UserMessageBlock,
 };
+use crate::events::{emit_with_state, emit_with_state_built, emit_with_state_gated, EventEmitter};
 use crate::logging::throttle::LeadingEdgeThrottle;
 use crate::models::agent::AgentType;
 use crate::network::proxy;
 use crate::parsers::COMPACTION_SUMMARY_META_KEY;
-use crate::web::event_bridge::{
-    emit_with_state, emit_with_state_built, emit_with_state_gated, EventEmitter,
-};
 
 /// Injected into the agent process only when the user has opted in — see
 /// [`force_command_color_enabled`] for why it is not a default.
@@ -94,15 +89,15 @@ use crate::web::event_bridge::{
 ///   toggle used to do nothing for the build command most people run first.
 /// - `TERM` — not a color flag, a precondition for the others. BSD `ls` resolves
 ///   its palette through `tgetent(getenv("TERM"))` and stays monochrome when
-///   TERM names nothing, which is the normal case for a codeg launched from
+///   TERM names nothing, which is the normal case for a harness_studio launched from
 ///   Finder rather than from a shell. `supports-color` reads it too, and answers
 ///   256 colors for a `-256color` suffix where `FORCE_COLOR=1` alone caps at 16.
 ///
 /// `TERM` is the one entry here that OVERRIDES an inherited value rather than
 /// filling in a missing one (`merge_agent_env` lists what a launch sets;
 /// everything else is inherited). That is deliberate: the agent's stdout is a
-/// pipe to codeg and never a terminal, so an inherited `TERM` describes the
-/// shell that happened to start codeg — `screen-256color` under tmux, nothing
+/// pipe to harness_studio and never a terminal, so an inherited `TERM` describes the
+/// shell that happened to start harness_studio — `screen-256color` under tmux, nothing
 /// at all under Finder — not anything the agent is attached to. Pinning one
 /// known-good entry is what makes the toggle behave the same in a packaged app
 /// as in `pnpm tauri dev`. A per-agent env row still outranks all four.
@@ -128,14 +123,14 @@ static FORCE_COMMAND_COLOR: AtomicBool = AtomicBool::new(false);
 /// environment.
 ///
 /// **Off by default**, which is a behavior change: launches used to force
-/// `CLICOLOR_FORCE` unconditionally. The feature it buys is real — codeg
+/// `CLICOLOR_FORCE` unconditionally. The feature it buys is real — harness_studio
 /// preserves ANSI through tool-call output streaming ([`trim_partial_ansi_tail`])
 /// so the transcript's `<Terminal>` card renders command output in color — but
 /// the cost was paid by everything else in the process tree.
 ///
-/// codeg cannot scope the force to the output it renders. Agents like Claude
+/// harness_studio cannot scope the force to the output it renders. Agents like Claude
 /// Code run their bash tool IN-PROCESS, so the commands whose color shows up in
-/// the card are not spawned by codeg at all; the only reachable lever is the
+/// the card are not spawned by harness_studio at all; the only reachable lever is the
 /// agent's own environment, which every descendant inherits. So the same
 /// variables that color the terminal card also color the output the agent pipes
 /// into `jq` — and neither force flag can be vetoed downstream: `CLICOLOR_FORCE`
@@ -216,7 +211,7 @@ fn merge_agent_env_with_color(
     proxy::add_no_proxy_to_launch_env(&mut merged, &proxy::current_no_proxy_env_vars());
 
     // Ensure agent-invoked `officecli …` (from an enabled office skill) resolves
-    // even when codeg installed the binary outside the user's shell PATH — the
+    // even when harness_studio installed the binary outside the user's shell PATH — the
     // Windows self-managed dir, or `~/.local/bin` under a GUI launch.
     prepend_officecli_path(&mut merged);
 
@@ -224,10 +219,10 @@ fn merge_agent_env_with_color(
     // a style choice. A self-extracting agent binary resolves its unpack
     // location from `TMP` before `TEMP` (Windows `GetTempPathW`), so leaving a
     // per-agent `env_json` `TMP` in place would send a 1.17 GB extraction
-    // wherever that points while codeg cheerfully deleted an empty scratch
+    // wherever that points while harness_studio cheerfully deleted an empty scratch
     // directory and reported the leak fixed. Users who want the churn on
-    // another volume set `CODEG_ACP_TMP_ROOT`; users who want the old
-    // pass-through wholesale set `CODEG_ACP_TMP_ISOLATION=0`.
+    // another volume set `HARNESS_STUDIO_ACP_TMP_ROOT`; users who want the old
+    // pass-through wholesale set `HARNESS_STUDIO_ACP_TMP_ISOLATION=0`.
     if let Some(dir) = scratch {
         crate::acp::scratch_dir::apply_to_env(&mut merged, dir);
     }
@@ -268,14 +263,15 @@ pub(crate) fn cursor_force_enabled(value: Option<&str>) -> bool {
 /// Gated on the explicit `CURSOR_AUTH_MODE` knob (written by the Cursor panel),
 /// so legacy rows and operator-provided container env are left untouched. In
 /// custom mode the credentials are present and non-empty, so nothing is cleared.
-fn apply_cursor_env_policy(merged: &mut Vec<(String, String)>, runtime_env: &BTreeMap<String, String>) {
+fn apply_cursor_env_policy(
+    merged: &mut Vec<(String, String)>,
+    runtime_env: &BTreeMap<String, String>,
+) {
     if runtime_env.get("CURSOR_AUTH_MODE").map(String::as_str) != Some("subscription") {
         return;
     }
     for key in ["CURSOR_API_KEY", "CURSOR_API_BASE_URL"] {
-        let already_set = merged
-            .iter()
-            .any(|(k, v)| k == key && !v.trim().is_empty());
+        let already_set = merged.iter().any(|(k, v)| k == key && !v.trim().is_empty());
         if !already_set {
             merged.retain(|(k, _)| k != key);
             merged.push((key.to_string(), String::new()));
@@ -292,21 +288,22 @@ fn apply_cursor_env_policy(merged: &mut Vec<(String, String)>, runtime_env: &BTr
 /// (`acp::agent_process`) to `env_remove` the inherited var. In api_key mode the key is
 /// present and non-empty, so nothing is cleared; legacy/no-mode rows are left
 /// untouched.
-fn apply_grok_env_policy(merged: &mut Vec<(String, String)>, runtime_env: &BTreeMap<String, String>) {
+fn apply_grok_env_policy(
+    merged: &mut Vec<(String, String)>,
+    runtime_env: &BTreeMap<String, String>,
+) {
     if runtime_env.get("GROK_AUTH_MODE").map(String::as_str) != Some("subscription") {
         return;
     }
     let key = "XAI_API_KEY";
-    let already_set = merged
-        .iter()
-        .any(|(k, v)| k == key && !v.trim().is_empty());
+    let already_set = merged.iter().any(|(k, v)| k == key && !v.trim().is_empty());
     if !already_set {
         merged.retain(|(k, _)| k != key);
         merged.push((key.to_string(), String::new()));
     }
 }
 
-/// codeg-side knob recording which Antigravity auth method the settings panel
+/// harness-studio-side knob recording which Antigravity auth method the settings panel
 /// chose. It is NOT read by the agent — the server takes its auth intent from
 /// `auth.type` in `antigravity-acp/settings.json` — so the launch path uses it
 /// twice: to decide which credential env vars may reach the process
@@ -316,7 +313,7 @@ const ANTIGRAVITY_AUTH_METHOD_ENV: &str = "AGY_AUTH_METHOD";
 
 /// The four `auth.type` values Antigravity's ACP server accepts, canonical
 /// spellings only. `vertex-ai` is the pre-rebrand alias for `agent-platform`;
-/// the server still accepts it, but codeg never writes it.
+/// the server still accepts it, but harness_studio never writes it.
 const ANTIGRAVITY_AUTH_METHODS: &[&str] = &[
     "oauth-personal",
     "oauth-business",
@@ -385,7 +382,7 @@ fn antigravity_env_vars_for_method(method: &str) -> &'static [&'static str] {
 /// override the project the user explicitly filled in, sending the session to
 /// another account and another billing target with nothing on screen to say so.
 /// The same reasoning covers an inherited `GOOGLE_CLOUD_PROJECT`, which would
-/// otherwise outrank the `gcp` block in the settings file codeg just wrote.
+/// otherwise outrank the `gcp` block in the settings file harness_studio just wrote.
 ///
 /// The cost is that a credential supplied ONLY by the surrounding environment
 /// stops working once a method is recorded — but the panel already warns about
@@ -410,10 +407,8 @@ fn apply_antigravity_env_policy(
     };
     let keep = antigravity_env_vars_for_method(method);
     for key in ANTIGRAVITY_CREDENTIAL_ENV_VARS {
-        let kept = keep.contains(key)
-            && merged
-                .iter()
-                .any(|(k, v)| k == key && !v.trim().is_empty());
+        let kept =
+            keep.contains(key) && merged.iter().any(|(k, v)| k == key && !v.trim().is_empty());
         if kept {
             continue;
         }
@@ -428,20 +423,20 @@ fn apply_antigravity_env_policy(
 ///
 /// This is load-bearing, not a convenience: `session/new` fails outright with
 /// `-32000 Authentication required` when that file declares no `auth.type`
-/// (environment-based selection was removed upstream), and codeg does not
+/// (environment-based selection was removed upstream), and harness_studio does not
 /// implement the ACP `authenticate` request that would otherwise set it. With
 /// the file in place the server runs its own browser OAuth loopback flow inside
 /// `session/new`, so writing it is what makes the agent usable at all.
 ///
 /// Deliberately a READ-MODIFY-WRITE merge of only three keys. The file is the
 /// user's (the server parses it as Hjson and documents it as user-provided), so
-/// unknown keys and any hand-written `gcp` block survive a codeg write.
+/// unknown keys and any hand-written `gcp` block survive a harness_studio write.
 ///
 /// FAILS CLOSED, exactly like the server's own `settings_writer`: "a file that
 /// cannot be parsed is left alone, since rewriting it would delete content we
 /// could not read." A missing file means "create"; a read error, a parse error
-/// or a non-object root all mean "give up". The one place codeg is stricter is
-/// the dialect — the server parses Hjson (comments, trailing commas) and codeg
+/// or a non-object root all mean "give up". The one place harness_studio is stricter is
+/// the dialect — the server parses Hjson (comments, trailing commas) and harness_studio
 /// only strict JSON, so a hand-commented file lands in the give-up branch
 /// rather than being flattened. The warning names the file so the user can set
 /// `auth.type` there themselves; the panel shows that same path.
@@ -537,7 +532,10 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
         }
         Err(err) => {
             tracing::warn!("[ACP][Antigravity] cannot write {}: {err}", path.display());
-            AntigravitySyncReport::skipped(&path, format!("codeg could not write it ({err})"))
+            AntigravitySyncReport::skipped(
+                &path,
+                format!("harness_studio could not write it ({err})"),
+            )
         }
     }
 }
@@ -548,7 +546,7 @@ fn sync_antigravity_settings_file(runtime_env: &BTreeMap<String, String>) -> Ant
 /// a local `PathBuf::from`, because `GEMINI_HOME` is one of the variables whose
 /// upstream runs `os.path.expanduser`. Building the path by hand made
 /// `GEMINI_HOME=~/somewhere` mean two different directories: the server read
-/// `$HOME/somewhere`, while codeg created a folder literally named `~` under
+/// `$HOME/somewhere`, while harness_studio created a folder literally named `~` under
 /// whatever directory it happened to be launched from — and wrote the
 /// `auth.type` there, so `session/new` still failed with `Authentication
 /// required` no matter how many times the panel was saved.
@@ -569,7 +567,7 @@ fn antigravity_acp_dir_for_env(runtime_env: &BTreeMap<String, String>) -> Result
     antigravity_acp_dir_with_inherited(runtime_env, std::env::var_os("GEMINI_HOME"))
 }
 
-/// [`antigravity_acp_dir_for_env`] with codeg's own `GEMINI_HOME` handed in.
+/// [`antigravity_acp_dir_for_env`] with harness_studio's own `GEMINI_HOME` handed in.
 ///
 /// Split out so the three-state resolution can be tested without mutating the
 /// process environment. A `temp_env` writer would race every other test that
@@ -583,10 +581,10 @@ fn antigravity_acp_dir_with_inherited(
     // Three states, and they are NOT interchangeable — the same distinction
     // [`crate::acp::file_system_runtime::child_home_dir`] spells out for `HOME`,
     // for the same reason. `merge_agent_env` names only the variables a launch
-    // SETS, so an ABSENT key means the child inherits codeg's value, and a
+    // SETS, so an ABSENT key means the child inherits harness_studio's value, and a
     // container that relocates the tree does exactly that: `GEMINI_HOME` in the
     // image's own environment, nothing in the per-agent row. Reading only the
-    // row made codeg write `auth.type` — and name the token file — under
+    // row made harness_studio write `auth.type` — and name the token file — under
     // `~/.gemini` (i.e. `/root/.gemini`) while the agent used the relocated
     // one, so the file the panel talked about was never the file the session
     // read.
@@ -600,13 +598,13 @@ fn antigravity_acp_dir_with_inherited(
         // reaches the child verbatim and trimming here would name a directory
         // it never opens.
         Some(value) => Some(std::ffi::OsString::from(value)),
-        // Absent: the child inherits codeg's environment, so codeg's own answer
+        // Absent: the child inherits harness_studio's environment, so harness_studio's own answer
         // is exact. Empty is filtered because the server's `paths.py` treats an
         // empty `GEMINI_HOME` as unset (`if not home`).
         None => inherited.filter(|value| !value.is_empty()),
     };
 
-    // The CHILD's home, not codeg's. `merge_agent_env` copies `HOME` into the
+    // The CHILD's home, not harness_studio's. `merge_agent_env` copies `HOME` into the
     // child like any other variable, so a launch that relocates it moves both
     // the `~/.gemini` default and any `~` in `GEMINI_HOME` with it — and the
     // server, running `os.path.expanduser` in that environment, resolves them
@@ -618,7 +616,7 @@ fn antigravity_acp_dir_with_inherited(
     let home = crate::acp::file_system_runtime::child_home_dir(runtime_env);
     if needs_home && home.is_none() {
         return Err(
-            "codeg cannot tell which home directory the agent will use (this launch removes \
+            "harness_studio cannot tell which home directory the agent will use (this launch removes \
              HOME, or points it somewhere relative), so it cannot tell where the file is"
                 .to_string(),
         );
@@ -775,12 +773,12 @@ pub fn is_antigravity_auth_method(method_id: &str) -> bool {
     ANTIGRAVITY_AUTH_METHODS.contains(&method_id)
 }
 
-/// What codeg can say about the method the ACP server will authenticate with.
+/// What harness_studio can say about the method the ACP server will authenticate with.
 ///
 /// Three states, and [`Unreadable`](Self::Unreadable) is emphatically not a
-/// flavor of [`Absent`](Self::Absent). The server parses Hjson and codeg only
-/// strict JSON, so a file codeg cannot read is one the SERVER can — it names a
-/// method, codeg just cannot see which. Collapsing the two would let a caller
+/// flavor of [`Absent`](Self::Absent). The server parses Hjson and harness_studio only
+/// strict JSON, so a file harness_studio cannot read is one the SERVER can — it names a
+/// method, harness_studio just cannot see which. Collapsing the two would let a caller
 /// treat "I have no idea" as "there is nothing there", which for the sign-out
 /// means aiming `logout` at a flavor with nothing to clear and reporting the
 /// `{}` it answers as a success.
@@ -791,7 +789,7 @@ pub enum AntigravityAuthType {
     /// No file, or a file that names no method. The server has nothing to
     /// infer from either, and falls back to its own defaults.
     Absent,
-    /// codeg could not read or parse it. The server still can.
+    /// harness_studio could not read or parse it. The server still can.
     Unreadable,
 }
 
@@ -824,13 +822,13 @@ pub fn antigravity_effective_auth_type(
         .filter(|value| !value.is_empty())
         // The server resolves the legacy spelling before it tests membership,
         // so a caller matching on canonical ids would otherwise miss it.
-        .map(|value| AntigravityAuthType::Declared(
-            canonical_antigravity_auth_method(value).to_string(),
-        ))
+        .map(|value| {
+            AntigravityAuthType::Declared(canonical_antigravity_auth_method(value).to_string())
+        })
         .unwrap_or(AntigravityAuthType::Absent)
 }
 
-/// The pre-rebrand `vertex-ai` spelling resolved to the id codeg uses.
+/// The pre-rebrand `vertex-ai` spelling resolved to the id harness_studio uses.
 fn canonical_antigravity_auth_method(method: &str) -> &str {
     match method {
         "vertex-ai" => "agent-platform",
@@ -853,7 +851,7 @@ pub fn antigravity_acp_dir_for_runtime_env(
 /// Read `settings.json` for editing.
 ///
 /// `Ok(None)` means "no file, safe to create". `Err` means "do not touch it" —
-/// unreadable, not JSON codeg can parse, or not a JSON object.
+/// unreadable, not JSON harness_studio can parse, or not a JSON object.
 fn read_antigravity_settings(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -861,7 +859,7 @@ fn read_antigravity_settings(path: &Path) -> Result<Option<serde_json::Value>, S
         Err(err) => return Err(format!("could not read it ({err})")),
     };
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|err| {
-        format!("it is not strict JSON codeg can rewrite without losing content ({err})")
+        format!("it is not strict JSON harness studio can rewrite without losing content ({err})")
     })?;
     if !parsed.is_object() {
         return Err("it does not hold a JSON object".to_string());
@@ -884,7 +882,10 @@ fn write_antigravity_settings(
     let parent = target.parent().unwrap_or(acp_dir);
     std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
 
-    let temp = parent.join(format!(".settings.json.codeg-{}.tmp", std::process::id()));
+    let temp = parent.join(format!(
+        ".settings.json.harness-studio-{}.tmp",
+        std::process::id()
+    ));
     std::fs::write(&temp, format!("{body}\n")).map_err(|err| err.to_string())?;
     if let Err(err) = std::fs::rename(&temp, &target) {
         let _ = std::fs::remove_file(&temp);
@@ -896,7 +897,7 @@ fn write_antigravity_settings(
 /// Merge the panel's choice into a parsed `settings.json`.
 ///
 /// `Ok(None)` means the file already says exactly this, so the caller can skip
-/// the write. `Err` means a block codeg would have to edit is not the shape it
+/// the write. `Err` means a block harness_studio would have to edit is not the shape it
 /// expects — the same fail-closed rule the read side applies to the whole
 /// document, and the same one the server's own `settings_writer` applies here
 /// ("not editing %r because `auth` is not an object"). Replacing a non-object
@@ -954,10 +955,7 @@ fn merge_antigravity_settings(
         // keeps a strange `gcp` from blocking an `auth.type` update when there
         // is nothing to say about it at all. Only a `Set` — which really would
         // have to replace that value — earns the refusal.
-        let clearable = clears
-            && obj
-                .get("gcp")
-                .is_some_and(serde_json::Value::is_object);
+        let clearable = clears && obj.get("gcp").is_some_and(serde_json::Value::is_object);
         if writes || clearable {
             match obj.get("gcp") {
                 None | Some(serde_json::Value::Null) => {
@@ -993,11 +991,11 @@ fn merge_antigravity_settings(
 }
 
 /// Codex-only launch policy: force codex-acp's MCP name-conflict de-duplication
-/// OFF. codeg injects its companion server (`codeg-mcp`) over ACP
+/// OFF. harness_studio injects its companion server (`harness-studio-mcp`) over ACP
 /// `session/new.mcpServers`; codex-acp otherwise drops any ACP-passed server
 /// whose name collides with a `config.toml` entry — global *or* project layer
 /// (the check was widened to project `.codex/config.toml` in codex-acp #322) —
-/// silently stripping codeg-mcp and with it ask_user_question / delegation /
+/// silently stripping harness-studio-mcp and with it ask_user_question / delegation /
 /// feedback / session_info. The late `retain` + `push` makes the override win
 /// over any user `runtime_env` twin, so the injection is guaranteed to survive.
 /// Codex launch env policy. `initial_agent_mode` is the preset resolved from
@@ -1124,7 +1122,7 @@ fn prepend_agent_install_dirs_path(env: &mut Vec<(String, String)>, agent_type: 
     *env = map.into_iter().collect();
 }
 
-/// Prepend codeg's known OfficeCLI install dir to `env`'s PATH when officecli is
+/// Prepend harness_studio's known OfficeCLI install dir to `env`'s PATH when officecli is
 /// installed there but not yet on the live PATH (see
 /// `office_tools::officecli_agent_path_dir`). Applied to both the agent process
 /// env (`merge_agent_env`) and the ACP terminal runtime's base env, so an
@@ -1250,14 +1248,14 @@ pub enum ConnectionCommand {
 /// Sentinel string embedded in a `agent_client_protocol::Error` when the Initialize
 /// handshake times out. Converted back to `AcpError::InitializeTimeout`
 /// by the outer `.map_err(...)` in `run_connection`.
-const INIT_TIMEOUT_SENTINEL: &str = "__codeg_init_timeout__";
+const INIT_TIMEOUT_SENTINEL: &str = "__harness_studio_init_timeout__";
 
-/// Sentinel appended to a `session/new` failure when codeg had just forwarded
+/// Sentinel appended to a `session/new` failure when harness_studio had just forwarded
 /// MCP servers to a *custom* agent, so the outer `.map_err(...)` can raise
 /// `AcpError::McpRejectedByAgent` and point the user at the `supports_mcp`
 /// switch. Same trick as [`INIT_TIMEOUT_SENTINEL`] — the inner future is typed
-/// to `agent_client_protocol::Error`, which has nowhere to carry a codeg error kind.
-const MCP_SUSPECT_SENTINEL: &str = "__codeg_mcp_suspect__";
+/// to `agent_client_protocol::Error`, which has nowhere to carry a harness_studio error kind.
+const MCP_SUSPECT_SENTINEL: &str = "__harness_studio_mcp_suspect__";
 
 /// Sentinel appended to a `session/new` failure the agent answered with ACP's
 /// `authRequired`, so the outer `.map_err(...)` can raise
@@ -1266,13 +1264,13 @@ const MCP_SUSPECT_SENTINEL: &str = "__codeg_mcp_suspect__";
 /// typed to, and this is the one classification that has to be made while it
 /// is still there — the wire text alone is the agent's own wording, which for
 /// cursor-agent names a command that does not exist.
-const AUTH_REQUIRED_SENTINEL: &str = "__codeg_auth_required__";
+const AUTH_REQUIRED_SENTINEL: &str = "__harness_studio_auth_required__";
 
 /// Sentinel appended to a `session/new` or `session/load` failure that is pi-acp
 /// reporting a pi too old for it ([`pi_runtime_is_outdated`]), so the outer
 /// `.map_err(...)` can raise `AcpError::AgentRuntimeOutdated`. Same trick as
 /// [`INIT_TIMEOUT_SENTINEL`].
-const PI_RUNTIME_OUTDATED_SENTINEL: &str = "__codeg_pi_runtime_outdated__";
+const PI_RUNTIME_OUTDATED_SENTINEL: &str = "__harness_studio_pi_runtime_outdated__";
 
 /// [`pi_runtime_is_outdated`]'s verdict, carried out of the typed inner future
 /// on [`PI_RUNTIME_OUTDATED_SENTINEL`].
@@ -1302,20 +1300,25 @@ fn tag_new_session_failure(
     if let Some(tagged) = tag_pi_runtime_outdated(&err, agent_type) {
         return tagged;
     }
-    if matches!(err.code, agent_client_protocol::schema::v1::ErrorCode::AuthRequired) {
+    if matches!(
+        err.code,
+        agent_client_protocol::schema::v1::ErrorCode::AuthRequired
+    ) {
         tracing::warn!("[ACP][{agent_type}] session/new refused with authRequired: {err}");
-        return agent_client_protocol::util::internal_error(format!("{err}{AUTH_REQUIRED_SENTINEL}"));
+        return agent_client_protocol::util::internal_error(format!(
+            "{err}{AUTH_REQUIRED_SENTINEL}"
+        ));
     }
     tag_mcp_suspect(err, agent_type, mcp_servers)
 }
 
-/// Mark a `session/new` failure as possibly caused by the MCP servers codeg put
+/// Mark a `session/new` failure as possibly caused by the MCP servers harness_studio put
 /// on the wire.
 ///
 /// Restricted to custom agents on purpose. A built-in's `supports_mcp` is a
 /// repository constant already verified against the real agent, so blaming MCP
 /// there would send the user chasing a switch that isn't wrong (and that they
-/// cannot flip). A custom agent's is a user declaration about a binary codeg
+/// cannot flip). A custom agent's is a user declaration about a binary harness_studio
 /// knows nothing about — the case this hint is for. An empty list rules MCP out
 /// entirely, since then nothing was forwarded to reject.
 fn tag_mcp_suspect(
@@ -1440,7 +1443,7 @@ impl AgentConnection {
 /// Directory handed to codex-acp via `APP_SERVER_LOGS` so its adapter-side
 /// (ACP ↔ Codex app-server translation) logs land on disk for support.
 ///
-/// Roots under the same `<cache>/app.codeg` tree as
+/// Roots under the same `<cache>/com.harnessstudio.desktop` tree as
 /// [`binary_cache::cache_dir`] for consistency. Returns `None` — and the
 /// caller injects nothing — when the system cache dir is unknown or the
 /// directory can't be created: diagnostics must never block a connection.
@@ -1514,14 +1517,14 @@ fn pi_runtime_is_outdated(err: &agent_client_protocol::Error, agent_type: AgentT
 /// The explanation [`AcpError::AgentRuntimeOutdated`] carries for pi.
 fn pi_runtime_outdated_message() -> String {
     format!(
-        "Pi is too old for this version of Codeg: opening a session needs Pi {} or newer. \
+        "Pi is too old for this version of HarnessStudio: opening a session needs Pi {} or newer. \
          Update it with npm install -g @earendil-works/pi-coding-agent, or choose a newer \
          custom command in Agent Settings → Pi → Runtime.",
         registry::PI_MIN_RUNTIME_VERSION
     )
 }
 
-/// Transcript directory for an agent that codeg must record itself, or `None`
+/// Transcript directory for an agent that harness_studio must record itself, or `None`
 /// for agents with their own store parser.
 ///
 /// Only custom ACP agents are recorded: every built-in has a dedicated parser
@@ -1543,7 +1546,7 @@ fn record_transcript_header(agent_type: AgentType, session_id: &str, cwd: &str) 
 /// [`record_transcript_header`] for a session that carries an existing
 /// conversation forward.
 ///
-/// `continues_from` is set when `session/load` failed and codeg opened a fresh
+/// `continues_from` is set when `session/load` failed and harness_studio opened a fresh
 /// agent session for the same conversation: the earlier turns stay where they
 /// are and this header links back to them, so the reader still sees one
 /// history. See [`crate::acp_transcript::TranscriptHeader::continues_from`].
@@ -1611,7 +1614,7 @@ fn queue_transcript_header(
 ///
 /// The window is small but reachable (the writer can be behind on a slow disk,
 /// and a conversation can be torn down between its first prompt and its turn
-/// end, which is the other place codeg waits). A prompt happens once per turn,
+/// end, which is the other place harness_studio waits). A prompt happens once per turn,
 /// so closing it costs one disk write per turn — nothing the user can perceive,
 /// against a failure that is permanent and silent.
 async fn record_prompt(agent_type: AgentType, session_id: &str, blocks: &[ContentBlock]) {
@@ -1680,9 +1683,7 @@ async fn record_turn_end(
 /// boolean — see `config_option_already_holds`).
 ///
 /// Used to carry a session's selectors across a fork.
-fn current_config_option_values(
-    opts: &[SessionConfigOptionInfo],
-) -> BTreeMap<String, String> {
+fn current_config_option_values(opts: &[SessionConfigOptionInfo]) -> BTreeMap<String, String> {
     opts.iter()
         .map(|opt| {
             let value = match &opt.kind {
@@ -1872,7 +1873,7 @@ async fn build_agent(
                 if let Some(message) = pi_launch_preflight(&launch_env, cwd) {
                     return Err(AcpError::SdkNotInstalled(message));
                 }
-                // NOTE: codeg deliberately does NOT touch pi's `trust.json` here.
+                // NOTE: harness_studio deliberately does NOT touch pi's `trust.json` here.
                 // It used to mark this workspace trusted on every launch, which
                 // made pi load the repo's own `.pi/*` — including `.pi/extensions`,
                 // JS/TS modules whose top level executes at pi startup with the
@@ -1906,11 +1907,11 @@ async fn build_agent(
             };
             apply_codex_env_policy(agent_type, &mut merged_env, codex_initial_mode.as_deref());
             // codex-acp 1.0.0 honors APP_SERVER_LOGS as a directory for its
-            // adapter-side logs. Surface it only under CODEG_ACP_DEBUG so
+            // adapter-side logs. Surface it only under HARNESS_STUDIO_ACP_DEBUG so
             // default runs are unchanged; a directory-creation failure silently
             // skips injection (diagnostics must never block a connect).
             let want_codex_logs = agent_type == AgentType::Codex
-                && std::env::var("CODEG_ACP_DEBUG")
+                && std::env::var("HARNESS_STUDIO_ACP_DEBUG")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
             if want_codex_logs {
@@ -1934,14 +1935,14 @@ async fn build_agent(
             );
             // Grok's root-level launch flags go BEFORE its `agent stdio`
             // subcommand (which rejects them):
-            //  - `--no-auto-update`: codeg owns the pinned version, so suppress the
+            //  - `--no-auto-update`: harness_studio owns the pinned version, so suppress the
             //    CLI's background self-update (it would drift off the pin and can
             //    break the ACP contract). Config twin: `[cli].auto_update = false`.
             //  - `--permission-mode <value>`: grok's real permission enum
             //    (default/acceptEdits/auto/dontAsk/bypassPermissions/plan), read
             //    from the Grok panel's `[ui].permission_mode`. Only passed for a
             //    non-`default` mode; `default`/unset leaves it off so ACP
-            //    permission requests still reach codeg's UI. (Grok exposes no ACP
+            //    permission requests still reach harness_studio's UI. (Grok exposes no ACP
             //    `modes` channel for permission — verified against 0.2.99 — so this
             //    launch flag, not a live `session/set_mode`, is the control point.)
             if agent_type == AgentType::Grok {
@@ -1987,7 +1988,7 @@ async fn build_agent(
                 .map(|a| {
                     // `false`: this branch never logged stdin/stdout, and the
                     // shared callback must not quietly widen that. Only the
-                    // Binary branch opts into the CODEG_ACP_DEBUG stdio dump.
+                    // Binary branch opts into the HARNESS_STUDIO_ACP_DEBUG stdio dump.
                     a.with_debug(agent_debug_callback(agent_name, tail, false))
                 })
                 .map_err(|e| AcpError::SpawnFailed(e.to_string()))
@@ -2032,10 +2033,7 @@ async fn build_agent(
             let (binary_path, cached_version) = match cached {
                 Some((path, cached_version)) => {
                     if cached_version == registry_version {
-                        tracing::info!(
-                            "[ACP][{}] Using cached binary {cached_version}",
-                            meta.name
-                        );
+                        tracing::info!("[ACP][{}] Using cached binary {cached_version}", meta.name);
                     } else {
                         tracing::info!(
                             "[ACP][{}] Using cached binary {cached_version} (registry recommends {registry_version})",
@@ -2047,12 +2045,12 @@ async fn build_agent(
                 None => {
                     let system =
                         crate::commands::acp::resolve_system_agent_binary_for(agent_type, cmd)
-                        .ok_or_else(|| {
-                            AcpError::SdkNotInstalled(format!(
-                                "{} is not installed. Please install it in Agent Settings.",
-                                meta.name
-                            ))
-                        })?;
+                            .ok_or_else(|| {
+                                AcpError::SdkNotInstalled(format!(
+                                    "{} is not installed. Please install it in Agent Settings.",
+                                    meta.name
+                                ))
+                            })?;
                     tracing::info!(
                         "[ACP][{}] No cached binary; using system {} from PATH",
                         meta.name,
@@ -2071,7 +2069,7 @@ async fn build_agent(
             // Cursor's ROOT-level `--model <id>` flag precedes the `acp`
             // subcommand and sets the session's default model. Sourced from
             // the Cursor panel's default-model control (env_json key
-            // CURSOR_MODEL — a codeg-side launch knob; the CLI itself reads
+            // CURSOR_MODEL — a harness-studio-side launch knob; the CLI itself reads
             // no model env var).
             if agent_type == AgentType::Cursor {
                 if let Some(model) = runtime_env
@@ -2087,7 +2085,7 @@ async fn build_agent(
                 // never reach session/request_permission (deny rules still
                 // apply, and an org policy can downgrade it to rule-based
                 // approval). Sourced from the panel's permission-mode
-                // control (env_json key CURSOR_FORCE — codeg-side knob; the
+                // control (env_json key CURSOR_FORCE — harness-studio-side knob; the
                 // CLI reads no such env var). Unset means Ask; see
                 // `cursor_force_enabled`.
                 if cursor_force_enabled(runtime_env.get("CURSOR_FORCE").map(String::as_str)) {
@@ -2113,7 +2111,7 @@ async fn build_agent(
                 server = server.args(cmd_args);
             }
             let mut merged_env = merge_agent_env(env, runtime_env, scratch);
-            // codeg launches the binary by absolute path, so this is not about
+            // harness_studio launches the binary by absolute path, so this is not about
             // finding it — it is about the agent finding ITSELF. An agent that
             // re-execs its own CLI for a subtask looks it up on PATH, and a
             // desktop launch never inherits the shell rc line the vendor's
@@ -2166,21 +2164,20 @@ async fn build_agent(
             //   contents, and permission-response payloads — all of
             //   which may contain API keys pasted by users or file
             //   contents the agent is editing. They are gated behind
-            //   the `CODEG_ACP_DEBUG=1` env var so production builds
+            //   the `HARNESS_STUDIO_ACP_DEBUG=1` env var so production builds
             //   don't persist user content into OS-level log files
             //   (Console.app on macOS, journald on Linux).
             // - Max line length is kept short so what does get logged
             //   captures the JSON-RPC envelope (method, id) rather
             //   than large payload bodies.
-            let stdio_debug_enabled = std::env::var("CODEG_ACP_DEBUG")
+            let stdio_debug_enabled = std::env::var("HARNESS_STUDIO_ACP_DEBUG")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
             let agent_name = meta.name.to_string();
             let tail = Arc::clone(stderr_tail);
             Ok(
-                AcpAgent::new(agent_client_protocol::schema::v1::McpServer::Stdio(server)).with_debug(
-                    agent_debug_callback(agent_name, tail, stdio_debug_enabled),
-                ),
+                AcpAgent::new(agent_client_protocol::schema::v1::McpServer::Stdio(server))
+                    .with_debug(agent_debug_callback(agent_name, tail, stdio_debug_enabled)),
             )
         }
         AgentDistribution::Uvx {
@@ -2218,7 +2215,8 @@ async fn build_agent(
                 // than provisioned through uvx.
                 tracing::warn!(
                     "[ACP][{}] uvx unavailable; falling back to system command {:?}",
-                    meta.name, sys_path
+                    meta.name,
+                    sys_path
                 );
                 // `system_cmd` is a complete launch recipe for the PATH binary;
                 // the uvx entry-script `args` don't necessarily apply to it.
@@ -2249,7 +2247,7 @@ async fn build_agent(
     }?;
 
     // Run the agent subprocess in the session's working directory rather than
-    // codeg's own process cwd (a desktop app launched from the Dock often
+    // harness_studio's own process cwd (a desktop app launched from the Dock often
     // inherits "/"). A coding agent belongs in its project root. This is
     // required for Hermes, whose local terminal backend force-exports
     // TERMINAL_CWD = os.getcwd() at import (clobbering any inherited value)
@@ -2432,13 +2430,13 @@ pub async fn spawn_agent_connection(
     // agent's state. Uses the same `launch_cwd` the process and ACP session get.
     let fs_policy = FsAccessPolicy::from_env(&launch_cwd, agent_type, &runtime_env);
 
-    // Whether codeg hosts the `fs/*` + `terminal/*` channels at all, or hands
+    // Whether harness_studio hosts the `fs/*` + `terminal/*` channels at all, or hands
     // them back to the agent so the agent's OWN sandbox covers them (#436).
     // Resolved here for the same reason as `fs_policy`: it reads the full
     // per-agent `runtime_env`, which does not survive into `run_connection`.
     let host_tools = HostToolsPolicy::from_env(&runtime_env);
 
-    // Forward only the codeg git credential helper keys into the terminal
+    // Forward only the harness_studio git credential helper keys into the terminal
     // runtime — not the agent's API tokens or model provider credentials.
     // This makes `git fetch`/`git push` issued through the ACP
     // `terminal/create` tool authenticate via the same helper path the
@@ -2449,7 +2447,7 @@ pub async fn spawn_agent_connection(
         .filter(|(k, _)| k.starts_with("GIT_CONFIG_"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    // Also surface a codeg-installed OfficeCLI on the terminal's PATH: agents run
+    // Also surface a harness-studio-installed OfficeCLI on the terminal's PATH: agents run
     // office skills' `officecli …` through this `terminal/create` tool, not as a
     // child of the agent process, so the agent-env injection alone wouldn't reach
     // them right after install (before install.ps1's User-PATH change lands).
@@ -2466,8 +2464,7 @@ pub async fn spawn_agent_connection(
     // Derived from the same `runtime_env` we hand the agent (minus per-launch
     // volatile keys) plus the agent's native config file content, so a later
     // settings save can be compared against it to detect a stale running session.
-    let config_fingerprint =
-        crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
+    let config_fingerprint = crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
 
     // Insert the entry BEFORE spawning the background task so that a
     // fast-failing `run_connection` can never remove it before it was
@@ -2513,92 +2510,92 @@ pub async fn spawn_agent_connection(
         .spawn(move || {
             let _cleanup = cleanup_guard;
             connection_rt.block_on(async move {
-        let delegation_for_cleanup = delegation_injection.clone();
-        let result = run_connection(
-            agent,
-            conn_id.clone(),
-            agent_type,
-            working_dir,
-            session_id,
-            cmd_rx,
-            emitter_clone.clone(),
-            Arc::clone(&state_clone),
-            terminal_base_env,
-            terminal_shell_config,
-            preferred_mode_id,
-            preferred_config_values,
-            delegation_injection,
-            fs_policy,
-            host_tools,
-            stderr_tail,
-        )
-        .await;
-
-        // Revoke the per-launch token + cascade cancel any still-pending
-        // delegations AND questions owned by this parent connection. All are
-        // best-effort: a missing token entry is a no-op, and both
-        // `cancel_by_parent` calls are safe on an empty pending map.
-        if let Some(inj) = delegation_for_cleanup {
-            let token = {
-                let snap = state_clone.read().await;
-                snap.delegation_token.clone()
-            };
-            if let Some(tok) = token {
-                inj.tokens.revoke(&tok).await;
-            }
-            inj.broker.cancel_by_parent(&conn_id).await;
-            // Reclaim a parked `ask_user_question` instead of waiting for the
-            // companion's ask socket to close (which a reparented/hard-killed
-            // agent may never do); the dropped sender declines the tool cleanly.
-            inj.questions.cancel_questions_by_parent(&conn_id).await;
-            // Likewise reclaim a parked Grok `exit_plan_mode` approval; the
-            // dropped sender replies disconnect so grok keeps plan mode active.
-            inj.plan_approvals
-                .cancel_plan_approvals_by_parent(&conn_id)
+                let delegation_for_cleanup = delegation_injection.clone();
+                let result = run_connection(
+                    agent,
+                    conn_id.clone(),
+                    agent_type,
+                    working_dir,
+                    session_id,
+                    cmd_rx,
+                    emitter_clone.clone(),
+                    Arc::clone(&state_clone),
+                    terminal_base_env,
+                    terminal_shell_config,
+                    preferred_mode_id,
+                    preferred_config_values,
+                    delegation_injection,
+                    fs_policy,
+                    host_tools,
+                    stderr_tail,
+                )
                 .await;
-        }
 
-        if let Err(e) = result {
-            let code = e.code().map(String::from);
-            emit_with_state(
-                &state_clone,
-                &emitter_clone,
-                AcpEvent::Error {
-                    message: e.to_string(),
-                    agent_type: agent_type.to_string(),
-                    code,
-                    details: None,
-                    // The only genuinely terminal emit site: `run_connection`
-                    // is unwinding and the next event is `Disconnected`.
-                    // The lifecycle worker uses this flag to decide whether
-                    // to flip the conversation row to Cancelled and to
-                    // buffer the detail for the broker's cancel reason.
-                    terminal: true,
-                },
-            )
-            .await;
-            // Drive the state machine through `Error` before `Disconnected`
-            // so the frontend's error-handling effect (cancelled-on-error)
-            // engages — without this hop the connection would jump straight
-            // to Disconnected and look like a clean shutdown.
-            emit_with_state(
-                &state_clone,
-                &emitter_clone,
-                AcpEvent::StatusChanged {
-                    status: ConnectionStatus::Error,
-                },
-            )
-            .await;
-        }
+                // Revoke the per-launch token + cascade cancel any still-pending
+                // delegations AND questions owned by this parent connection. All are
+                // best-effort: a missing token entry is a no-op, and both
+                // `cancel_by_parent` calls are safe on an empty pending map.
+                if let Some(inj) = delegation_for_cleanup {
+                    let token = {
+                        let snap = state_clone.read().await;
+                        snap.delegation_token.clone()
+                    };
+                    if let Some(tok) = token {
+                        inj.tokens.revoke(&tok).await;
+                    }
+                    inj.broker.cancel_by_parent(&conn_id).await;
+                    // Reclaim a parked `ask_user_question` instead of waiting for the
+                    // companion's ask socket to close (which a reparented/hard-killed
+                    // agent may never do); the dropped sender declines the tool cleanly.
+                    inj.questions.cancel_questions_by_parent(&conn_id).await;
+                    // Likewise reclaim a parked Grok `exit_plan_mode` approval; the
+                    // dropped sender replies disconnect so grok keeps plan mode active.
+                    inj.plan_approvals
+                        .cancel_plan_approvals_by_parent(&conn_id)
+                        .await;
+                }
 
-        emit_with_state(
-            &state_clone,
-            &emitter_clone,
-            AcpEvent::StatusChanged {
-                status: ConnectionStatus::Disconnected,
-            },
-        )
-        .await;
+                if let Err(e) = result {
+                    let code = e.code().map(String::from);
+                    emit_with_state(
+                        &state_clone,
+                        &emitter_clone,
+                        AcpEvent::Error {
+                            message: e.to_string(),
+                            agent_type: agent_type.to_string(),
+                            code,
+                            details: None,
+                            // The only genuinely terminal emit site: `run_connection`
+                            // is unwinding and the next event is `Disconnected`.
+                            // The lifecycle worker uses this flag to decide whether
+                            // to flip the conversation row to Cancelled and to
+                            // buffer the detail for the broker's cancel reason.
+                            terminal: true,
+                        },
+                    )
+                    .await;
+                    // Drive the state machine through `Error` before `Disconnected`
+                    // so the frontend's error-handling effect (cancelled-on-error)
+                    // engages — without this hop the connection would jump straight
+                    // to Disconnected and look like a clean shutdown.
+                    emit_with_state(
+                        &state_clone,
+                        &emitter_clone,
+                        AcpEvent::StatusChanged {
+                            status: ConnectionStatus::Error,
+                        },
+                    )
+                    .await;
+                }
+
+                emit_with_state(
+                    &state_clone,
+                    &emitter_clone,
+                    AcpEvent::StatusChanged {
+                        status: ConnectionStatus::Disconnected,
+                    },
+                )
+                .await;
                 // Connection loop ended; `block_on` returns and `_cleanup`
                 // (bound at the top of the thread body) drops next, removing
                 // the manager map entry — same as on a panic unwind.
@@ -2621,7 +2618,7 @@ pub async fn spawn_agent_connection(
 /// `session/request_permission`; `CodexElicitation` is a codex approval-style
 /// `elicitation/create` (MCP tool-call approval / message-only confirm) routed
 /// through the SAME permission card so approvals look exactly like they did
-/// before codeg advertised `elicitation.form` — its chosen option answers the
+/// before harness_studio advertised `elicitation.form` — its chosen option answers the
 /// blocked elicitation request instead (see `handle_elicitation_request`).
 enum PermissionReply {
     Acp(Responder<RequestPermissionResponse>),
@@ -3173,7 +3170,7 @@ async fn withdraw_permission(
 /// Retire a permission card the moment the agent takes its request back.
 ///
 /// The ACP runtime marks a parked request cancelled when the agent sends
-/// `$/cancel_request` for it, and the two adapters codeg follows most closely
+/// `$/cancel_request` for it, and the two adapters harness_studio follows most closely
 /// both do: claude-agent-acp (0.81) wires each tool call's abort signal into its
 /// `session/request_permission`, so a stopped sub-agent or an interrupted tool
 /// withdraws its approval; codex-acp (1.13) wires its prompt's signal into every
@@ -3357,7 +3354,7 @@ fn map_session_config_select_group(
 /// `_meta.jetbrains.air` envelope.
 ///
 /// Envelope validation mirrors [`air_session_failure`] (integer `version >= 1`,
-/// the same check the adapters run on codeg's own advertisement), so a
+/// the same check the adapters run on harness_studio's own advertisement), so a
 /// future-incompatible envelope yields `None` rather than a half-understood
 /// hint. The payload must be a non-blank string: codex-acp only ever writes a
 /// model id or a reasoning-effort id there, and anything else is not something
@@ -3454,8 +3451,8 @@ fn map_session_config_options(
 /// [`SessionState::env_pinned_config_option_ids`]).
 ///
 /// Only cline has one today: its `provider` selector is hard-refused whenever
-/// `CLINE_PROVIDER` is exported, which codeg does for every bring-your-own
-/// provider. The check is on the variable codeg actually ships, not on the
+/// `CLINE_PROVIDER` is exported, which harness_studio does for every bring-your-own
+/// provider. The check is on the variable harness_studio actually ships, not on the
 /// configured provider id, because the pin is what the agent tests.
 fn env_pinned_config_option_ids(
     agent_type: AgentType,
@@ -3523,7 +3520,7 @@ async fn emit_selectors_ready(state: &Arc<RwLock<SessionState>>, emitter: &Event
 }
 
 /// The conventional id of a model selector. ACP reserves none — `category:
-/// "model"` is the spec-level signal — but every agent codeg drives spells the
+/// "model"` is the spec-level signal — but every agent harness_studio drives spells the
 /// id this way, and the frontend's `isModelConfigOption` accepts either.
 const MODEL_CONFIG_OPTION_ID: &str = "model";
 
@@ -3931,7 +3928,7 @@ fn kept_select_row(
 }
 
 /// Grok does not emit the standard ACP `config_options` / `modes` channels that
-/// codeg's generic composer-selector pipeline reads (which is why the composer
+/// harness_studio's generic composer-selector pipeline reads (which is why the composer
 /// showed no selectors for Grok). Instead it ships its selectors in a
 /// non-standard `_meta["x.ai/sessionConfig"].options` list — a flat array of
 /// `{id, category, label, description?, selected}` covering both model choices
@@ -4100,7 +4097,9 @@ async fn set_grok_model(
         reasoning_effort.as_deref(),
     );
     let untyped_req = UntypedMessage::new("session/set_model", params).map_err(|e| {
-        agent_client_protocol::util::internal_error(format!("Failed to build set_model request: {e}"))
+        agent_client_protocol::util::internal_error(format!(
+            "Failed to build set_model request: {e}"
+        ))
     })?;
     cx.send_request_to(Agent, untyped_req).block_task().await?;
     Ok(())
@@ -4127,7 +4126,7 @@ fn build_grok_set_model_params(
 /// Send `_session/steering` (the ACP steering extension) to inject a message
 /// into the RUNNING turn. Untyped because it is an extension method the schema
 /// has no typed request for. Always opts into the 0.64.0
-/// `promptRequired` idle contract; codeg only enables native steering for
+/// `promptRequired` idle contract; harness_studio only enables native steering for
 /// adapters proven to honor it AND to keep the owning prompt in flight across
 /// the steered work (claude-agent-acp 0.65.0 / #958 — see
 /// [`synthesize_native_steering`] and `registry::steering_prompt_required_min_version`),
@@ -4138,9 +4137,8 @@ async fn send_steer_request(
     blocks: &[PromptInputBlock],
 ) -> Result<SteerOutcome, AcpError> {
     let params = build_steer_params(session_id.0.as_ref(), blocks);
-    let untyped_req = UntypedMessage::new("_session/steering", params).map_err(|e| {
-        AcpError::protocol(format!("Failed to build steering request: {e}"))
-    })?;
+    let untyped_req = UntypedMessage::new("_session/steering", params)
+        .map_err(|e| AcpError::protocol(format!("Failed to build steering request: {e}")))?;
     let raw = cx
         .send_request_to(Agent, untyped_req)
         .block_task()
@@ -4183,9 +4181,8 @@ async fn send_stop_async_task_request(
         "sessionId": session_id.0.as_ref(),
         "asyncTaskId": task_id,
     });
-    let untyped_req = UntypedMessage::new("_session/async_task/stop", params).map_err(|e| {
-        AcpError::protocol(format!("Failed to build async task stop request: {e}"))
-    })?;
+    let untyped_req = UntypedMessage::new("_session/async_task/stop", params)
+        .map_err(|e| AcpError::protocol(format!("Failed to build async task stop request: {e}")))?;
     let raw = cx
         .send_request_to(Agent, untyped_req)
         .block_task()
@@ -4594,7 +4591,7 @@ async fn apply_and_emit_session_config_options(
 /// advertises `image: false`, accepts a native `image` block anyway, and answers
 /// correctly about the pixels — while the same bytes as a resource blob make the
 /// model invent an answer. The advertisement has simply been wrong for as long
-/// as codeg has supported grok, across every version tested, so this is
+/// as harness_studio has supported grok, across every version tested, so this is
 /// deliberately NOT version-gated (and stays correct if grok ever starts
 /// advertising the truth: `image` is already true then). Deliberately no pinned
 /// version named here either — `registry.rs` moves on its own schedule, and a
@@ -4666,7 +4663,7 @@ fn claude_raw_sdk_session_meta(
     Some(meta)
 }
 
-/// The client capabilities codeg advertises on Initialize, with per-agent
+/// The client capabilities harness_studio advertises on Initialize, with per-agent
 /// gates. Extracted for testability — each gate is a documented product
 /// decision:
 ///
@@ -4684,15 +4681,15 @@ fn claude_raw_sdk_session_meta(
 ///   tool-call approvals and MCP-server forms included — so the handler must
 ///   cover every shape (`classify_elicitation`). URL elicitation is
 ///   deliberately NOT advertised: codex-acp then falls back to
-///   `session/request_permission`, which codeg already handles. Scoped to
+///   `session/request_permission`, which harness_studio already handles. Scoped to
 ///   Codex to keep the blast radius off other agents (e.g. Claude's native
 ///   AskUserQuestion, which would otherwise un-gate and duplicate the
-///   codeg-mcp ask tool).
+///   harness-studio-mcp ask tool).
 /// - Claude Code only: `_meta["subagent-transcript"] = true` — opt into
 ///   claude-agent-acp ≥0.63's subagent transcript forwarding (#881, SDK
 ///   `forwardSubagentText`). Subagent text/thought chunks then stream with
 ///   update-level `_meta.claudeCode.parentToolUseId` instead of being
-///   filtered; codeg routes them into the live Agent capsule (see
+///   filtered; harness_studio routes them into the live Agent capsule (see
 ///   `claude_chunk_parent_tool_use_id`). The adapter checks strictly
 ///   `=== true`, and a pre-0.63 binary ignores the unknown key, so this is
 ///   inert everywhere it isn't understood.
@@ -4715,11 +4712,11 @@ fn build_client_capabilities(
 ) -> ClientCapabilities {
     let mut client_capabilities = ClientCapabilities::new();
     if host_tools.hosts_channels() {
-        client_capabilities = client_capabilities.terminal(true).fs(
-            FileSystemCapabilities::new()
+        client_capabilities = client_capabilities
+            .terminal(true)
+            .fs(FileSystemCapabilities::new()
                 .read_text_file(true)
-                .write_text_file(true),
-        );
+                .write_text_file(true));
     }
     // Form elicitation is advertised only to agents that are KNOWN to send
     // spec-conformant `elicitation/create` forms `classify_elicitation` can
@@ -4733,7 +4730,7 @@ fn build_client_capabilities(
         client_capabilities = client_capabilities
             .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
     }
-    // Client `_meta` extensions, per agent. `jetbrains.air` opts codeg into
+    // Client `_meta` extensions, per agent. `jetbrains.air` opts harness_studio into
     // JetBrains AIR typed session-failure records (claude-agent-acp 0.67+,
     // codex-acp 1.2+) — both adapters gate publication on EXACTLY this
     // advertisement (integer version >= 1 and "sessionFailure" in the
@@ -4745,13 +4742,16 @@ fn build_client_capabilities(
     // convention is to advertise nothing an agent hasn't implemented.
     let mut meta = serde_json::Map::new();
     if agent_type == AgentType::ClaudeCode {
-        meta.insert("subagent-transcript".to_string(), serde_json::Value::Bool(true));
+        meta.insert(
+            "subagent-transcript".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
     // claude-agent-acp 0.73.0 added "asyncTasks", and codex-acp 1.10.0 joined
     // it, so BOTH are advertised. It publishes the lifecycle of an agent's
     // NON-AGENT background work as `async_task_spawned` / `_progress` /
     // `_state_update`, all on the parent session id. Unlike the two capabilities
-    // below, this one adds something codeg cannot get anywhere else: the
+    // below, this one adds something harness_studio cannot get anywhere else: the
     // transcript watcher (`background_watch`) can see that a task was launched
     // but explicitly CANNOT tell a still-running task from one whose CLI died,
     // it never sees workflow/monitor tasks at all (they produce no tool call),
@@ -4840,7 +4840,7 @@ fn build_client_capabilities(
     // practice every prompt — the turn's completion now waits on the checkpoint
     // read, up to 2s, including on turns that changed no file at all.
     //
-    // The report exists for clients with no filesystem watcher; codeg is not
+    // The report exists for clients with no filesystem watcher; harness_studio is not
     // one. Nothing else in either release depends on it, and both adapters no-op
     // without the advertisement, so staying out costs us nothing.
     //
@@ -4850,14 +4850,14 @@ fn build_client_capabilities(
     // fallback for SDKs that strip it). It stays out — and the reason is no
     // longer "the schema crate can't deserialize it". `air_async_task_delta`
     // proves a raw pre-dispatch reader gets around that for any variant. The
-    // reason is that advertising DELETES the frame codeg renders subagents
+    // reason is that advertising DELETES the frame harness_studio renders subagents
     // from, and replaces it with strictly less:
     //
     // * The adapter suppresses the `Agent`/`Task` tool call outright once the
     //   capability is on — `NativeSubagentRuntime.route()` returns null for it,
     //   commented "Native Agent/Task control calls are intentionally not
     //   transcript tools". codex does the same to its `subAgentActivity` item.
-    // * That tool call is codeg's whole anchor. `conversation-runtime-store`
+    // * That tool call is harness_studio's whole anchor. `conversation-runtime-store`
     //   registers its id as an "agent" capsule, nests the child's tool calls
     //   under it by `meta.claudeCode.parentToolUseId`, and attaches the child's
     //   prose to it as `agent_transcript`.
@@ -4866,9 +4866,9 @@ fn build_client_capabilities(
     //   The child's own updates keep theirs, but it names the tool call that
     //   was just suppressed, so every one of them would arrive as an orphan.
     // * The child's output is not new information either. `route()` rewrites
-    //   only `sessionId`; the `_meta.claudeCode.parentToolUseId` codeg already
+    //   only `sessionId`; the `_meta.claudeCode.parentToolUseId` harness_studio already
     //   routes on rides through untouched. So opting in would move the same
-    //   content onto a session id codeg would then have to map back — to a
+    //   content onto a session id harness_studio would then have to map back — to a
     //   capsule it no longer receives.
     //
     // Net: the advertisement trades a precise rendering for a poorer one plus a
@@ -4877,9 +4877,9 @@ fn build_client_capabilities(
     // itself "Temporary typed surface … replaced by SDK exports when the draft
     // ships". Revisit when the draft lands and the announcement carries enough
     // to rebuild the capsule — a parent tool-use id, or the child tool calls
-    // arriving with one codeg has seen.
+    // arriving with one harness_studio has seen.
     //
-    // "recommendedValue" is the last AIR capability, and codeg takes it from
+    // "recommendedValue" is the last AIR capability, and harness_studio takes it from
     // BOTH speakers — claude-agent-acp 0.76.0 and codex-acp 1.11.0 each
     // implement it, so the "advertise nothing an agent hasn't built" rule is
     // satisfied on both sides. With it, `session/new`'s `model` and
@@ -4898,12 +4898,12 @@ fn build_client_capabilities(
     //
     // * codex marks the model it calls `isDefault` and the CURRENT model's
     //   `defaultReasoningEffort`, so the effort recommendation re-derives on a
-    //   model switch. That matters most where codeg's own persisted per-agent
+    //   model switch. That matters most where harness_studio's own persisted per-agent
     //   preference pins an option: a user who once pinned
     //   `reasoning_effort: max` otherwise has no signal that the model they
     //   just switched to defaults somewhere else.
     // * claude additionally DROPS the ambiguous `default` row from both
-    //   selectors, and codeg wants that row gone more than it wants the
+    //   selectors, and harness_studio wants that row gone more than it wants the
     //   marker: `current_model_id_from_opts` reads the model selector's
     //   `current_value`, and that string is what `record_turn_end` stamps on
     //   every journaled turn — on the `default` row it is the literal
@@ -4915,7 +4915,7 @@ fn build_client_capabilities(
     // entry (a) for the 1.11.0 wire trace.
     //
     // ⚠️ From claude-agent-acp 0.82.0 / codex-acp 2.0.0 this object does more
-    // than name capabilities: its mere PRESENCE makes codeg an "AIR client",
+    // than name capabilities: its mere PRESENCE makes harness_studio an "AIR client",
     // and both adapters then send AIR's own tool-call contract (each `_meta`
     // key once, keys moved under `_meta.jetbrains.air`, edit text only in the
     // diff, read/search results withheld). Everything that makes that wire
@@ -4936,7 +4936,12 @@ fn build_client_capabilities(
     // call already does). Patch blocks are read by `diff_block_payload`.
     if matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex) {
         let capabilities: &[&str] = if agent_type == AgentType::Codex {
-            &["sessionFailure", "asyncTasks", "recommendedValue", "diffPatch"]
+            &[
+                "sessionFailure",
+                "asyncTasks",
+                "recommendedValue",
+                "diffPatch",
+            ]
         } else {
             &["sessionFailure", "asyncTasks", "recommendedValue"]
         };
@@ -4952,7 +4957,7 @@ fn build_client_capabilities(
     }
     // codex-acp 1.13.0 (#528): with `terminal_output_delta` advertised, a
     // command's completion frame stops repeating its whole aggregated output
-    // as `rawOutput`. codeg already takes that output from the deltas it
+    // as `rawOutput`. harness_studio already takes that output from the deltas it
     // streams (the `hosted_terminal_*` bridge, for EVERY command — codex
     // forwards `outputDelta` for search/listFiles/read too), so the repeat was
     // parsed only to be thrown away. The key it streams under does not change:
@@ -4972,7 +4977,7 @@ fn build_client_capabilities(
     //
     // claude-agent-acp 0.81.0 honours the same key (#1150), but there it is the
     // gate for claude's whole terminal `_meta` presentation, which moves shell
-    // output off `content` onto a channel codeg does not bridge for claude
+    // output off `content` onto a channel harness_studio does not bridge for claude
     // (see `hosted_terminal_output_key`) — so it stays codex-only.
     if agent_type == AgentType::Codex {
         meta.insert(
@@ -5000,7 +5005,7 @@ fn build_client_capabilities(
     // "object"`; codex's `clientSupportsCompaction`: `session.compaction !=
     // null`), which is exactly what the empty capability structs serialize to.
     //
-    // ⚠️ Both members REPLACE a surface codeg already consumes, so neither may
+    // ⚠️ Both members REPLACE a surface harness_studio already consumes, so neither may
     // be advertised without its consumer:
     // * `notices` outranks the AIR advisory lane (claude publishes its model
     //   fallback advisory only `if (!supportsNotices &&
@@ -5027,7 +5032,7 @@ fn build_client_capabilities(
         );
     }
     // Two more client capabilities are deliberately NOT advertised, because each
-    // would change a surface codeg reads today with nothing ready to take it
+    // would change a surface harness_studio reads today with nothing ready to take it
     // over:
     // * `session.configOptions.boolean`. Both adapters answer it by turning
     //   their "Fast mode" option from an On/Off `select` into a `boolean`. The
@@ -5154,11 +5159,11 @@ async fn send_new_session_capturing_models(
 /// actually reach the agent's model. Almost all adapters deliver them; pi-acp
 /// (0.0.31) accepts the `mcpServers` field but DROPS it — it never forwards MCP
 /// to the inner `pi --mode rpc` process, and pi has no native MCP. So forwarding
-/// either user servers or the built-in codeg-mcp companion to pi is futile, and
-/// injecting codeg-mcp would falsely mark delegation/feedback/ask as available
+/// either user servers or the built-in harness-studio-mcp companion to pi is futile, and
+/// injecting harness-studio-mcp would falsely mark delegation/feedback/ask as available
 /// (`feedback_tool_available`, a registered delegation token pi can never use).
 /// `supports_mcp` stays `true` for pi (session/new tolerates the field), so this
-/// is a separate, narrower gate. Gate codeg-mcp injection on it.
+/// is a separate, narrower gate. Gate harness-studio-mcp injection on it.
 fn agent_delivers_wire_mcp(agent_type: AgentType) -> bool {
     !matches!(agent_type, AgentType::Pi)
 }
@@ -5172,27 +5177,27 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
     // registered as `mcp-<name>` toolsets), Kimi Code from
     // `~/.kimi-code/mcp.json` (`mcpServers`), Grok from `~/.grok/config.toml`
     // (`[mcp_servers.<name>]`), Cursor from `~/.cursor/mcp.json`
-    // (`mcpServers`, shared with the IDE). codeg manages those files directly
+    // (`mcpServers`, shared with the IDE). harness_studio manages those files directly
     // via the MCP settings UI, so forwarding the same servers over the ACP
     // wire here would double-register them — skip it. (The built-in
-    // `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so
+    // `harness-studio-mcp` companion is injected separately by `inject_harness_studio_mcp`, so
     // it still reaches them.)
     //
     // DeepSeek is deliberately NOT in this set: deepseek-acp reads no MCP file
-    // at all, so `$DSH_HOME/mcp.json` (codeg's own store) reaches it ONLY
+    // at all, so `$DSH_HOME/mcp.json` (harness_studio's own store) reaches it ONLY
     // through the wire — skipping it would silently drop every user server.
     //
     // Qoder joins the skip set: the CLI reads `mcpServers` out of its own
     // `~/.qoder/settings.json` (gemini-schema settings file) at startup, which
-    // codeg's MCP settings UI manages directly — forwarding the same servers
+    // harness_studio's MCP settings UI manages directly — forwarding the same servers
     // over the wire would double-mount them.
     //
     // Antigravity joins it too, for the same reason with one nuance: its ACP
-    // server reads `<GEMINI_HOME>/config/mcp_config.json` (which codeg's MCP
+    // server reads `<GEMINI_HOME>/config/mcp_config.json` (which harness_studio's MCP
     // settings UI manages) and MERGES it with the wire list BY NAME, wire
     // winning — so forwarding would not actually double-mount. It is skipped
     // anyway because defining one server through two channels is noise, and
-    // because the `codeg-mcp` companion is injected separately regardless.
+    // because the `harness-studio-mcp` companion is injected separately regardless.
     if matches!(
         agent_type,
         AgentType::Hermes
@@ -5230,7 +5235,7 @@ fn load_mcp_servers_for_agent(agent_type: AgentType) -> Vec<McpServer> {
     out
 }
 
-/// Context the connection layer needs to inject the built-in `codeg-mcp`
+/// Context the connection layer needs to inject the built-in `harness-studio-mcp`
 /// MCP entry. Built once per `run_connection` from the live AppState pieces
 /// (broker config, token registry, UDS path) and passed through.
 ///
@@ -5289,17 +5294,17 @@ pub struct DelegationInjection {
     /// time so `delegate_to_agent` only advertises launchable targets.
     pub agent_availability: Arc<dyn AgentAvailabilityLookup>,
     /// Hot-swappable "is live-feedback enabled?" flag. Read at injection time
-    /// alongside the broker's delegation flag so `codeg-mcp` is injected when
+    /// alongside the broker's delegation flag so `harness-studio-mcp` is injected when
     /// EITHER feature is on, and the companion is told which tool groups to
     /// expose. Shares the same `tokens` registry and UDS socket as delegation.
     pub feedback: crate::acp::feedback::FeedbackRuntimeConfig,
     /// Hot-swappable "is ask-user-question enabled?" flag. Read at injection
-    /// time alongside delegation + feedback so `codeg-mcp` is injected when ANY
+    /// time alongside delegation + feedback so `harness-studio-mcp` is injected when ANY
     /// of the three is on, and the companion's `--features` lists `ask` to expose
     /// the `ask_user_question` tool.
     pub ask: crate::acp::question::QuestionRuntimeConfig,
     /// Hot-swappable "is get-session-info enabled?" flag. Read at injection time
-    /// alongside the other three so `codeg-mcp` is injected when ANY of the four
+    /// alongside the other three so `harness-studio-mcp` is injected when ANY of the four
     /// is on, and the companion's `--features` lists `sessions` to expose the
     /// `get_session_info` tool. No teardown handle (the lookup is stateless).
     pub sessions: crate::acp::session_info::SessionInfoRuntimeConfig,
@@ -5327,7 +5332,7 @@ pub struct DelegationInjection {
     /// `ConnectionManager` as the listener's question lookup.
     pub questions: Arc<dyn crate::acp::question::SessionQuestionAccess>,
     /// Plan-approval registry handle for Grok's `exit_plan_mode` ext bridge.
-    /// Unlike delegation / ask / feedback this is NOT a codeg-mcp feature — it is
+    /// Unlike delegation / ask / feedback this is NOT a harness-studio-mcp feature — it is
     /// Grok's native plan mode — so it has no runtime on/off flag and is always
     /// wired. Shares the same backing `ConnectionManager` as the question lookup.
     /// The `run_connection` handler registers approvals + parks on the reply
@@ -5336,19 +5341,19 @@ pub struct DelegationInjection {
     pub plan_approvals: Arc<dyn crate::acp::plan_approval::SessionPlanApprovalAccess>,
 }
 
-/// Locate the `codeg-mcp` companion binary across the supported deployment
+/// Locate the `harness-studio-mcp` companion binary across the supported deployment
 /// shapes:
 ///
-/// 1. `CODEG_MCP_BIN` env override — explicit absolute path. Lets dev shells,
+/// 1. `HARNESS_STUDIO_MCP_BIN` env override — explicit absolute path. Lets dev shells,
 ///    custom installs, and integration tests point at a freshly compiled
 ///    binary without touching the install layout.
 /// 2. Sibling of the running executable — the production layout for every
-///    shipping target. Tauri sidecar (`Contents/MacOS/codeg-mcp` on macOS,
-///    next to `codeg.exe` on Windows, next to the unix binary on Linux
-///    deb/rpm), `install.sh`/`install.ps1` (drops `codeg-mcp` next to
-///    `codeg-server`), Docker image (`/usr/local/bin/codeg-mcp` next to
-///    `codeg-server`), and `cargo build` dev output
-///    (`target/<profile>/codeg-mcp`).
+///    shipping target. Tauri sidecar (`Contents/MacOS/harness-studio-mcp` on macOS,
+///    next to `harness-studio.exe` on Windows, next to the unix binary on Linux
+///    deb/rpm), `install.sh`/`install.ps1` (drops `harness-studio-mcp` next to
+///    `harness-studio-server`), Docker image (`/usr/local/bin/harness-studio-mcp` next to
+///    `harness-studio-server`), and `cargo build` dev output
+///    (`target/<profile>/harness-studio-mcp`).
 /// 3. `PATH` lookup — last-resort for atypical layouts where ops moved the
 ///    two binaries apart but kept both reachable on `PATH`.
 ///
@@ -5357,14 +5362,14 @@ pub struct DelegationInjection {
 /// injection — never paper over with a phantom path, because that fails
 /// inside the agent's MCP spawn loop and may take the entire ACP session
 /// down on stricter agents.
-pub fn locate_codeg_mcp_binary() -> Option<PathBuf> {
+pub fn locate_harness_studio_mcp_binary() -> Option<PathBuf> {
     let filename = if cfg!(windows) {
-        "codeg-mcp.exe"
+        "harness-studio-mcp.exe"
     } else {
-        "codeg-mcp"
+        "harness-studio-mcp"
     };
 
-    if let Some(raw) = std::env::var_os("CODEG_MCP_BIN") {
+    if let Some(raw) = std::env::var_os("HARNESS_STUDIO_MCP_BIN") {
         let candidate = PathBuf::from(raw);
         if is_executable_file(&candidate) {
             return Some(candidate);
@@ -5403,7 +5408,7 @@ fn is_executable_file(path: &Path) -> bool {
     true
 }
 
-/// Append the built-in `codeg-mcp` MCP entry if delegation is enabled
+/// Append the built-in `harness-studio-mcp` MCP entry if delegation is enabled
 /// AND the companion binary is present on disk. Returns the per-launch token
 /// that was registered, or `None` when injection was skipped (disabled by
 /// config, or binary missing).
@@ -5414,7 +5419,7 @@ fn is_executable_file(path: &Path) -> bool {
 /// new ACP session ship a guaranteed-to-fail MCP server entry: stricter
 /// agents (Claude Code) refuse the whole session; lax agents lose the
 /// delegate tool silently. Skipping leaves the agent fully functional minus
-/// `delegate_to_agent`, which is the right degradation when codeg-mcp didn't
+/// `delegate_to_agent`, which is the right degradation when harness-studio-mcp didn't
 /// make it into the install.
 /// Which tool groups a companion launch should expose. A struct rather than a
 /// positional bool list: the groups keep growing and seven adjacent `bool`s at a
@@ -5505,7 +5510,7 @@ fn companion_features_arg(flags: CompanionFeatureFlags) -> Option<String> {
     Some(features.join(","))
 }
 
-/// Outcome of injecting the `codeg-mcp` companion: the per-launch token to
+/// Outcome of injecting the `harness-studio-mcp` companion: the per-launch token to
 /// stash for revocation, plus whether the `check_user_feedback` tool was exposed
 /// to this agent (so the session can gate submit + UI on its real capability).
 struct CompanionInjection {
@@ -5515,7 +5520,7 @@ struct CompanionInjection {
     delegation_enabled: bool,
 }
 
-async fn inject_codeg_mcp(
+async fn inject_harness_studio_mcp(
     servers: &mut Vec<McpServer>,
     injection: &DelegationInjection,
     parent_connection_id: &str,
@@ -5523,19 +5528,19 @@ async fn inject_codeg_mcp(
     tasks_enabled: bool,
     host_tools: HostToolsPolicy,
 ) -> Option<CompanionInjection> {
-    inject_codeg_mcp_with_binary_locator(
+    inject_harness_studio_mcp_with_binary_locator(
         servers,
         injection,
         parent_connection_id,
         working_dir,
         tasks_enabled,
         host_tools,
-        locate_codeg_mcp_binary,
+        locate_harness_studio_mcp_binary,
     )
     .await
 }
 
-async fn inject_codeg_mcp_with_binary_locator<F>(
+async fn inject_harness_studio_mcp_with_binary_locator<F>(
     servers: &mut Vec<McpServer>,
     injection: &DelegationInjection,
     parent_connection_id: &str,
@@ -5547,7 +5552,7 @@ async fn inject_codeg_mcp_with_binary_locator<F>(
 where
     F: FnOnce() -> Option<PathBuf>,
 {
-    // codeg-mcp carries BOTH the delegation tools and the live-feedback tool.
+    // harness-studio-mcp carries BOTH the delegation tools and the live-feedback tool.
     // Inject it when EITHER feature is enabled; the `--features` arg tells the
     // companion which tool groups to expose so a disabled feature's tools never
     // surface to the LLM. (Historically this was gated on delegation alone.)
@@ -5556,12 +5561,12 @@ where
     let feedback_enabled = injection.feedback.is_enabled().await;
     let authoring = injection.authoring.snapshot().await;
     // Delegation is a THIRD door into the same room as `fs/*` and `terminal/*`:
-    // `delegate_to_agent` has codeg spawn a second agent — in codeg's process
+    // `delegate_to_agent` has harness_studio spawn a second agent — in harness_studio's process
     // tree, under ITS own (by default `Default`) policy — and hand its output
     // back. A sandboxed agent that cannot read `.env` itself would just ask a
     // sibling to read it. That defeats the boundary this switch advertises, for
     // the same reason withholding only one of fs/terminal would, so `agent`
-    // withholds this group too. The other groups stay: they surface codeg's own
+    // withholds this group too. The other groups stay: they surface harness_studio's own
     // state (feedback, ask, session info, task reporting), not arbitrary file
     // or command execution on the user's machine.
     let delegation_configured = injection.broker.config_snapshot().await.enabled;
@@ -5574,7 +5579,7 @@ where
         tracing::info!(
             "[delegation] multi-agent delegation is enabled in settings but withheld from \
              connection {parent_connection_id}: {HOST_TOOLS_ENV}=agent hands fs/terminal back \
-             to this agent, and delegate_to_agent would route the same work through codeg \
+             to this agent, and delegate_to_agent would route the same work through harness_studio \
              anyway. Turn that per-agent switch off to restore the delegation tools."
         );
     }
@@ -5583,7 +5588,10 @@ where
     // delegation is off, and it fails open: the spawn-time disabled check is
     // the hard gate either way.
     let disabled = if delegation_enabled {
-        injection.agent_availability.disabled_agent_wire_slugs().await
+        injection
+            .agent_availability
+            .disabled_agent_wire_slugs()
+            .await
     } else {
         Vec::new()
     };
@@ -5604,8 +5612,8 @@ where
         browser: cfg!(feature = "tauri-runtime") && injection.browser.is_enabled().await,
         browser_eval: cfg!(feature = "tauri-runtime") && injection.browser.is_eval_enabled().await,
         // Only where this process serves computer use: the desktop app, and
-        // codeg-server where the person who runs it has let it share the
-        // screen it runs on (`CODEG_COMPUTER_USE`). Elsewhere there are no
+        // harness-studio-server where the person who runs it has let it share the
+        // screen it runs on (`HARNESS_STUDIO_COMPUTER_USE`). Elsewhere there are no
         // windows to offer.
         computer: injection.computer.is_served() && injection.computer.is_enabled().await,
         computer_launch: injection.computer.is_served()
@@ -5620,10 +5628,10 @@ where
     let features_arg = companion_features_arg(flags)?;
     let Some(binary_path) = locate_binary() else {
         tracing::warn!(
-            "[delegation][WARN] codeg-mcp companion binary not found (checked CODEG_MCP_BIN, \
+            "[delegation][WARN] harness-studio-mcp companion binary not found (checked HARNESS_STUDIO_MCP_BIN, \
              exe sibling, and PATH); skipping delegate_to_agent / check_user_feedback / \
              ask_user_question / get_session_info tool injection for connection \
-             {parent_connection_id}. Reinstall codeg or set CODEG_MCP_BIN to fix."
+             {parent_connection_id}. Reinstall harness_studio or set HARNESS_STUDIO_MCP_BIN to fix."
         );
         return None;
     };
@@ -5631,7 +5639,7 @@ where
     // targets; disabled BUILT-INS are subtracted companion-side
     // (`--disabled-agents`) so the embedded schema stays the single source of
     // truth for the builtin list and its order. Either flag is omitted when
-    // empty, which also keeps an older codeg-mcp binary — one that rejects
+    // empty, which also keeps an older harness-studio-mcp binary — one that rejects
     // unknown flags at startup — working for installations needing neither.
     let (custom_slugs, disabled_builtins) = delegate_target_args(&disabled);
     let token = uuid::Uuid::new_v4().to_string();
@@ -5645,7 +5653,7 @@ where
             },
         )
         .await;
-    let mut server = McpServerStdio::new("codeg-mcp", binary_path.clone());
+    let mut server = McpServerStdio::new("harness-studio-mcp", binary_path.clone());
     let mut args = vec![
         "--parent-connection-id".to_string(),
         parent_connection_id.to_string(),
@@ -5653,7 +5661,7 @@ where
         injection.socket_path.to_string_lossy().to_string(),
         "--token".to_string(),
         token.clone(),
-        // Self-cleanup watchdog: codeg-mcp exits when this PID is gone so
+        // Self-cleanup watchdog: harness-studio-mcp exits when this PID is gone so
         // orphaned companions can't keep the binary file locked across an
         // installer upgrade (Windows) or hold a stale broker connection
         // (any platform).
@@ -5757,7 +5765,10 @@ fn canonical_spec_to_mcp_server(name: &str, spec: &serde_json::Value) -> Result<
             if let Some(env_obj) = obj.get("env").and_then(serde_json::Value::as_object) {
                 let env_vars: Vec<agent_client_protocol::schema::v1::EnvVariable> = env_obj
                     .iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| agent_client_protocol::schema::v1::EnvVariable::new(k, s)))
+                    .filter_map(|(k, v)| {
+                        v.as_str()
+                            .map(|s| agent_client_protocol::schema::v1::EnvVariable::new(k, s))
+                    })
                     .collect();
                 if !env_vars.is_empty() {
                     server = server.env(env_vars);
@@ -5840,7 +5851,7 @@ async fn run_connection(
     let cwd = resolve_working_dir(working_dir.as_deref());
     // Default terminals to the session working directory so an agent that calls
     // `terminal/create` without a `cwd` (e.g. CodeBuddy) runs in the folder the
-    // conversation runs in rather than codeg's own process cwd.
+    // conversation runs in rather than harness_studio's own process cwd.
     // An agent that runs `pnpm dev` through `terminal/create` has started a
     // local server the same way a person in the terminal panel has, and that
     // output is the only place its address appears. A connection with no real
@@ -5864,13 +5875,13 @@ async fn run_connection(
         fs_policy.describe(),
         host_tools.describe()
     );
-    // `strict` reads as a containment boundary and is not one while codeg also
+    // `strict` reads as a containment boundary and is not one while harness_studio also
     // advertises `terminal`: an agent refused a read just `cat`s the file
-    // through the shell codeg runs for it (empirically what grok does). Say so
+    // through the shell harness_studio runs for it (empirically what grok does). Say so
     // rather than letting the knob's name do the promising.
     if fs_policy.confines_reads() && host_tools.hosts_channels() {
         tracing::warn!(
-            "[ACP] {FS_POLICY_ENV} confines the fs channel but codeg still advertises \
+            "[ACP] {FS_POLICY_ENV} confines the fs channel but harness_studio still advertises \
              `terminal`, so an agent reaches the same paths through a shell — this is \
              not a containment boundary. Set {HOST_TOOLS_ENV}=agent to hand file access \
              and commands back to the agent, where its own sandbox applies."
@@ -5885,7 +5896,7 @@ async fn run_connection(
 
     // Shared question access + feature toggle (both live on the delegation
     // injection) for the agents that ask NATIVELY, over a blocking request of
-    // their own rather than the codeg-mcp tool: grok's `_x.ai/ask_user_question`
+    // their own rather than the harness-studio-mcp tool: grok's `_x.ai/ask_user_question`
     // ext request (verified against 0.2.101) and pi's extension-UI `select`,
     // which pi-acp folds into `session/request_permission`. Both handlers
     // register the questions through the SAME interactive-card pipeline and
@@ -5936,7 +5947,7 @@ async fn run_connection(
 
     Client
         .builder()
-        .name("codeg")
+        .name("harness_studio")
         // First in the chain on purpose: it has to claim a null-`sessionId`
         // message before the runtime can park it for retry. See the type docs.
         .with_handler(ClaimNullSessionIds)
@@ -5961,12 +5972,12 @@ async fn run_connection(
                 async move |req: RequestPermissionRequest,
                             responder: Responder<RequestPermissionResponse>,
                             cx: ConnectionTo<Agent>| {
-                    // An approval gating codeg's OWN ask tool is a dialog asking
+                    // An approval gating harness_studio's OWN ask tool is a dialog asking
                     // permission to show a dialog; allow it so the user sees only
                     // the interactive question card (see
-                    // `codeg_ask_auto_allow_option`).
+                    // `harness_studio_ask_auto_allow_option`).
                     let responder =
-                        match try_auto_allow_codeg_ask(&perm_ask_access, &req, responder).await {
+                        match try_auto_allow_harness_studio_ask(&perm_ask_access, &req, responder).await {
                             Ok(()) => return Ok(()),
                             Err(responder) => responder,
                         };
@@ -6178,7 +6189,7 @@ async fn run_connection(
             {
                 // Codex `elicitation/create`: question-style requests (Plan
                 // mode `request_user_input`, generic MCP forms) bridge into
-                // the same ask card as the codeg-mcp ask tool (reusing the ask
+                // the same ask card as the harness-studio-mcp ask tool (reusing the ask
                 // access + kill switch); approval-style requests (MCP
                 // tool-call approvals, message-only confirms) route through
                 // the permission card via `pending_perms`.
@@ -6327,7 +6338,7 @@ async fn run_connection(
                         "[ACP][{agent_name_for_log}] Initialize TIMED OUT after {:?} \
                          — the agent never answered the handshake. Check the \
                          [stderr] lines above for agent-side errors. For a full \
-                         JSON-RPC trace, re-launch with CODEG_ACP_DEBUG=1.",
+                         JSON-RPC trace, re-launch with HARNESS_STUDIO_ACP_DEBUG=1.",
                         init_started.elapsed()
                     );
                     return Err(agent_client_protocol::util::internal_error(INIT_TIMEOUT_SENTINEL));
@@ -6414,10 +6425,10 @@ async fn run_connection(
             // Whether this agent accepts MCP server entries over the ACP wire
             // (`session/new`'s `mcpServers`). Almost all do; OpenClaw rejects
             // any server entry and fails session creation, so it must receive
-            // NONE — neither user-configured servers nor the built-in codeg-mcp
+            // NONE — neither user-configured servers nor the built-in harness-studio-mcp
             // companion. A custom agent carries the same flag as a stored
             // declaration the user flips in settings, for the same reason:
-            // codeg cannot know whether an arbitrary ACP agent tolerates the
+            // harness_studio cannot know whether an arbitrary ACP agent tolerates the
             // field, and one that doesn't fails to connect at all until it is
             // turned off. (The `mcpServers` key itself is always serialized as
             // `[]` by the ACP schema and OpenClaw tolerates the empty list; the
@@ -6463,13 +6474,13 @@ async fn run_connection(
                     .collect()
             } else {
                 tracing::info!(
-                    "[ACP][{}] supports_mcp=false: skipping all MCP wire forwarding (user servers + codeg-mcp companion)",
+                    "[ACP][{}] supports_mcp=false: skipping all MCP wire forwarding (user servers + harness-studio-mcp companion)",
                     agent_type
                 );
                 Vec::new()
             };
 
-            // Inject the built-in `codeg-mcp` MCP server. Stdio is
+            // Inject the built-in `harness-studio-mcp` MCP server. Stdio is
             // unconditionally supported by the ACP wire — no `mcp_caps`
             // filter needed. The returned token is stashed on the session
             // state so connection teardown can revoke it. Skipped entirely
@@ -6480,7 +6491,7 @@ async fn run_connection(
                     // task_progress / task_complete tool group.
                     let tasks_enabled =
                         { state.read().await.owner_window_label == "work_task" };
-                    inject_codeg_mcp(
+                    inject_harness_studio_mcp(
                         &mut mcp_servers,
                         inj,
                         &conn_id,
@@ -6498,7 +6509,7 @@ async fn run_connection(
             {
                 let mut s = state.write().await;
                 // Native steering is independent of the MCP companion — set it
-                // even when no codeg-mcp is injected (it's exactly the channel
+                // even when no harness-studio-mcp is injected (it's exactly the channel
                 // that needs no tool; OpenClaw-style `supports_mcp: false`
                 // agents could ship it someday).
                 s.native_steering_available = native_steering_available;
@@ -6727,9 +6738,9 @@ async fn run_connection(
                         // but forward AvailableCommandsUpdate to the frontend.
                         //
                         // For a custom agent with no transcript yet — a session
-                        // created outside codeg, or one whose recording was
+                        // created outside harness_studio, or one whose recording was
                         // lost — this replay is the ONLY source of its history,
-                        // so capture it instead of discarding it. When codeg
+                        // so capture it instead of discarding it. When harness_studio
                         // already recorded the session live, the replay is a
                         // duplicate and stays drained.
                         let hydrate_from_replay = transcript_dir_for(agent_type).is_some_and(|dir| {
@@ -6768,7 +6779,7 @@ async fn run_connection(
                             // edge may never have been recorded. Drop rather
                             // than seed the live strip with zombie rows —
                             // but drop HERE, so it isn't counted as an
-                            // update codeg failed to read. Grok persists its
+                            // update harness_studio failed to read. Grok persists its
                             // workflow frames too, so they replay the same way.
                             if air_async_task_delta(&dispatch).is_some()
                                 || grok_workflow_task_delta(&dispatch, agent_type).is_some()
@@ -6938,7 +6949,7 @@ async fn run_connection(
                         // keeps the session/new fallback below.
                         //
                         // Custom agents are the exception: their history is
-                        // codeg's own transcript, not the agent's store, so
+                        // harness_studio's own transcript, not the agent's store, so
                         // "the agent forgot this session" costs nothing the
                         // user can see. Many custom agents keep sessions in
                         // memory only, which would make the banner appear on
@@ -7000,11 +7011,11 @@ async fn run_connection(
                         if err_str.contains("Authentication required") {
                             return Ok(());
                         }
-                        // An agent that simply forgot a session codeg recorded
+                        // An agent that simply forgot a session harness_studio recorded
                         // itself is the expected steady state after a restart,
                         // not an incident — an error toast on every reopen
                         // would be pure noise.
-                        // A load codeg deliberately never sent is not a failure
+                        // A load harness_studio deliberately never sent is not a failure
                         // to report — the capability gate above is the expected
                         // path for agents that don't implement it.
                         if attempted_load && !err_str.contains("Method not found") && !recovers_locally
@@ -7045,7 +7056,7 @@ async fn run_connection(
                         let mut session = AgentSession::attach(&cx, new_resp)?;
                         // Same conversation, new agent session: link the fresh
                         // transcript to the one the failed load was for, so the
-                        // turns codeg already recorded keep rendering.
+                        // turns harness_studio already recorded keep rendering.
                         // Awaited: the link must be on disk before
                         // `SessionStarted` goes out, or the session-binding
                         // guard can read an empty chain and split this
@@ -7211,7 +7222,7 @@ async fn run_connection(
         .map_err(connection_failure)
 }
 
-/// The codeg error a failed connection ends with: the sentinel an inner step
+/// The harness_studio error a failed connection ends with: the sentinel an inner step
 /// tagged the ACP error with picks the kind (and never reaches the user);
 /// anything untagged is a protocol error.
 fn connection_failure(err: agent_client_protocol::Error) -> AcpError {
@@ -7233,8 +7244,8 @@ fn connection_failure(err: agent_client_protocol::Error) -> AcpError {
 
 /// Grok's native `ask_user_question` tool issues this ACP ext request
 /// (`_x.ai/ask_user_question`) and BLOCKS on the reply — it does NOT go through
-/// the codeg-mcp ask tool. Transparent over the raw params object
-/// (`{sessionId, toolCallId, questions, mode}`); the fields codeg needs are read
+/// the harness-studio-mcp ask tool. Transparent over the raw params object
+/// (`{sessionId, toolCallId, questions, mode}`); the fields harness_studio needs are read
 /// by [`crate::acp::question::parse_grok_ext_questions`]. The runtime routes typed
 /// handlers on the RAW wire method, so the derive keeps the leading `_`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
@@ -7246,7 +7257,7 @@ struct GrokAskUserQuestionRequest(serde_json::Value);
 /// `exit_plan_mode` tool issues this ACP ext request (`_x.ai/exit_plan_mode`) and
 /// BLOCKS on the reply — the agent won't leave plan mode until the user acts.
 /// Transparent over the raw params object (`{sessionId, toolCallId, planContent}`);
-/// the fields codeg needs are read by
+/// the fields harness_studio needs are read by
 /// [`crate::acp::plan_approval::parse_grok_exit_plan_request`]. The runtime routes typed
 /// handlers on the RAW wire method, so the derive keeps the leading `_`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
@@ -7256,7 +7267,7 @@ struct GrokExitPlanModeRequest(serde_json::Value);
 
 /// Every codex `elicitation/create` request — `request_user_input` (Plan
 /// mode), generic MCP-server forms, MCP tool-call approvals, message-only
-/// confirms — arrives here once codeg advertises `elicitation.form`. Like the
+/// confirms — arrives here once harness_studio advertises `elicitation.form`. Like the
 /// grok bridge, this takes the raw params object and replies with a raw JSON
 /// value (the serialized `CreateElicitationResponse`): the form schemas codex
 /// sends carry `_meta` markers (`codex.isSecret`, …) that `question.rs` reads
@@ -7267,10 +7278,10 @@ struct GrokExitPlanModeRequest(serde_json::Value);
 #[serde(transparent)]
 struct CodexElicitationRequest(serde_json::Value);
 
-/// Bridge grok's native `_x.ai/ask_user_question` ext request into codeg's
-/// interactive question card. Grok blocks on the reply, so codeg registers the
+/// Bridge grok's native `_x.ai/ask_user_question` ext request into harness_studio's
+/// interactive question card. Grok blocks on the reply, so harness_studio registers the
 /// questions through the shared [`crate::acp::question::SessionQuestionAccess`] —
-/// the SAME path the codeg-mcp ask tool uses (it sets `pending_question`,
+/// the SAME path the harness-studio-mcp ask tool uses (it sets `pending_question`,
 /// broadcasts `QuestionRequest`, and the `AskQuestionCard` renders) — then answers
 /// the ext request with the user's choice, serialized to grok's own format, once
 /// they submit. Every early return responds with an error, which makes grok fall
@@ -7291,7 +7302,7 @@ async fn handle_grok_ask_user_question(
         let _ = responder.respond_with_internal_error("ask_user_question bridge unavailable");
         return;
     };
-    // Same kill switch as the codeg-mcp ask tool: when off, let grok fall back.
+    // Same kill switch as the harness-studio-mcp ask tool: when off, let grok fall back.
     if !ask_cfg.is_enabled().await {
         let _ = responder.respond_with_internal_error("ask_user_question is disabled");
         return;
@@ -7329,7 +7340,7 @@ async fn handle_grok_ask_user_question(
     tokio::spawn(async move {
         match registered.answer_rx.await {
             Ok(outcome) => {
-                // Surface the answered "提问回答" capsule in-stream — the codeg-mcp
+                // Surface the answered "提问回答" capsule in-stream — the harness-studio-mcp
                 // ask parity grok's native tool never emits into the ACP stream (it
                 // resolves the answer over THIS ext round-trip). Emit BEFORE
                 // unblocking grok so the card lands ahead of grok's follow-up text;
@@ -7373,15 +7384,15 @@ async fn handle_grok_ask_user_question(
 }
 
 /// The option id that silently allows a `session/request_permission` which is
-/// only gating codeg's OWN `ask_user_question` companion tool, or `None` to
+/// only gating harness_studio's OWN `ask_user_question` companion tool, or `None` to
 /// leave the request on the ordinary approval-card path.
 ///
 /// An agent whose permission mode consults the user before every MCP tool call
 /// (claude-agent-acp's default) gates the ask tool too, so asking the user a
-/// question used to cost TWO dialogs: a raw "run mcp__codeg-mcp__ask_user_question?"
+/// question used to cost TWO dialogs: a raw "run mcp__harness-studio-mcp__ask_user_question?"
 /// approval dumping the questions as JSON, and only after "Yes" the real
 /// interactive card. The first one carries no decision the second doesn't — see
-/// [`crate::acp::question::is_codeg_ask_tool_name`] for why answering it is the
+/// [`crate::acp::question::is_harness_studio_ask_tool_name`] for why answering it is the
 /// user's consent either way.
 ///
 /// The tool is identified by NAME, read from the two places a host puts it:
@@ -7390,20 +7401,20 @@ async fn handle_grok_ask_user_question(
 /// `_meta.permission.title` it pairs with (claude-agent-acp 0.73+ / codex-acp
 /// 1.7+, the same block [`hoist_request_permission_meta`] forwards to the card).
 /// The ACP `toolCall.name` field would be the exact answer but is UNSTABLE and
-/// dropped by the schema crate codeg pins, so it is not available here.
+/// dropped by the schema crate harness_studio pins, so it is not available here.
 ///
 /// Only an `allow_once` option is ever selected. An `allow_always` writes a
 /// durable permission rule into the user's own agent settings — a decision that
 /// outlives this turn and this connection, so it stays theirs to make. With no
 /// such option (an agent that offers only "always"), `None` keeps today's card.
-fn codeg_ask_auto_allow_option(req: &RequestPermissionRequest) -> Option<String> {
+fn harness_studio_ask_auto_allow_option(req: &RequestPermissionRequest) -> Option<String> {
     let permission_title = crate::acp::air_contract::permission_record(req.meta.as_ref())
         .and_then(|p| p.get("title"))
         .and_then(serde_json::Value::as_str);
     let is_ask = [req.tool_call.fields.title.as_deref(), permission_title]
         .into_iter()
         .flatten()
-        .any(crate::acp::question::is_codeg_ask_tool_name);
+        .any(crate::acp::question::is_harness_studio_ask_tool_name);
     if !is_ask {
         return None;
     }
@@ -7413,7 +7424,7 @@ fn codeg_ask_auto_allow_option(req: &RequestPermissionRequest) -> Option<String>
         .map(|opt| opt.option_id.to_string())
 }
 
-/// Answer a permission request that is merely gating codeg's own ask tool, so
+/// Answer a permission request that is merely gating harness_studio's own ask tool, so
 /// the interactive question card is the only thing the user ever sees.
 ///
 /// `Err(responder)` hands the request back for the ordinary permission path —
@@ -7425,7 +7436,7 @@ fn codeg_ask_auto_allow_option(req: &RequestPermissionRequest) -> Option<String>
 // request, not an error bubbled through `?` — boxing it would only add an
 // allocation.
 #[allow(clippy::result_large_err)]
-async fn try_auto_allow_codeg_ask(
+async fn try_auto_allow_harness_studio_ask(
     access: &Option<(
         Arc<dyn crate::acp::question::SessionQuestionAccess>,
         crate::acp::question::QuestionRuntimeConfig,
@@ -7433,11 +7444,11 @@ async fn try_auto_allow_codeg_ask(
     req: &RequestPermissionRequest,
     responder: Responder<RequestPermissionResponse>,
 ) -> Result<(), Responder<RequestPermissionResponse>> {
-    let Some(option_id) = codeg_ask_auto_allow_option(req) else {
+    let Some(option_id) = harness_studio_ask_auto_allow_option(req) else {
         return Err(responder);
     };
     // Same kill switch as the ask tool itself (and as `try_bridge_pi_select_ask`):
-    // with the feature off codeg-mcp never exposed `ask_user_question`, so a
+    // with the feature off harness-studio-mcp never exposed `ask_user_question`, so a
     // request naming it is not the tool this shortcut is allowed to speak for.
     let Some((_, ask_cfg)) = access else {
         return Err(responder);
@@ -7446,7 +7457,7 @@ async fn try_auto_allow_codeg_ask(
         return Err(responder);
     }
     tracing::debug!(
-        "[ACP] auto-allowing the permission request for codeg's own ask_user_question tool \
+        "[ACP] auto-allowing the permission request for harness_studio's own ask_user_question tool \
          (option {option_id}); the interactive question card is the actual prompt"
     );
     let _ = responder.respond(RequestPermissionResponse::new(
@@ -7456,17 +7467,17 @@ async fn try_auto_allow_codeg_ask(
 }
 
 /// Bridge pi's extension-UI `select` — the way a pi extension asks the user a
-/// multiple-choice question (`ctx.ui.select`) — into codeg's interactive question
+/// multiple-choice question (`ctx.ui.select`) — into harness_studio's interactive question
 /// card.
 ///
 /// pi has no dedicated ask channel: pi-acp turns the dialog into a plain
 /// `session/request_permission` (see
-/// [`crate::acp::question::parse_pi_select_ask`] for the wire shape), so codeg
+/// [`crate::acp::question::parse_pi_select_ask`] for the wire shape), so harness_studio
 /// used to render it as a generic approval card that dumped the synthetic tool
 /// call as raw JSON, and — because pi never emits a `session/update` for that
 /// `pi-ui-*` id — left NO record of the answer once the card was dismissed
 /// (#644). This registers the choices through the shared
-/// [`crate::acp::question::SessionQuestionAccess`] (the SAME path the codeg-mcp
+/// [`crate::acp::question::SessionQuestionAccess`] (the SAME path the harness-studio-mcp
 /// ask tool uses), answers the blocked permission request with the option the
 /// user picked, and emits the answered `AskQuestionResultCard` into the stream.
 ///
@@ -7478,7 +7489,7 @@ async fn try_auto_allow_codeg_ask(
 /// A bridged select still parks an abort handle on `perms`, so every permission
 /// drain reclaims it exactly as it reclaimed the approval card this replaces —
 /// see [`PermissionQueue::detached`] for why that matters for pi specifically.
-// Same `Err` hand-back as `try_auto_allow_codeg_ask`; see its allow note.
+// Same `Err` hand-back as `try_auto_allow_harness_studio_ask`; see its allow note.
 #[allow(clippy::result_large_err)]
 async fn try_bridge_pi_select_ask(
     access: &Option<(
@@ -7503,7 +7514,7 @@ async fn try_bridge_pi_select_ask(
     let Some((questions, ask_cfg)) = access else {
         return Err(responder);
     };
-    // Same kill switch as the codeg-mcp ask tool: when the feature is off, the
+    // Same kill switch as the harness-studio-mcp ask tool: when the feature is off, the
     // approval card stays the way to answer.
     if !ask_cfg.is_enabled().await {
         return Err(responder);
@@ -7600,9 +7611,9 @@ async fn try_bridge_pi_select_ask(
                 )
                 .await;
                 let outcome = match option_id {
-                    Some(option_id) => {
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id))
-                    }
+                    Some(option_id) => RequestPermissionOutcome::Selected(
+                        SelectedPermissionOutcome::new(option_id),
+                    ),
                     None => RequestPermissionOutcome::Cancelled,
                 };
                 let _ = responder.respond(RequestPermissionResponse::new(outcome));
@@ -7614,7 +7625,9 @@ async fn try_bridge_pi_select_ask(
             // the ask so the NEXT select can register, and unblock pi with the
             // cancel it would have gotten from the drained permission queue.
             None => {
-                questions.cancel_question(&connection_id, &question_id).await;
+                questions
+                    .cancel_question(&connection_id, &question_id)
+                    .await;
                 let _ = responder.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ));
@@ -7624,9 +7637,9 @@ async fn try_bridge_pi_select_ask(
     Ok(())
 }
 
-/// Bridge grok's native `_x.ai/exit_plan_mode` ext request into codeg's
+/// Bridge grok's native `_x.ai/exit_plan_mode` ext request into harness_studio's
 /// interactive plan-approval card. Grok BLOCKS on the reply — it won't leave plan
-/// mode until the user acts — so codeg registers the approval through the shared
+/// mode until the user acts — so harness_studio registers the approval through the shared
 /// [`crate::acp::plan_approval::SessionPlanApprovalAccess`] (which sets
 /// `pending_plan_approval`, broadcasts `PlanApprovalRequest`, and renders the card
 /// above the composer), then answers the ext request with the user's decision once
@@ -7652,8 +7665,7 @@ async fn handle_grok_exit_plan_mode(
             .map(|o| o.keys().map(String::as_str).collect::<Vec<_>>())
     );
     let Some(access) = access else {
-        let _ =
-            responder.respond(crate::acp::plan_approval::grok_exit_plan_disconnect_response());
+        let _ = responder.respond(crate::acp::plan_approval::grok_exit_plan_disconnect_response());
         return;
     };
     let (plan_markdown, tool_call_id) =
@@ -7675,8 +7687,7 @@ async fn handle_grok_exit_plan_mode(
         .await
     else {
         // Connection gone, or an approval is already pending on this connection.
-        let _ =
-            responder.respond(crate::acp::plan_approval::grok_exit_plan_disconnect_response());
+        let _ = responder.respond(crate::acp::plan_approval::grok_exit_plan_disconnect_response());
         return;
     };
     // The user answers out-of-band (the HTTP `answer_plan_approval` endpoint
@@ -7701,22 +7712,22 @@ async fn handle_grok_exit_plan_mode(
     });
 }
 
-/// Bridge codex's `elicitation/create` requests into codeg's interactive
-/// surfaces. Codex only sends these when codeg declares `elicitation.form`
+/// Bridge codex's `elicitation/create` requests into harness_studio's interactive
+/// surfaces. Codex only sends these when harness_studio declares `elicitation.form`
 /// (see `connect_with`), then BLOCKS on the reply, so every shape must resolve
 /// to something the user can act on (see
 /// [`crate::acp::question::classify_elicitation`] for the full taxonomy):
 ///
 ///   * Question-style (Plan-mode `request_user_input`, generic MCP forms) →
 ///     the shared [`crate::acp::question::SessionQuestionAccess`] path — the
-///     SAME one the codeg-mcp ask tool and the grok bridge use (it sets
+///     SAME one the harness-studio-mcp ask tool and the grok bridge use (it sets
 ///     `pending_question`, broadcasts `QuestionRequest`, and `AskQuestionCard`
 ///     renders) — answered once the user submits.
 ///   * Approval-style (MCP tool-call approvals, message-only confirms) → the
 ///     permission card via `pending_perms`, exactly like the
 ///     `session/request_permission` fallback codex-acp used before the
 ///     capability was advertised. Auto-declining these would reject the tool
-///     call (including codeg-mcp's own tools in consent-requiring modes).
+///     call (including harness-studio-mcp's own tools in consent-requiring modes).
 ///
 /// Question-path early returns DECLINE, which makes codex proceed with its own
 /// judgment — no worse than the pre-bridge `{answers:{}}`, so nothing here can
@@ -7748,24 +7759,30 @@ async fn handle_cursor_ask_question(
     // that apart from "this host never showed it" will proceed as if the user
     // had a say. The reason text is structural — never any of the payload.
     let Some((questions, ask_cfg)) = access else {
-        let _ = responder.respond(crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(
-            "the host's question bridge is unavailable; the user was not asked",
-        ));
+        let _ = responder.respond(
+            crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(
+                "the host's question bridge is unavailable; the user was not asked",
+            ),
+        );
         return;
     };
     if !ask_cfg.is_enabled().await {
-        let _ = responder.respond(crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(
-            "the host's interactive question card is disabled; the user was not asked",
-        ));
+        let _ = responder.respond(
+            crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(
+                "the host's interactive question card is disabled; the user was not asked",
+            ),
+        );
         return;
     }
     let parsed = match crate::acp::cursor_ext::parse_cursor_ask_questions(&req.0) {
         Ok(parsed) => parsed,
         Err(e) => {
             tracing::warn!("[cursor ask] rejecting malformed ext request: {e}");
-            let _ = responder.respond(crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(
-                &format!("the host could not render this ask: {e}"),
-            ));
+            let _ = responder.respond(
+                crate::acp::cursor_ext::cursor_ask_skip_response_with_reason(&format!(
+                    "the host could not render this ask: {e}"
+                )),
+            );
             return;
         }
     };
@@ -7838,15 +7855,16 @@ async fn handle_cursor_create_plan(
         let _ = responder.respond(crate::acp::cursor_ext::cursor_create_plan_disconnect_response());
         return;
     };
-    let (plan_markdown, tool_call_id) = match crate::acp::cursor_ext::parse_cursor_create_plan(&req.0)
-    {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            tracing::warn!("[cursor plan] rejecting malformed ext request: {e}");
-            let _ = responder.respond(crate::acp::cursor_ext::cursor_create_plan_disconnect_response());
-            return;
-        }
-    };
+    let (plan_markdown, tool_call_id) =
+        match crate::acp::cursor_ext::parse_cursor_create_plan(&req.0) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!("[cursor plan] rejecting malformed ext request: {e}");
+                let _ = responder
+                    .respond(crate::acp::cursor_ext::cursor_create_plan_disconnect_response());
+                return;
+            }
+        };
     let Some(registered) = access
         .register_plan_approval(connection_id, tool_call_id, plan_markdown)
         .await
@@ -7898,9 +7916,7 @@ fn handle_cursor_generate_image(
         "[cursor image] cursor/generate_image keys={:?}",
         crate::acp::cursor_ext::param_keys(&req.0)
     );
-    let _ = responder.respond(crate::acp::cursor_ext::build_cursor_generate_image_response(
-        &req.0,
-    ));
+    let _ = responder.respond(crate::acp::cursor_ext::build_cursor_generate_image_response(&req.0));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7925,7 +7941,7 @@ async fn handle_elicitation_request(
     }
     let raw = req.0;
     // Who is on the other end, from the CONNECTION rather than from the frame.
-    // This handler is registered for every agent and codeg advertises
+    // This handler is registered for every agent and harness_studio advertises
     // `elicitation.form` to DeepSeek as well as Codex, so the parser must be
     // told the peer's identity instead of inferring it from `_meta.codex` —
     // `_meta` is an open namespace and another speaker (or an MCP server behind
@@ -7956,7 +7972,7 @@ async fn handle_elicitation_request(
     match plan {
         // Approval-style (MCP tool-call approval / message-only confirm):
         // render through the permission card — the exact surface these used
-        // before codeg advertised `elicitation.form` (codex-acp then sent
+        // before harness_studio advertised `elicitation.form` (codex-acp then sent
         // `session/request_permission`). Deliberately NOT gated by the
         // ask_user_question toggle: this is consent, not an agent question,
         // and auto-declining would reject the tool call outright.
@@ -8010,13 +8026,13 @@ async fn handle_elicitation_request(
             .await;
         }
         // Question-style (codex `request_user_input`, generic MCP forms):
-        // bridge into the same ask card as the codeg-mcp ask tool.
+        // bridge into the same ask card as the harness-studio-mcp ask tool.
         crate::acp::question::ElicitationPlan::Questions(questions) => {
             let Some((question_access, ask_cfg)) = access else {
                 let _ = responder.respond(decline());
                 return;
             };
-            // Same kill switch as the codeg-mcp ask tool and the grok bridge:
+            // Same kill switch as the harness-studio-mcp ask tool and the grok bridge:
             // when the user has turned ask_user_question off, decline so codex
             // proceeds.
             if !ask_cfg.is_enabled().await {
@@ -8248,9 +8264,9 @@ fn respond_terminal_request<T: agent_client_protocol::JsonRpcResponse>(
 
 /// Refuse a channel this launch never advertised
 /// ([`HostToolsPolicy::Agent`], #436). Withholding the capability is a
-/// DECLARATION; a non-conforming agent can still call the method, and if codeg
+/// DECLARATION; a non-conforming agent can still call the method, and if harness_studio
 /// then served it the whole switch would be a suggestion — the operation would
-/// land back in codeg's process, outside the agent's sandbox, which is exactly
+/// land back in harness_studio's process, outside the agent's sandbox, which is exactly
 /// the bug. `method_not_found` is the honest wire answer: as far as this
 /// connection is concerned the method does not exist, which is what the agent
 /// was told on Initialize.
@@ -8270,7 +8286,7 @@ fn refuse_unadvertised_channel<T: agent_client_protocol::JsonRpcResponse>(
 /// of the refusal a unit test can pin; the wiring itself is covered end-to-end.
 fn unadvertised_channel_error(method: &str) -> agent_client_protocol::Error {
     agent_client_protocol::Error::method_not_found().data(format!(
-        "codeg does not host {method} for this agent ({HOST_TOOLS_ENV}=agent)"
+        "harness_studio does not host {method} for this agent ({HOST_TOOLS_ENV}=agent)"
     ))
 }
 
@@ -8331,8 +8347,7 @@ async fn set_session_config_option(
         .and_then(|opts| opts.iter().find(|o| o.id == config_id))
         .is_some_and(|o| matches!(o.kind, SessionConfigKindInfo::Boolean(_)));
     let value = encode_config_option_value(is_boolean, &value_id);
-    let updated =
-        set_session_config_option_inner(cx, session_id, config_id.clone(), value).await?;
+    let updated = set_session_config_option_inner(cx, session_id, config_id.clone(), value).await?;
     // Compare BEFORE emitting: the agent's answer is the only place a request and
     // its outcome are correlated. Once the option list is broadcast it is
     // indistinguishable from an unsolicited update.
@@ -8387,11 +8402,11 @@ fn config_option_rejection(
 
 /// Encode a selector value for `session/set_config_option`.
 ///
-/// codeg keeps config values as opaque `String`s end to end (Tauri command, web
+/// harness_studio keeps config values as opaque `String`s end to end (Tauri command, web
 /// handler, and the per-agent preference store all use `Record<string, string>`
 /// semantics), so the boolean round-trip is `"true"` ⇄ `true` and happens only
 /// here. A `select` value stays a bare `{"value": "…"}`, byte-for-byte what
-/// codeg sent before boolean options existed — every non-cline agent's wire
+/// harness_studio sent before boolean options existed — every non-cline agent's wire
 /// traffic is unchanged.
 fn encode_config_option_value(is_boolean: bool, value: &str) -> SessionConfigOptionValue {
     if is_boolean {
@@ -8405,7 +8420,7 @@ fn encode_config_option_value(is_boolean: bool, value: &str) -> SessionConfigOpt
 /// preference at connect can skip the round-trip. Reads the same `"true"` ⇄
 /// `true` encoding [`encode_config_option_value`] writes; an option kind this
 /// build cannot interpret is treated as "does not match" so the agent, not
-/// codeg, decides.
+/// harness_studio, decides.
 fn config_option_already_holds(option: &SessionConfigOption, value: &str) -> bool {
     match &option.kind {
         SessionConfigKind::Select(s) => s.current_value.to_string() == value,
@@ -8418,7 +8433,7 @@ fn config_option_already_holds(option: &SessionConfigOption, value: &str) -> boo
 /// replaying a saved preference for it at connect is a guaranteed error.
 ///
 /// This exists because a saved preference outlives the value it names.
-/// claude-agent-acp 0.76.0 is the case that forced it: once codeg advertises
+/// claude-agent-acp 0.76.0 is the case that forced it: once harness_studio advertises
 /// the AIR `recommendedValue` capability, the adapter REMOVES the `default` row
 /// from the model and effort selectors, and a user who had picked it keeps
 /// re-sending `"default"` on every connect forever — the option they would have
@@ -8427,7 +8442,7 @@ fn config_option_already_holds(option: &SessionConfigOption, value: &str) -> boo
 ///
 /// Decided from the agent's own answer, never from an agent id or a pinned
 /// version. That distinction is load-bearing: the registry pin only governs
-/// what codeg INSTALLS, while `resolve_npx_command` launches whatever
+/// what harness_studio INSTALLS, while `resolve_npx_command` launches whatever
 /// `claude-agent-acp` is on PATH — so "this is the built-in Claude Code agent"
 /// says nothing about which release is actually running, and pruning on that
 /// assumption would silently discard a still-valid pick on an older adapter.
@@ -8450,9 +8465,10 @@ fn config_option_rejects_value(option: &SessionConfigOption, value: &str) -> boo
     // Grouped and ungrouped are one flat namespace here, the same way
     // `config_option_rejection` reads them.
     let mut advertised = match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => {
-            options.iter().map(|o| o.value.to_string()).collect::<Vec<_>>()
-        }
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|o| o.value.to_string())
+            .collect::<Vec<_>>(),
         SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| group.options.iter().map(|o| o.value.to_string()))
@@ -8480,7 +8496,7 @@ fn config_option_rejects_value(option: &SessionConfigOption, value: &str) -> boo
 /// no longer offers, so every connect would silently land on the account's
 /// default model instead. The adapter would have resolved the old spelling
 /// itself (its `resolveModelPreference` maps `opus[1m]` onto the `opus` row),
-/// but codeg's screen runs first.
+/// but harness_studio's screen runs first.
 ///
 /// Healed here, off the agent's answer, rather than rewritten in the saved
 /// preferences, because only the answer says which spelling is current — and
@@ -8540,13 +8556,13 @@ fn strip_context_lane_suffix(value: &str) -> Option<&str> {
 /// `{value: "claude-fable-5-1", name: "Fable 5.1"}` to
 /// `{value: "fable", name: "Fable 5.1"}`, description unchanged; the CLI's
 /// changelog says a claude.ai login's Fable pick now follows the newest Fable
-/// the way Opus and Sonnet do. Picking that row in codeg saved its value, so a
+/// the way Opus and Sonnet do. Picking that row in harness_studio saved its value, so a
 /// user who chose Fable has `claude-fable-5-1` stored, and
 /// [`config_option_rejects_value`] rightly refuses a value the list no longer
 /// offers: every connect would silently land on the default model — Opus on
 /// the measured gateway. The adapter would have resolved the old spelling
 /// itself (its `set_config_option` falls back to `resolveModelPreference`,
-/// which finds the row by the concrete model it resolves to), but codeg's
+/// which finds the row by the concrete model it resolves to), but harness_studio's
 /// screen runs first, and that resolved model never reaches a client.
 ///
 /// What a client does see is how the row names its model, and the CLI names it
@@ -8811,7 +8827,9 @@ async fn send_goal_control(
         "action": action,
     });
     let untyped_req = UntypedMessage::new(method, params).map_err(|e| {
-        agent_client_protocol::util::internal_error(format!("Failed to build goal_control request: {e}"))
+        agent_client_protocol::util::internal_error(format!(
+            "Failed to build goal_control request: {e}"
+        ))
     })?;
     cx.send_request_to(Agent, untyped_req).block_task().await?;
     Ok(())
@@ -8893,10 +8911,7 @@ async fn apply_preferred_session_options(
     //     still allowed; it just does not outlive the session.
     let (pinned, agent_type) = {
         let guard = state.read().await;
-        (
-            guard.env_pinned_config_option_ids.clone(),
-            guard.agent_type,
-        )
+        (guard.env_pinned_config_option_ids.clone(), guard.agent_type)
     };
     let never_replayed = |config_id: &str| {
         pinned.iter().any(|id| id == config_id)
@@ -8917,7 +8932,7 @@ async fn apply_preferred_session_options(
         if never_replayed(config_id) {
             tracing::info!(
                 "[ACP] skipping preferred config '{config_id}'='{value_id}' on connect: \
-                 codeg owns this option rather than the composer"
+                 harness_studio owns this option rather than the composer"
             );
             continue;
         }
@@ -8949,7 +8964,7 @@ async fn apply_preferred_session_options(
         }
         // Encode against what the agent advertised for this id. An id the agent
         // never advertised falls back to the select form — the same value shape
-        // codeg has always sent (see the note above on unadvertised "mode").
+        // harness_studio has always sent (see the note above on unadvertised "mode").
         let is_boolean =
             advertised.is_some_and(|o| matches!(o.kind, SessionConfigKind::Boolean(_)));
         let value = encode_config_option_value(is_boolean, value_id);
@@ -8982,7 +8997,7 @@ async fn apply_preferred_session_options(
     options
 }
 
-/// Compare an agent-pushed config-option list against the values codeg asserted
+/// Compare an agent-pushed config-option list against the values harness_studio asserted
 /// at session establishment and return the ones the push contradicts, removing
 /// each from the ledger as it is returned, **in application order**.
 ///
@@ -9550,7 +9565,8 @@ async fn poll_tracked_terminal_tool_calls(
                 Err(err) => {
                     tracing::error!(
                         "[ACP] Failed to poll terminal output for tool call {}: {:?}",
-                        tool_call_id, err
+                        tool_call_id,
+                        err
                     );
                     continue;
                 }
@@ -9582,7 +9598,7 @@ async fn poll_tracked_terminal_tool_calls(
 
 /// Append the just-ended turn's observed span to the timing journal (see
 /// `crate::turn_timings`). `probe` is `Some((send_stamp, prompt_hash))` only
-/// on agents codeg journals for (Cursor) and is consumed on the first
+/// on agents harness_studio journals for (Cursor) and is consumed on the first
 /// journaling terminal path, so a turn appends at most one line.
 ///
 /// ONLY cleanly completed turns are journaled — callers gate on the
@@ -9613,7 +9629,7 @@ async fn journal_turn_span(
         return;
     };
     let ack = crate::turn_timings::enqueue_turn_timing(
-        crate::paths::codeg_turn_timings_root(),
+        crate::paths::harness_studio_turn_timings_root(),
         crate::turn_timings::CURSOR_JOURNAL_AGENT.to_string(),
         session_id.to_string(),
         crate::turn_timings::TurnTiming {
@@ -9671,7 +9687,7 @@ fn is_image_mime(mime: &str) -> bool {
 ///   model can just read the source — measurably better than a drop.
 ///
 /// So decodable images are promoted (queued drafts and work-task prompts
-/// composed before codeg advertised `image:true` still carry the old shape),
+/// composed before harness_studio advertised `image:true` still carry the old shape),
 /// and undecodable ones are demoted back — the composer only sees the single
 /// `image` capability bit and cannot make this call per mime.
 fn normalize_grok_image_blocks(blocks: Vec<PromptInputBlock>) -> Vec<PromptInputBlock> {
@@ -9810,7 +9826,7 @@ struct ForkExitInfo {
     /// `current_mode` survives a transition into one and would hand an
     /// ancestor's mode to a child that does advertise modes. The parent's
     /// `AgentSession` is the only capability answer that can't go stale.
-    /// Its `current_mode_id` is NOT used — codeg tracks mode changes through
+    /// Its `current_mode_id` is NOT used — harness_studio tracks mode changes through
     /// events, and the attach-time snapshot never sees them.
     inherited_mode_id: Option<String>,
     original_session_id: String,
@@ -9897,7 +9913,8 @@ async fn handle_fork_or_exit(
 
     tracing::info!(
         "[ACP] Fork transition: attaching to forked session {} (original: {})",
-        new_sid, fork_info.original_session_id
+        new_sid,
+        fork_info.original_session_id
     );
     tracing::info!(
         "[ACP] Fork inheriting selectors: mode={:?} config={:?}",
@@ -9965,7 +9982,7 @@ async fn handle_fork_or_exit(
         None
     };
 
-    // Release the session the fork left. codeg stopped routing it when the
+    // Release the session the fork left. harness_studio stopped routing it when the
     // caller dropped its `AgentSession`, and the sibling row
     // `persist_fork_outcome` keeps for its history re-opens it on a connection
     // of its own. Left open on the agent, it is not free:
@@ -9984,7 +10001,7 @@ async fn handle_fork_or_exit(
     //     shows it.
     //
     // This is the agent-side half of what the caller just did to the parent's
-    // codeg-hosted terminals (`release_all_for_session`). It goes out after the
+    // harness-studio-hosted terminals (`release_all_for_session`). It goes out after the
     // resume step, whether that resumed the child, failed, or was skipped for
     // an agent without resume, so making the child usable never overlaps the
     // parent's teardown. It is not awaited: a slow close (deepseek-acp waits
@@ -10108,8 +10125,8 @@ async fn handle_fork_or_exit(
 /// waiting for the answer (see the call in [`handle_fork_or_exit`]).
 ///
 /// The request runs on a task the connection owns, so it ends with the
-/// connection. Its outcome is only logged: codeg routes nothing to `parent` any
-/// more, and a close that fails leaves the agent where it was before codeg sent
+/// connection. Its outcome is only logged: harness_studio routes nothing to `parent` any
+/// more, and a close that fails leaves the agent where it was before harness_studio sent
 /// one.
 ///
 /// Skipped when the fork answered with the parent's own id, since closing it
@@ -10186,7 +10203,10 @@ fn classify_session_load_failure(
     code: agent_client_protocol::schema::v1::ErrorCode,
     message: &str,
 ) -> Option<&'static str> {
-    if matches!(code, agent_client_protocol::schema::v1::ErrorCode::ResourceNotFound) {
+    if matches!(
+        code,
+        agent_client_protocol::schema::v1::ErrorCode::ResourceNotFound
+    ) {
         return Some("resource_not_found");
     }
     // codex-acp on an archived rollout: the -32603 body reads
@@ -10202,10 +10222,10 @@ fn classify_session_load_failure(
     //  * another Codex client — the Codex app, the CLI or an IDE extension —
     //    with the same session open (its lock can outlive the closed tab until
     //    that process unloads the thread);
-    //  * codeg itself, for about a minute after a fork: `session/fork`
+    //  * harness_studio itself, for about a minute after a fork: `session/fork`
     //    releases only the CHILD's lock (`threadUnsubscribe({threadId:
     //    response.thread.id})`, unchanged since codex-acp 1.8.0), so the
-    //    sibling row codeg creates to keep the pre-fork history hits the lock
+    //    sibling row harness_studio creates to keep the pre-fork history hits the lock
     //    until the forking connection lets the parent go. It closes the parent
     //    right after the step that resumes the child (`close_forked_parent`),
     //    and the app-server unloads it `thread_unload_delay_secs` later (60 by
@@ -10268,8 +10288,7 @@ fn classify_session_load_error(e: &agent_client_protocol::Error) -> Option<&'sta
 /// [`classify_session_load_failure`] (a `session/load` that can't be retried)
 /// and [`prompt_rejection_is_terminal`] (a `session/prompt` rejection that no
 /// later prompt on this connection could survive either).
-const SESSION_GONE_MARKERS: &[&str] =
-    &["process exited", "session has ended", "Session not found"];
+const SESSION_GONE_MARKERS: &[&str] = &["process exited", "session has ended", "Session not found"];
 
 /// Whether a `session/prompt` rejection means the CONNECTION is dead, or only
 /// this turn.
@@ -10282,7 +10301,7 @@ const SESSION_GONE_MARKERS: &[&str] =
 /// prompt just works.
 ///
 /// Turn-scoped is the DEFAULT, because an agent that answered at all is an
-/// agent that is still there. Every ACP agent codeg drives rejects some prompts
+/// agent that is still there. Every ACP agent harness_studio drives rejects some prompts
 /// it is perfectly healthy to keep talking to: qwen-code answers -32603
 /// `Slash command not supported in ACP integration: …` for a `/mcp` its ACP
 /// surface doesn't implement (issue #797) and keeps the session in its map;
@@ -10292,7 +10311,7 @@ const SESSION_GONE_MARKERS: &[&str] =
 /// out a full respawn for a turn that merely failed.
 ///
 /// Only three families stay terminal:
-///  - `ResourceNotFound` — the agent has no record of the session id codeg
+///  - `ResourceNotFound` — the agent has no record of the session id harness_studio
 ///    just prompted on, so the handle this connection holds is void.
 ///  - [`SESSION_GONE_MARKERS`] — the agent answered to say its session or
 ///    process is gone. Keeping the connection would leave an entry whose every
@@ -10306,10 +10325,16 @@ const SESSION_GONE_MARKERS: &[&str] =
 /// the early return a sign-out prompt that happened to quote one of the markers
 /// would start tearing connections down.
 fn prompt_rejection_is_terminal(e: &agent_client_protocol::Error) -> bool {
-    if matches!(e.code, agent_client_protocol::schema::v1::ErrorCode::AuthRequired) {
+    if matches!(
+        e.code,
+        agent_client_protocol::schema::v1::ErrorCode::AuthRequired
+    ) {
         return false;
     }
-    if matches!(e.code, agent_client_protocol::schema::v1::ErrorCode::ResourceNotFound) {
+    if matches!(
+        e.code,
+        agent_client_protocol::schema::v1::ErrorCode::ResourceNotFound
+    ) {
         return true;
     }
     if lost_the_connection(e) {
@@ -10364,10 +10389,10 @@ async fn defer_to_connection_report(
     e
 }
 
-/// Whether codeg can absorb a "the agent forgot this session" load failure by
+/// Whether harness_studio can absorb a "the agent forgot this session" load failure by
 /// itself, rather than stopping and asking the user to Reload or start over.
 ///
-/// It can exactly when codeg — not the agent — owns the conversation's history:
+/// It can exactly when harness_studio — not the agent — owns the conversation's history:
 /// custom ACP agents, whose turns are recorded to
 /// [`crate::acp_transcript`]. There the failure costs nothing visible — the
 /// history still renders, and a fresh agent session (linked by
@@ -10516,7 +10541,7 @@ fn dropped_update_log_line(where_: &str, error: &impl std::fmt::Display, coalesc
     }
 }
 
-/// Emit the throttled "codeg dropped an update it could not read" WARN.
+/// Emit the throttled "harness_studio dropped an update it could not read" WARN.
 fn log_dropped_update(
     throttle: &mut LeadingEdgeThrottle,
     where_: &str,
@@ -10534,7 +10559,7 @@ fn log_dropped_update(
 /// each turn start.
 ///
 /// This exists because `EndTurn` with no output is ambiguous: it can be a real
-/// agent-side failure, a turn whose output codeg failed to parse, or a
+/// agent-side failure, a turn whose output harness_studio failed to parse, or a
 /// legitimately output-free command turn. Distinguishing them needs more than
 /// the single "did we see output" bit this replaces.
 #[derive(Debug, Default)]
@@ -10545,7 +10570,7 @@ struct TurnOutputProbe {
     /// user echo, …).
     saw_metadata_update: bool,
     /// `session/update`s whose params did not deserialize (schema drift) — the
-    /// output may well have been there; codeg could not read it.
+    /// output may well have been there; harness_studio could not read it.
     dropped: u32,
     /// First drop's *already-redacted* summary. Redaction happens here, at
     /// capture time, so nothing downstream can hold plaintext — parser errors
@@ -10584,7 +10609,7 @@ impl TurnOutputProbe {
 /// Why a turn ended with `EndTurn` but no agent output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmptyTurnCause {
-    /// codeg dropped updates it could not parse — the agent may well have
+    /// harness_studio dropped updates it could not parse — the agent may well have
     /// replied; we just couldn't read it.
     ProtocolMismatch,
     /// Only metadata arrived. Observational only: this is NOT proof the turn
@@ -10611,12 +10636,12 @@ impl EmptyTurnCause {
                 format!("{agent_type} ended the turn without producing any response.")
             }
             EmptyTurnCause::ProtocolMismatch => format!(
-                "{agent_type} produced output that codeg could not parse — \
+                "{agent_type} produced output that harness_studio could not parse — \
                  the agent version may not match the protocol."
             ),
-            EmptyTurnCause::MetadataOnly => format!(
-                "{agent_type} sent only status updates this turn and no reply."
-            ),
+            EmptyTurnCause::MetadataOnly => {
+                format!("{agent_type} sent only status updates this turn and no reply.")
+            }
         }
     }
 }
@@ -10840,7 +10865,7 @@ async fn run_conversation_loop(
     // they are live under the DEFAULT level, and one schema-drifted agent turns
     // them into a firehose. That is exactly the shape that wrote 34GB in 8.8h in
     // the 0.23.3 field report (issue #427). The information they carry is
-    // "codeg is dropping this agent's output", which is worth one line per
+    // "harness_studio is dropping this agent's output", which is worth one line per
     // window, not one per token: `TurnOutputProbe` keeps the exact counts and the
     // first redacted error, and surfaces them in the empty-turn diagnosis.
     //
@@ -10848,7 +10873,7 @@ async fn run_conversation_loop(
     // (the agent is speaking a protocol we can't read) seen with and without a
     // turn open, so the operator wants one signal, not two interleaved ones.
     let mut drop_log_throttle = LeadingEdgeThrottle::new(DROPPED_UPDATE_LOG_WINDOW);
-    // Options an agent push reverted after codeg asserted them at establishment.
+    // Options an agent push reverted after harness_studio asserted them at establishment.
     // Queued rather than re-asserted in place because the select below borrows
     // `session` for `read_update`, and the re-assert needs its connection;
     // drained immediately after the select, still inside the idle loop (the
@@ -10891,7 +10916,7 @@ async fn run_conversation_loop(
                         emit_with_state(&st, &h, event).await;
                     } else if let Some(completed) = grok_turn_completed(&dispatch, agent_type) {
                         // Grok's own end of a turn. Only the turn opened below
-                        // ends here; one codeg started ended on its response.
+                        // ends here; one harness_studio started ended on its response.
                         if grok_turn_completed_ends(cb_state.grok_agent_turn.as_deref(), &completed) {
                             close_grok_agent_turn(
                                 &st,
@@ -10946,13 +10971,19 @@ async fn run_conversation_loop(
             for (config_id, value_id) in std::mem::take(&mut config_drift_to_reassert) {
                 tracing::info!(
                     "[ACP] re-asserting '{config_id}'='{value_id}' — the agent reverted it \
-                     after codeg applied it at session establishment"
+                     after harness_studio applied it at session establishment"
                 );
                 let cx = session.connection();
                 let sid = session.session_id().clone();
-                if let Err(e) =
-                    set_session_config_option(&cx, &sid, state, emitter, config_id.clone(), value_id)
-                        .await
+                if let Err(e) = set_session_config_option(
+                    &cx,
+                    &sid,
+                    state,
+                    emitter,
+                    config_id.clone(),
+                    value_id,
+                )
+                .await
                 {
                     // Advisory: the agent is running what it pushed and has already
                     // told the frontend so. Failing the connection over a selector
@@ -10973,11 +11004,11 @@ async fn run_conversation_loop(
                 prompt_ledger.record_prompt_blocks(&blocks);
                 // Establishment is over the moment the user speaks: from here a
                 // config push is attributable to the prompt (`/model` typed in
-                // chat is one), so codeg stops arbitrating and the agent owns
+                // chat is one), so harness_studio stops arbitrating and the agent owns
                 // the selectors. See `SessionState::asserted_config_values`.
                 state.write().await.asserted_config_values.clear();
                 // Cursor's ACP store carries no per-turn timestamps at all
-                // (see `crate::turn_timings`), so codeg journals its own
+                // (see `crate::turn_timings`), so harness_studio journals its own
                 // observation of the turn span: hash + ordinal here (before
                 // the blocks are consumed), the send stamp after the
                 // `UserMessage` broadcast below, the append at TurnComplete.
@@ -11379,7 +11410,7 @@ async fn run_conversation_loop(
                             // Every other turn-scoped rejection reports the
                             // agent's OWN words, because they are the actionable
                             // part ("The command \"/mcp\" is not supported in
-                            // this mode.") and codeg has no vocabulary for them.
+                            // this mode.") and harness_studio has no vocabulary for them.
                             let response = match prompt_result {
                                 Ok(response) => response,
                                 Err(e) if !prompt_rejection_is_terminal(&e) => {
@@ -11561,7 +11592,7 @@ async fn run_conversation_loop(
                             }
                             // ACP has no turn-end notification — the stop
                             // reason arrives here, in the prompt RESPONSE — so
-                            // codeg records it for the history parser. Unlike
+                            // harness_studio records it for the history parser. Unlike
                             // streamed chunks this one is bound-awaited: a
                             // conversation reopened right after a turn must not
                             // miss its tail.
@@ -11783,7 +11814,7 @@ async fn run_conversation_loop(
                                     // is up answers it declined first. Through
                                     // Claude Code 2.1.284 the steer interrupted
                                     // the blocked MCP call; the CLI's
-                                    // `notifications/cancelled` made codeg-mcp
+                                    // `notifications/cancelled` made harness-studio-mcp
                                     // abandon the ask and the card closed. From
                                     // 2.1.286 (claude-agent-acp 0.85.0) the CLI
                                     // moves the call to the background instead
@@ -12228,8 +12259,11 @@ pub(crate) fn serialize_tool_call_content(
             // card through the synthesized input or not at all.
             ToolCallContent::Diff(diff)
                 if include_diffs
-                    && crate::acp::air_contract::air_meta_value(diff.meta.as_ref(), "diffPatch")
-                        .is_none() =>
+                    && crate::acp::air_contract::air_meta_value(
+                        diff.meta.as_ref(),
+                        "diffPatch",
+                    )
+                    .is_none() =>
             {
                 let path = diff.path.display();
                 let mut diff_text = format!("--- {path}\n+++ {path}\n");
@@ -12384,8 +12418,7 @@ pub(crate) fn synthesize_edit_input_from_diffs(content: &[ToolCallContent]) -> O
                 };
                 changes.insert(path.clone(), entry);
             }
-            (!changes.is_empty())
-                .then(|| serde_json::json!({ "changes": changes }).to_string())
+            (!changes.is_empty()).then(|| serde_json::json!({ "changes": changes }).to_string())
         }
     }
 }
@@ -12405,18 +12438,17 @@ enum DiffBlockPayload {
     Patch(String),
 }
 
-/// Read one `Diff` block. `None` for a block that declares a patch codeg cannot
+/// Read one `Diff` block. `None` for a block that declares a patch harness_studio cannot
 /// use: codex-acp 2.0.0's contract is that such a block's `oldText: null` /
 /// `newText: ""` are "compatibility placeholders … not file snapshots", and a
 /// receiver that rejects the patch "must show the change as unavailable" — not
 /// render the placeholders as an emptied file.
 ///
-/// codeg declares `diffPatch` to codex only (`build_client_capabilities`), and
+/// harness_studio declares `diffPatch` to codex only (`build_client_capabilities`), and
 /// validates it the way the contract asks: `{version: 1, format: "git_patch",
 /// text}` with at least one `@@` hunk.
 fn diff_block_payload(diff: &agent_client_protocol::schema::v1::Diff) -> Option<DiffBlockPayload> {
-    let Some(patch) =
-        crate::acp::air_contract::air_meta_value(diff.meta.as_ref(), "diffPatch")
+    let Some(patch) = crate::acp::air_contract::air_meta_value(diff.meta.as_ref(), "diffPatch")
     else {
         return Some(DiffBlockPayload::Text {
             old: diff.old_text.clone(),
@@ -12491,7 +12523,7 @@ fn combined_text_blocks(blocks: &[DiffBlockPayload]) -> Option<(Option<String>, 
 /// codex names both sides as the absolute path WITHOUT its leading slash under
 /// `a/` / `b/` (`a/workspace/src/app.ts`, Windows `a/C:/work/App.ts`), which the
 /// diff preview's `normalizePath` would turn into a relative path — and the
-/// preview's file link would then point nowhere. codeg's own diffs name the
+/// preview's file link would then point nowhere. harness_studio's own diffs name the
 /// absolute path (`generateUnifiedDiff`: `--- a/${path}`), so the headers are
 /// rewritten to that: `+++` from the block's own `path` (the new side, a
 /// rename's target), `---` from the `rename from` line on a rename and from the
@@ -12521,7 +12553,9 @@ fn normalize_git_patch(patch: &str, block_path: &str) -> Option<String> {
             if rest.trim_end() == "/dev/null" {
                 out.push("--- /dev/null".to_string());
             } else {
-                let old = renamed_from.clone().unwrap_or_else(|| block_path.to_string());
+                let old = renamed_from
+                    .clone()
+                    .unwrap_or_else(|| block_path.to_string());
                 out.push(format!("--- a/{old}"));
             }
             continue;
@@ -12606,9 +12640,9 @@ fn c_unquote(inner: &str) -> String {
             i += 2;
             continue;
         }
-        let octal = bytes.get(i + 1..i + 4).filter(|digits| {
-            digits.iter().all(|d| (b'0'..=b'7').contains(d))
-        });
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|digits| digits.iter().all(|d| (b'0'..=b'7').contains(d)));
         if let Some(digits) = octal {
             let value = digits
                 .iter()
@@ -12632,7 +12666,7 @@ fn c_unquote(inner: &str) -> String {
 /// field only, and the file text of an edit lives in the `diff` content block:
 /// `rawInput` arrives as `{file_path}` alone (Edit loses `old_string` /
 /// `new_string`, Write its `content`), on the same frame as the diff. Every
-/// codeg edit card, the live line stats and the permission preview read the
+/// harness_studio edit card, the live line stats and the permission preview read the
 /// INPUT, never the content blocks, so a live Edit would render as a bare path.
 /// The diff block holds exactly the model's strings (0.81.x sent the same
 /// `oldText`/`newText` beside the full input), so the input is rebuilt from it —
@@ -12680,7 +12714,7 @@ fn claude_complete_file_edit_input(
 /// Used on the self-hosted-terminal path only (see
 /// `hosted_terminal_meta_marks_shell`). A
 /// `ToolCallContent::Terminal` serializes to the bare `[Terminal: <id>]`
-/// placeholder, which is meaningful ONLY while codeg's own `TerminalRuntime`
+/// placeholder, which is meaningful ONLY while harness_studio's own `TerminalRuntime`
 /// owns that terminal and `poll_tracked_terminal_tool_calls` streams the real
 /// output over it (`raw_output_chunks` then wins over `content` in the
 /// frontend store). These agents' terminals are agent-hosted, so nothing ever
@@ -12706,10 +12740,7 @@ fn build_new_file_diff(path: &str, new_text: &str) -> String {
     // it keeps the trailing empty segment from a final newline, so the `+N`
     // count and the trailing `+` addition line match exactly.
     let lines: Vec<&str> = new_text.split('\n').collect();
-    let mut out = format!(
-        "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@",
-        lines.len()
-    );
+    let mut out = format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@", lines.len());
     for line in lines {
         out.push('\n');
         out.push('+');
@@ -12723,7 +12754,9 @@ fn build_new_file_diff(path: &str, new_text: &str) -> String {
 /// on `AcpEvent::ToolCall(Update)` stays absent for non-image tool calls
 /// (preserves replace-on-update semantics: an absent field means "keep
 /// prior", a `Some(vec)` replaces).
-pub(crate) fn extract_tool_call_images(content: &[ToolCallContent]) -> Option<Vec<ToolCallImageInfo>> {
+pub(crate) fn extract_tool_call_images(
+    content: &[ToolCallContent],
+) -> Option<Vec<ToolCallImageInfo>> {
     let mut imgs: Vec<ToolCallImageInfo> = Vec::new();
     for item in content {
         if let ToolCallContent::Content(c) = item {
@@ -13010,7 +13043,7 @@ const OPENCODE_META_KEY: &str = "opencode";
 /// REPLAY finished tool parts through the same `pendingToolCall` builder: a
 /// replayed frame is also `status: "pending"`, but it is built from the
 /// COMPLETED state, so its title is the display label and its input is fully
-/// populated. Requiring the empty input keeps the marker off those. (codeg
+/// populated. Requiring the empty input keeps the marker off those. (harness_studio
 /// prefers `session/resume`, which replays nothing, so this is belt-and-braces.)
 /// A `pending` frame that did arrive with partial input simply goes unstamped —
 /// today's behavior, never a wrong name.
@@ -13050,12 +13083,12 @@ fn stamp_opencode_tool_name(
 /// `_meta` key marking a tool call as one of codex's `search` command actions
 /// (see [`stamp_codex_search_action`]). Frontend twin:
 /// `CODEX_SEARCH_ACTION_META_KEY` in `src/lib/codex-command-action.ts`.
-const CODEX_SEARCH_ACTION_META_KEY: &str = "codeg.codexSearchAction";
+const CODEX_SEARCH_ACTION_META_KEY: &str = "harness_studio.codexSearchAction";
 
 /// Stamp codex's `search` command actions on their opening frame, so the
 /// frontend can tell them from every other agent's grep.
 ///
-/// It needs to because codeg advertises `_meta.terminal_output_delta`, and with
+/// It needs to because harness_studio advertises `_meta.terminal_output_delta`, and with
 /// that capability codex-acp completes a command that printed nothing as a
 /// bare `failed` status — no `rawOutput` envelope, so no exit code (see
 /// `build_client_capabilities`). For a search that is almost always rg's exit
@@ -13097,7 +13130,7 @@ fn stamp_codex_search_action(
 /// the result ITSELF is handed JSON source instead of the result.
 ///
 /// Verified against opencode 1.18.23 (driven over real ACP with a stub MCP
-/// server): a codeg-mcp `ask_user_question` completes as
+/// server): a harness-studio-mcp `ask_user_question` completes as
 ///   content:   [{"type":"content","content":{"type":"text","text":"The user
 ///               answered your question(s):\n1. [框架] …\n   → 选项 A\n"}}]
 ///   rawOutput: {"output":"<that same text>","metadata":{"truncated":false}}
@@ -13266,7 +13299,7 @@ fn pi_message_chunk_route(
         | "Automatic compaction finished; context was summarized to continue the session." => {
             PiChunkRoute::Drop
         }
-        // pi-acp's own prompt queue. codeg's turn gate normally makes this
+        // pi-acp's own prompt queue. harness_studio's turn gate normally makes this
         // unreachable (`manager.rs` rejects a concurrent prompt), so all three
         // are handled defensively and together — one of them showing up alone
         // would be the odd one out.
@@ -13288,7 +13321,7 @@ fn pi_message_chunk_route(
 }
 
 /// Recover `(attempt, max, delay_ms)` from `Retrying (attempt 1/3, waiting 2s)...`
-/// — pi-acp's `formatAutoRetryMessage`, which is the only place codeg can reach
+/// — pi-acp's `formatAutoRetryMessage`, which is the only place harness_studio can reach
 /// these numbers: pi sends them structured to pi-acp, which formats them into a
 /// sentence and forwards nothing else.
 ///
@@ -13334,7 +13367,7 @@ fn pi_is_queue_announcement(text: &str) -> bool {
 /// pi-acp builds a markdown banner (`buildStartupInfo`: pi's version, the
 /// project `AGENTS.md`, every discovered skill file, prompts, extensions, an
 /// update notice) and pushes it down the ORDINARY `agent_message_chunk` channel
-/// with no marker of any kind — so codeg rendered it as the assistant's opening
+/// with no marker of any kind — so harness_studio rendered it as the assistant's opening
 /// words, before the user had said anything, complete with the absolute paths of
 /// every skill and extension on the machine.
 ///
@@ -13411,7 +13444,7 @@ async fn pi_take_startup_banner(
 /// `current_mode_update` the protocol has for it: `handleApprovalModeChanged`
 /// pushes an `agent_message_chunk` whose entire content is
 /// `[MODE_UPDATE] ${payload.mode}` (packages/cli/src/acp/acpSession.ts, 0.60.0).
-/// Rendered as-is that is a literal assistant bubble, and codeg's own mode
+/// Rendered as-is that is a literal assistant bubble, and harness_studio's own mode
 /// selector never follows the switch the user just made in the agent.
 ///
 /// Two guards keep this from eating real prose:
@@ -13431,7 +13464,7 @@ async fn pi_take_startup_banner(
 /// Residual risk, accepted knowingly: gemini emits one chunk per model stream
 /// event with boundaries it chooses, so a reply that DISCUSSES the marker could
 /// in principle split so that one whole chunk is exactly `[MODE_UPDATE] yolo`.
-/// That would both swallow the line and desync codeg's mode selector (the event
+/// That would both swallow the line and desync harness_studio's mode selector (the event
 /// is latched into `modes.current_mode_id`) until the next real switch. There
 /// is no signal on the wire that separates that chunk from a genuine one, and
 /// the alternative — rendering the literal on every real mode switch — is the
@@ -13473,7 +13506,7 @@ async fn gemini_mode_update_chunk(
 /// `raw_input` is `{"tool_name": "<server>__<tool>", "tool_input": {..real args..}}`.
 /// Peel it so the call is correlated (delegation `lifecycle.rs`), classified, and
 /// parsed as a direct MCP call — identical to how hosts like Claude Code surface
-/// MCP tools. Without this, Grok's `delegate_to_agent` (and the other codeg-mcp
+/// MCP tools. Without this, Grok's `delegate_to_agent` (and the other harness-studio-mcp
 /// companion tools) never resolve to their dedicated cards, and the delegation
 /// broker can't correlate the parent tool call to bind the sub-session.
 ///
@@ -13516,7 +13549,7 @@ fn grok_mcp_output_text(raw_output: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Recover a codeg-mcp companion tool's identity from its RESULT text, for
+/// Recover a harness-studio-mcp companion tool's identity from its RESULT text, for
 /// Cursor sessions only.
 ///
 /// Cursor's ACP layer announces every MCP call from the first streaming
@@ -13524,8 +13557,8 @@ fn grok_mcp_output_text(raw_output: &serde_json::Value) -> Option<String> {
 /// title "MCP: tool" with an empty `raw_input`, and `sendToolCallUpdate`
 /// (bundle-verified) never forwards `title`/`raw_input` again. The ONLY
 /// wire signal that ever identifies the call is the MCP result text arriving
-/// on the completion update, and for the codeg-mcp companion tools that text
-/// is a codeg-owned contract:
+/// on the completion update, and for the harness-studio-mcp companion tools that text
+/// is a harness-studio-owned contract:
 ///
 /// * a `delegate_to_agent` ack opens with
 ///   `"Delegation successful. task_id="` (`broker.rs::running_ack`);
@@ -13559,7 +13592,10 @@ fn cursor_companion_title_from_content(content: Option<&str>) -> Option<&'static
     let is_report_item = |t: &serde_json::Value| {
         t.get("task_id").and_then(|x| x.as_str()).is_some()
             && t.get("status").and_then(|x| x.as_str()).is_some_and(|s| {
-                matches!(s, "running" | "completed" | "failed" | "canceled" | "unknown")
+                matches!(
+                    s,
+                    "running" | "completed" | "failed" | "canceled" | "unknown"
+                )
             })
     };
     if !tasks.is_empty() && tasks.iter().all(is_report_item) {
@@ -13611,7 +13647,10 @@ fn is_subagent_invocation(agent_type: AgentType, raw_input: &Option<String>) -> 
 /// historical unwrap in `parsers/codebuddy.rs`. `raw_input` is left untouched
 /// (the cards peel `params` themselves, and that keeps `inferFromInput` from
 /// misclassifying `cancel_delegation`'s `{task_id}` as a generic task).
-fn codebuddy_deferred_tool_name(agent_type: AgentType, raw_input: &Option<String>) -> Option<String> {
+fn codebuddy_deferred_tool_name(
+    agent_type: AgentType,
+    raw_input: &Option<String>,
+) -> Option<String> {
     if agent_type != AgentType::CodeBuddy {
         return None;
     }
@@ -13679,7 +13718,11 @@ fn codebuddy_meta_marks_subagent(
     if meta.get("codebuddy.ai/toolName").and_then(|v| v.as_str()) == Some("Agent") {
         return true;
     }
-    if meta.get("codebuddy.ai/isSubagent").and_then(|v| v.as_bool()) == Some(true) {
+    if meta
+        .get("codebuddy.ai/isSubagent")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
         return true;
     }
     meta.get("codebuddy.ai/subagentType")
@@ -13691,7 +13734,7 @@ fn codebuddy_meta_marks_subagent(
 /// whose `terminalId` is its OWN tool-call id, then stream the command's output
 /// over a bespoke `_meta` channel instead of the ACP terminal channel. Neither
 /// ever calls `terminal/create`, so the id they name can never resolve against
-/// `TerminalRuntime` — which only ever mints `term_<uuid>` ids. Codeg renders
+/// `TerminalRuntime` — which only ever mints `term_<uuid>` ids. HarnessStudio renders
 /// the resulting placeholder and then polls a terminal that does not exist, so
 /// the card stays at `[Terminal: <id>]` with no command output, ever (#519).
 ///
@@ -13706,7 +13749,7 @@ fn codebuddy_meta_marks_subagent(
 ///   {terminal_id, exit_code, signal}` on the final frame. No `content`, no
 ///   `rawOutput` — this `_meta` is the only channel carrying the output.
 ///
-/// **codex-acp** has the SAME shape and codeg never noticed, because unlike pi
+/// **codex-acp** has the SAME shape and harness_studio never noticed, because unlike pi
 /// it also repeats the whole output as `rawOutput` at the end, so the card
 /// filled in — just not until the command had finished. `createTerminalCommandEvent`
 /// builds `content: [{type: "terminal", terminalId: item.id}]` +
@@ -13749,13 +13792,13 @@ fn hosted_terminal_meta_marks_shell(
 }
 
 /// The `_meta` key an adapter streams its self-hosted terminal output under,
-/// for the agents whose unnamespaced keys codeg is willing to read.
+/// for the agents whose unnamespaced keys harness_studio is willing to read.
 ///
 /// The two spell it differently for a reason: pi predates the ACP delta
 /// convention and reuses `terminal_output`, while codex-acp picks between
 /// `terminal_output` and `terminal_output_delta` in `resolveTerminalOutputMode`
 /// and lands on the delta key unless the client asks for the other one —
-/// which codeg does not: it advertises the delta key itself, for the duplicate
+/// which harness_studio does not: it advertises the delta key itself, for the duplicate
 /// `rawOutput` that drops (see `build_client_capabilities`). Both carry the
 /// same `{terminal_id, data}` payload with incremental `data`, so only the key
 /// differs.
@@ -13772,7 +13815,7 @@ fn hosted_terminal_output_key(agent_type: AgentType) -> Option<&'static str> {
 /// pi computes this delta itself as `next.startsWith(prev) ? next.slice(prev.len)
 /// : next`, so in the degenerate case where its cumulative text stops being a
 /// prefix extension (stdout still growing AFTER stderr was first folded in) it
-/// re-sends the WHOLE text as a "delta" and we append it, duplicating. Codeg
+/// re-sends the WHOLE text as a "delta" and we append it, duplicating. HarnessStudio
 /// cannot detect that without holding the full snapshot, which
 /// `ToolCallOutputCache` deliberately does not do (8 KB tail only). Appending is
 /// the correct reading of the wire contract; the duplication is an upstream
@@ -13918,14 +13961,14 @@ fn pi_bash_input_from_title(title: Option<&str>) -> Option<String> {
 ///
 /// gemini-cli puts NO `rawInput` on the ACP wire at all: a call arrives as
 /// title + kind + locations + content and nothing else (`acpSession.ts`,
-/// 0.60.0). codeg classifies a live call by the SHAPE of its input, so with
+/// 0.60.0). harness_studio classifies a live call by the SHAPE of its input, so with
 /// none of it every gemini tool lands on the generic card named after its own
 /// title — no Bash card, no file card, no diff header.
 ///
 /// This is a whitelist of exact title formats and NOT a match on `kind`,
 /// because `kind` cannot identify the tool: `search` covers glob, grep AND web
 /// search, and every MCP tool is hardcoded to `other` (`DiscoveredMCPTool`).
-/// Synthesizing off `kind` alone would actively mislabel calls — codeg reads a
+/// Synthesizing off `kind` alone would actively mislabel calls — harness_studio reads a
 /// bare `pattern` as grep and a bare `query` as web search, so a guessed
 /// `{"pattern": title}` would turn every glob into a grep. Not synthesizing
 /// costs a generic card; guessing wrong invents a card that states something
@@ -13987,7 +14030,7 @@ fn gemini_synthesize_tool_input(
         // (read_many_files, read-mcp-resource, the shell-background and
         // tracker tools) reports ZERO, not several.
         //
-        // The line becomes `offset`, which is the key codeg's file card reads
+        // The line becomes `offset`, which is the key harness_studio's file card reads
         // (`content-parts-renderer.tsx`, `FileToolInput`); `start_line` is not
         // in its vocabulary and would render nothing.
         ToolKind::Read if locations.len() == 1 => {
@@ -14023,7 +14066,7 @@ const CODEX_SUBAGENT_FALLBACK_NAME: &str = "subagent";
 /// thing codex-acp forwards is `subAgentActivity`, as a `tool_call(kind:other)`
 /// carrying `_meta.codex.subagent = {threadId, path, activity}`.
 ///
-/// codeg used to DROP every one of these, on the premise that the
+/// harness_studio used to DROP every one of these, on the premise that the
 /// `collabAgentToolCall` capsule already showed the same thing. That premise
 /// died with the team-of-agents rewrite: codex raises no `collabAgentToolCall`
 /// for a spawn any more, so dropping this left a codex sub-agent completely
@@ -14039,7 +14082,7 @@ enum CodexSubagentActivity {
         input: String,
     },
     /// The child reached a terminal state (`completed` / `interrupted`). Carries
-    /// no card of its own — its `toolCallId` is a synthetic id codeg has never
+    /// no card of its own — its `toolCallId` is a synthetic id harness_studio has never
     /// seen (`subagent-completed-<uuid>`), so rendering it would open a SECOND
     /// capsule with the same name and no way to tell it from the launch. It is
     /// forwarded onto the LAUNCH capsule instead, keyed by `threadId`.
@@ -14098,8 +14141,14 @@ fn claude_viewed_result_for_completion(
         return None;
     }
     let status = status?;
-    let completed = matches!(status, agent_client_protocol::schema::v1::ToolCallStatus::Completed);
-    let failed = matches!(status, agent_client_protocol::schema::v1::ToolCallStatus::Failed);
+    let completed = matches!(
+        status,
+        agent_client_protocol::schema::v1::ToolCallStatus::Completed
+    );
+    let failed = matches!(
+        status,
+        agent_client_protocol::schema::v1::ToolCallStatus::Failed
+    );
     if !completed && !failed {
         return None;
     }
@@ -14355,14 +14404,15 @@ fn hoist_request_permission_meta(
         // it rather than replacing content the card may still be parsing.
         return;
     };
-    meta.entry("permission").or_insert_with(|| permission.clone());
+    meta.entry("permission")
+        .or_insert_with(|| permission.clone());
 }
 
 /// True when an `initialize` response advertises the ACP steering extension —
 /// the TOP-LEVEL `_meta.steering.supported` flag, a sibling of
 /// `agentCapabilities` (NOT `agentCapabilities._meta`, which belongs to other
 /// conventions such as the ACP runtime's symposium capability ext). Both claude-agent-acp
-/// (0.61+) and codex-acp (1.1.6+) advertise here; whether codeg actually
+/// (0.61+) and codex-acp (1.1.6+) advertise here; whether harness_studio actually
 /// steers natively additionally requires the
 /// `registry::steering_prompt_required_min_version` policy plus the runtime
 /// version proof (see the synthesis in `run_connection`).
@@ -14477,7 +14527,7 @@ fn session_info_goal_value(
 /// The raw `sessionFailure` value out of a `_meta.jetbrains.air` envelope —
 /// present only when the envelope itself is well-formed (integer
 /// `version >= 1`, mirroring the advertisement check the adapters run on
-/// codeg's `clientCapabilities._meta.jetbrains.air`). A malformed or
+/// harness_studio's `clientCapabilities._meta.jetbrains.air`). A malformed or
 /// future-incompatible envelope yields `None` and the carrier is treated as
 /// holding no failure. Records ride TWO carriers with this same envelope: the
 /// per-attempt upserts on `session_info_update._meta`, and a turn's terminal
@@ -14600,7 +14650,10 @@ fn version_at_least(version: &str, min: &str) -> bool {
 /// the pinned npx package (see `commands::acp::acp_get_agent_status_core`) —
 /// report an `agent_info.version` at or above the registry minimum? Fail
 /// closed on a missing `agent_info` or an unparseable version.
-fn steering_version_ok(agent_info: Option<&agent_client_protocol::schema::v1::Implementation>, min: &str) -> bool {
+fn steering_version_ok(
+    agent_info: Option<&agent_client_protocol::schema::v1::Implementation>,
+    min: &str,
+) -> bool {
     agent_info.is_some_and(|info| version_at_least(&info.version, min))
 }
 
@@ -14688,7 +14741,7 @@ fn codex_retry_indicator(
 /// e.g. `/plan` as an `AvailableCommand` tagged
 /// `_meta.commandAction = {kind:"setConfigOption", configId:"collaboration_mode",
 /// value:"plan", resetValue:"default", presentation:"state"}` — codex's signal
-/// that the client should represent it as STATE. codeg already surfaces that
+/// that the client should represent it as STATE. harness_studio already surfaces that
 /// state as the `collaboration_mode` config-option selector (the generic
 /// `SessionConfigOption` path), so also listing `/plan` as a slash command is
 /// redundant and its static "Turn plan mode on" description is wrong once plan
@@ -14744,7 +14797,11 @@ fn codebuddy_chunk_marks_subagent(
     let Some(meta) = meta else {
         return false;
     };
-    if meta.get("codebuddy.ai/isSubagent").and_then(|v| v.as_bool()) == Some(true) {
+    if meta
+        .get("codebuddy.ai/isSubagent")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
         return true;
     }
     meta.get("codebuddy.ai/parentToolCallId")
@@ -15070,7 +15127,7 @@ struct CodeBuddyLiveState {
     /// Paired with `SessionState::agent_initiated_turn`, which keeps that
     /// turn's end off the prompt gate.
     grok_agent_turn: Option<String>,
-    /// The prompt id of every Grok turn this session has seen END — ones codeg
+    /// The prompt id of every Grok turn this session has seen END — ones harness_studio
     /// started (read off their frames and responses), and agent-initiated ones
     /// it closed. Frames Grok still delivers for them afterwards must neither
     /// open a turn nor end one. Every one, not the latest: a prompt that
@@ -15119,7 +15176,7 @@ struct CodeBuddyLiveState {
     /// viewed files … the text of the result stays out"), so the completion
     /// arrives as a bare status and the card would show the path and nothing
     /// else — while the same call reloaded from the transcript shows the text.
-    /// codeg already subscribes to the raw SDK stream (`emitRawSDKMessages`),
+    /// harness_studio already subscribes to the raw SDK stream (`emitRawSDKMessages`),
     /// and the adapter forwards each raw message BEFORE it reports it, so the
     /// result is here first. It only ever fills a completion that carries no
     /// result of its own (see the `ToolCallUpdate` arm), and the map is cleared
@@ -15224,7 +15281,7 @@ fn track_grok_spawn_call(
 }
 
 /// True when a tool call's ACP `_meta` marks it as grok's native
-/// `ask_user_question` (`x.ai/tool.kind == "ask_user"`). Codeg answers grok's
+/// `ask_user_question` (`x.ai/tool.kind == "ask_user"`). HarnessStudio answers grok's
 /// blocking `_x.ai/ask_user_question` ext request by rendering the interactive
 /// `AskQuestionCard` (see `handle_grok_ask_user_question`), so the parallel
 /// `tool_call` stream grok emits for the same call is redundant — it is dropped
@@ -15362,9 +15419,8 @@ fn map_claude_sdk_ext_notification(notification: &UntypedMessage) -> Option<AcpE
 /// The JSON-RPC methods grok uses for its private, namespaced session updates.
 /// Both share the standard `session/update` envelope (`params.update.
 /// sessionUpdate` + fields, verified live against grok 0.2.111) but carry
-/// variants the typed ACP pipeline can't deserialize, so codeg drops them.
-const GROK_EXT_UPDATE_METHODS: [&str; 2] =
-    ["_x.ai/session_notification", "_x.ai/session/update"];
+/// variants the typed ACP pipeline can't deserialize, so harness_studio drops them.
+const GROK_EXT_UPDATE_METHODS: [&str; 2] = ["_x.ai/session_notification", "_x.ai/session/update"];
 
 /// A stable id for a synthetic event derived from a grok ext notification —
 /// grok stamps `params._meta.eventId`; fall back to a fresh uuid.
@@ -15544,7 +15600,7 @@ pub(crate) fn grok_failed_compaction_meta(update: &serde_json::Value) -> serde_j
 /// * `subagent_finished` for a spawn whose CALL already settled (= a
 ///   BACKGROUND child; the launch ack was its final wire output) settles via
 ///   the same `BackgroundActivity` channel Claude's async sub-agents use: the
-///   frontend flips the launch card's `[[codeg-background-task]]` marker
+///   frontend flips the launch card's `[[harness-studio-background-task]]` marker
 ///   in-memory (works out-of-turn too), raises the OS notification, and
 ///   mirrors `outstanding` for the idle-sweep exemption. A BLOCKING spawn is
 ///   skipped — its own completion frame delivers the output.
@@ -15578,7 +15634,7 @@ fn map_grok_subagent_notification_inner(
     let update = params.get("update")?;
     let subagent_id = update.get("subagent_id").and_then(|v| v.as_str())?;
     // `outstanding` = paired subagents still running whose launch call already
-    // settled — i.e. background children codeg would otherwise sweep as idle.
+    // settled — i.e. background children harness_studio would otherwise sweep as idle.
     let outstanding = |cb_state: &CodeBuddyLiveState| {
         cb_state
             .grok_subagent_to_call
@@ -15751,7 +15807,12 @@ fn map_grok_subagent_notification_inner(
                 .get("output")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .map(|s| crate::parsers::truncate_str(s, crate::parsers::claude::BACKGROUND_RESULT_MAX_CHARS));
+                .map(|s| {
+                    crate::parsers::truncate_str(
+                        s,
+                        crate::parsers::claude::BACKGROUND_RESULT_MAX_CHARS,
+                    )
+                });
             Some(vec![AcpEvent::BackgroundActivity {
                 session_id: session_id.to_string(),
                 turns: Vec::new(),
@@ -15883,7 +15944,7 @@ fn compaction_failure_error(event: &AcpEvent, agent_type: AgentType) -> Option<A
 /// `invalid type: null, expected a string` — and a handler `Err` brought the
 /// whole connection down, so the user saw `ACP protocol error: Invalid params:
 /// "invalid type: null, expected a string"` instead of a session (issue #794).
-/// The 2.x runtime logs a handler error instead of dying on it, and codeg's own
+/// The 2.x runtime logs a handler error instead of dying on it, and harness_studio's own
 /// `AgentSession` router simply matches no session on a null id — but nothing
 /// would ever claim the frame either, so without this guard it would sit in the
 /// retry queue for the connection's lifetime and be replayed into every handler
@@ -15902,15 +15963,15 @@ fn compaction_failure_error(event: &AcpEvent, agent_type: AgentType) -> Option<A
 /// retry, and a parked message is replayed straight into the newly added
 /// dynamic handler without passing through this chain again.
 ///
-/// A null session id means "not about a session yet", and nothing codeg renders
+/// A null session id means "not about a session yet", and nothing harness_studio renders
 /// rides on such a notification, so it is dropped. A REQUEST shaped this way is
 /// the same protocol violation, and it would be parked just the same — the
 /// runtime's `method_not_found` fallback only answers requests with no
 /// `sessionId` field at all — leaving the agent blocked on a reply that never
 /// comes. It is answered `invalid_params` instead, which is also the truth.
-/// Being first in the chain, the guard answers it before codeg's own request
+/// Being first in the chain, the guard answers it before harness_studio's own request
 /// handlers see it: the typed ones would reject the null anyway, and no agent
-/// codeg drives sends a null to the raw-params bridges (grok's ask and plan
+/// harness_studio drives sends a null to the raw-params bridges (grok's ask and plan
 /// exit, the elicitation bridge codex and DeepSeek use, cursor's extension
 /// methods — which carry no `sessionId` at all).
 struct ClaimNullSessionIds;
@@ -16066,12 +16127,14 @@ async fn apply_grok_model_catalog(
 /// with. Introduced by codex-acp 1.9.0; claude-agent-acp 0.75.0 adopted the
 /// same method with its own vocabulary.
 ///
-/// Connection-level: unlike every other agent push codeg reads, the params carry
+/// Connection-level: unlike every other agent push harness_studio reads, the params carry
 /// NO `sessionId`, which is exactly why it needs a handler of its own (see
 /// [`handle_auth_status_update`]). Only `authStatus` is modelled; the payload is
 /// kept as a raw value so a new `kind` or an added field can never turn a
 /// well-formed push into a deserialization failure.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcNotification)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcNotification,
+)]
 #[notification(method = "_auth/status_update")]
 #[serde(rename_all = "camelCase")]
 struct AuthStatusUpdateNotification {
@@ -16087,8 +16150,8 @@ struct AuthStatusUpdateNotification {
 /// start of every user prompt, which fires an async `claude auth status --json`
 /// probe (5s timeout), so a push can land MID-TURN and a consumer must not
 /// assume the channel is quiet while a turn is open. Neither is gated on
-/// anything codeg advertises; the agent merely ANNOUNCES the channel with
-/// `agentCapabilities._meta.authStatus = {}`, and codeg registers this handler
+/// anything harness_studio advertises; the agent merely ANNOUNCES the channel with
+/// `agentCapabilities._meta.authStatus = {}`, and harness_studio registers this handler
 /// for every agent rather than per type, so a third adopter is already claimed.
 ///
 /// Both push only when the payload DIFFERS from the last one sent, so the
@@ -16106,7 +16169,7 @@ struct AuthStatusUpdateNotification {
 /// claim is now what keeps the payload's shape recorded against a real reader.
 ///
 /// Nothing consumes the payload yet, and that is a deliberate stop: the status
-/// describes the AGENT-owned login only (on codex, routing codeg itself
+/// describes the AGENT-owned login only (on codex, routing harness_studio itself
 /// configured through `providers/set` is explicitly excluded upstream), and on
 /// both agents every failure it could warn about already arrives as an AIR
 /// `sessionFailure` carrying an actionable `login` — claude 0.74.0 additionally
@@ -16122,11 +16185,11 @@ struct AuthStatusUpdateNotification {
 ///                   "vendor"?: {…}}}
 ///
 /// Observed against a live 1.10.0 whose `~/.codex/config.toml` selects a custom
-/// provider: `{"kind":"gateway","label":"Custom model gateway","detail":"codeg"}`.
+/// provider: `{"kind":"gateway","label":"Custom model gateway","detail":"harness_studio"}`.
 /// Against a live claude-agent-acp 0.75.1 with no credential:
 /// `{"kind":"none","label":"Not logged in"}`.
 /// The payload is NOT logged whole: `account.email` and `account.organization`
-/// are the signed-in person's identity, and codeg's log file is user-visible
+/// are the signed-in person's identity, and harness_studio's log file is user-visible
 /// (and shipped in diagnostics). `kind` and `label` are the two fields that
 /// answer "which identity is this connection using", and neither identifies a
 /// person — `label` is one of a fixed per-agent vocabulary ("ChatGPT Pro",
@@ -16150,7 +16213,7 @@ fn handle_auth_status_update(agent_type: AgentType, notif: AuthStatusUpdateNotif
     );
 }
 
-/// Whether codeg has a mapper for this ext-notification method.
+/// Whether harness_studio has a mapper for this ext-notification method.
 ///
 /// Used ONLY to keep the unrecognized-method log quiet about methods we do know
 /// and merely declined to map this time. That distinction is the whole point:
@@ -16172,7 +16235,7 @@ fn is_known_ext_method(method: &str) -> bool {
 ///
 /// The tool is named by the call's own opening frame (`claudeCode.toolName`,
 /// kept in the `_meta` ledger), never guessed from the result: a result for a
-/// call codeg has not seen announced is not stashed. The text is taken the way
+/// call harness_studio has not seen announced is not stashed. The text is taken the way
 /// the transcript parser takes it (`parsers::claude::extract_tool_result_text`),
 /// which is also the string claude-agent-acp 0.81.x put in `rawOutput`, so the
 /// live card and its reloaded twin read the same thing.
@@ -16289,7 +16352,7 @@ fn claude_plugin_failures_skipped_on_replay(dispatch: &Dispatch) -> bool {
 ///
 /// A notification no mapper claims is dropped, but not invisibly; a request is
 /// answered `method_not_found` rather than left hanging (see its arm). All
-/// lines are `debug!`: an agent is free to speak methods codeg doesn't
+/// lines are `debug!`: an agent is free to speak methods harness_studio doesn't
 /// implement, and a per-message `warn!` on a chatty agent is how log storms
 /// start.
 async fn maybe_emit_ext_notification(
@@ -16301,7 +16364,7 @@ async fn maybe_emit_ext_notification(
 ) {
     let notification = match dispatch {
         Dispatch::Notification(notification) => notification,
-        // An agent calling a client method codeg doesn't implement. It only
+        // An agent calling a client method harness_studio doesn't implement. It only
         // lands here because it names the session — the session router claims
         // every such message before the runtime's own fallback, which answers
         // `method_not_found` to an unhandled request that names none. Answer
@@ -16358,7 +16421,7 @@ async fn maybe_emit_ext_notification(
         }
     } else if !is_known_ext_method(notification.method()) {
         // The gap #409's second point was reaching for: an agent emitting an ext
-        // method codeg has never heard of was previously indistinguishable from
+        // method harness_studio has never heard of was previously indistinguishable from
         // an agent saying nothing at all.
         tracing::debug!(
             method = %notification.method(),
@@ -16478,7 +16541,7 @@ fn air_task_usage(value: Option<&serde_json::Value>) -> Option<AsyncTaskUsage> {
 /// from grok 1.0.41:
 ///
 ///   {"sessionUpdate":"workflow_updated","run_id":"wf_01a0e8a2…","revision":5,
-///    "name":"codeg-probe","objective":"…","status":"active",
+///    "name":"harness-studio-probe","objective":"…","status":"active",
 ///    "phases":[{"title":"Alpha","state":"active"},…],"current_phase":"Alpha",
 ///    "active_agents":1,"current_agent_label":"probe-agent","agents":[…],…}
 ///
@@ -16560,7 +16623,7 @@ fn grok_workflow_state(status: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 struct GrokTurnCompleted {
     prompt_id: Option<String>,
-    /// Already in codeg's stop-reason vocabulary (see [`grok_stop_reason`]).
+    /// Already in harness_studio's stop-reason vocabulary (see [`grok_stop_reason`]).
     stop_reason: &'static str,
 }
 
@@ -16581,7 +16644,10 @@ fn grok_turn_completed(dispatch: &Dispatch, agent_type: AgentType) -> Option<Gro
     Some(GrokTurnCompleted {
         prompt_id: air_task_str(update.get("prompt_id")),
         stop_reason: grok_stop_reason(
-            update.get("stop_reason").and_then(|v| v.as_str()).unwrap_or(""),
+            update
+                .get("stop_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         ),
     })
 }
@@ -16624,9 +16690,9 @@ fn grok_frame_prompt_id(dispatch: &Dispatch) -> Option<&str> {
 /// same process — a prompt it queues itself, never a client `session/prompt`,
 /// so no response will ever end it. Only a main-thread chunk opens one
 /// (message or thought — that is the first thing a follow-up streams), and
-/// only one stamped with a prompt id codeg has not already seen END:
+/// only one stamped with a prompt id harness_studio has not already seen END:
 ///
-/// * a turn codeg started leaves stragglers on the idle loop whenever the loop
+/// * a turn harness_studio started leaves stragglers on the idle loop whenever the loop
 ///   picks its response before its last queued frames — those carry the id
 ///   of that turn (see [`note_grok_turn_prompt_id`]);
 /// * a turn Grok cancels flushes a chunk AFTER its own `turn_completed`, with
@@ -16652,7 +16718,7 @@ fn grok_agent_turn_opener(
 }
 
 /// Whether a Grok `turn_completed` ends the agent-initiated turn the idle loop
-/// has open. A turn codeg started already ended on its prompt response, so its
+/// has open. A turn harness_studio started already ended on its prompt response, so its
 /// own `turn_completed` — which can reach the idle loop after that response —
 /// must end nothing a second time.
 fn grok_turn_completed_ends(open: Option<&str>, completed: &GrokTurnCompleted) -> bool {
@@ -16663,7 +16729,7 @@ fn grok_turn_completed_ends(open: Option<&str>, completed: &GrokTurnCompleted) -
     }
 }
 
-/// Remember the prompt id of the turn codeg is running, off any of its frames
+/// Remember the prompt id of the turn harness_studio is running, off any of its frames
 /// that carries one, so the stragglers it leaves on the idle loop can't open a
 /// turn of their own (see [`grok_agent_turn_opener`]).
 fn note_grok_turn_prompt_id(dispatch: &Dispatch, ended: &mut HashSet<String>) {
@@ -16683,7 +16749,7 @@ fn remember_grok_ended_prompt(ended: &mut HashSet<String>, prompt_id: &str) {
 /// emitted: out of `Prompting` the frontend drops streamed content, and the
 /// transcript promotion that keeps a turn only runs on the way out of it.
 ///
-/// Skipped when a prompt codeg admitted is about to start — Grok queues that
+/// Skipped when a prompt harness_studio admitted is about to start — Grok queues that
 /// prompt behind its own turn, so what it streams now lands in the admitted
 /// one instead (see `SessionState::begin_agent_initiated_turn`).
 async fn open_grok_agent_turn(
@@ -16758,7 +16824,7 @@ async fn close_grok_agent_turn(
 }
 
 /// Answer, declined, a question or plan approval an agent-initiated turn is
-/// parked on, once codeg has ended that turn early (Stop, or a prompt that has
+/// parked on, once harness_studio has ended that turn early (Stop, or a prompt that has
 /// to run next). Both cards close with the turn, so nothing could ever answer
 /// them, and Grok would stay blocked — holding the one-per-connection slot
 /// every later ask needs, and, when a prompt is queued behind the turn, that
@@ -16818,7 +16884,7 @@ fn session_notice(dispatch: &Dispatch) -> Option<SessionNotice> {
 }
 
 /// Translate an ACP compaction frame into the `_meta.contextCompaction`
-/// synthetic tool call codeg already renders compaction from.
+/// synthetic tool call harness_studio already renders compaction from.
 ///
 /// Same pre-dispatch seam and the same reason as [`session_notice`]. The
 /// TRANSLATION, rather than a new event, is the point: `<ContextCompactionCard>`
@@ -16884,9 +16950,10 @@ fn session_compaction_event(dispatch: &Dispatch) -> Option<AcpEvent> {
             // top-level key to no client); without taking it from there, the
             // default below would stand in for it and the card would lose
             // every token count and the duration.
-            if let Some(air) = crate::acp::air_contract::air_meta_value(Some(&meta), "contextCompaction")
-                .filter(|block| block.is_object())
-                .cloned()
+            if let Some(air) =
+                crate::acp::air_contract::air_meta_value(Some(&meta), "contextCompaction")
+                    .filter(|block| block.is_object())
+                    .cloned()
             {
                 meta.entry("contextCompaction").or_insert(air);
             }
@@ -17009,8 +17076,7 @@ async fn emit_conversation_update(
             // banner down this same prose channel. It is recognized against the
             // text pi-acp itself reported on the `session/new` response, not by
             // shape — see `pi_take_startup_banner`. No-op for every other agent.
-            let is_pi_startup_banner =
-                pi_take_startup_banner(agent_type, state, &text.text).await;
+            let is_pi_startup_banner = pi_take_startup_banner(agent_type, state, &text.text).await;
             // Drop a CodeBuddy sub-agent's interleaved message text — it belongs
             // to the Agent pill, not the main thread (see
             // `should_suppress_subagent_chunk`). No-op for every other agent.
@@ -17116,8 +17182,11 @@ async fn emit_conversation_update(
             // is orchestration bookkeeping, so it is replaced wholesale); a
             // terminal marker is folded back onto that capsule; the rest stay
             // dropped. See `classify_codex_subagent_activity`.
-            let activity_meta =
-                codex_activity_classification_meta(agent_type, tc.meta.as_ref(), tc.raw_input.as_ref());
+            let activity_meta = codex_activity_classification_meta(
+                agent_type,
+                tc.meta.as_ref(),
+                tc.raw_input.as_ref(),
+            );
             let mut codex_subagent_thread = None;
             let codex_subagent = match classify_codex_subagent_activity(
                 agent_type,
@@ -17156,7 +17225,7 @@ async fn emit_conversation_update(
                     .insert(thread_id, (tool_call_id.clone(), input.clone()));
             }
             // Grok emits a redundant `tool_call` for its native ask_user_question
-            // alongside the blocking `_x.ai/ask_user_question` ext request codeg
+            // alongside the blocking `_x.ai/ask_user_question` ext request harness_studio
             // answers with the interactive card; drop it here (remembering the id so
             // later status-only updates that lost the meta are dropped too).
             if grok_meta_marks_ask_user(agent_type, tc.meta.as_ref()) {
@@ -17223,14 +17292,12 @@ async fn emit_conversation_update(
             // `rawInput = {command, cwd}` on the opening frame, so this could
             // only ever fire there on a frame that lost it, where the title
             // would be a worse reconstruction than the reducer's prior input.
-            let pi_bash_input = if own_raw_input.is_none()
-                && hosted_shell
-                && matches!(agent_type, AgentType::Pi)
-            {
-                pi_bash_input_from_title(Some(tc.title.as_str()))
-            } else {
-                None
-            };
+            let pi_bash_input =
+                if own_raw_input.is_none() && hosted_shell && matches!(agent_type, AgentType::Pi) {
+                    pi_bash_input_from_title(Some(tc.title.as_str()))
+                } else {
+                    None
+                };
             // gemini sends no `rawInput` for ANY tool — its arguments survive
             // only in the title and locations. Rebuild the canonical shape for
             // the tools whose title format identifies them exactly, so they
@@ -17241,12 +17308,11 @@ async fn emit_conversation_update(
             } else {
                 None
             };
-            let content =
-                serialize_tool_call_content(content_blocks, synthesized_edit.is_none())
-                    .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c))
-                    // pi announces a command with an empty result, which pi-acp
-                    // renders as JSON source (see fn doc).
-                    .filter(|_| !pi_result_content_is_stringify_noise(agent_type, &tc.raw_output));
+            let content = serialize_tool_call_content(content_blocks, synthesized_edit.is_none())
+                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c))
+                // pi announces a command with an empty result, which pi-acp
+                // renders as JSON source (see fn doc).
+                .filter(|_| !pi_result_content_is_stringify_noise(agent_type, &tc.raw_output));
             let images = extract_tool_call_images(content_blocks);
             let codex_subagent_launch = codex_subagent.is_some();
             let raw_input = codex_subagent
@@ -17296,21 +17362,17 @@ async fn emit_conversation_update(
             // to a generic tool card.
             let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tc.meta.as_ref())
                 || codex_subagent_launch;
-            let meta_marks_background = codebuddy_meta_marks_background(agent_type, tc.meta.as_ref());
+            let meta_marks_background =
+                codebuddy_meta_marks_background(agent_type, tc.meta.as_ref());
             let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tc.meta.as_ref());
             let status = format!("{:?}", tc.status).to_lowercase();
             // OpenCode's only authoritative statement of WHICH tool this is
             // arrives on this opening frame's title (see fn doc).
-            let meta = stamp_opencode_tool_name(
-                agent_type,
-                &status,
-                &tc.raw_input,
-                &tc.title,
-                tc.meta,
-            );
+            let meta =
+                stamp_opencode_tool_name(agent_type, &status, &tc.raw_input, &tc.title, tc.meta);
             let meta = stamp_codex_search_action(agent_type, &tc.kind, hosted_shell, meta);
             // Later frames hand the frontend the MERGED `_meta`, which it takes
-            // whole — so codeg's own stamps must be part of the record, or the
+            // whole — so harness_studio's own stamps must be part of the record, or the
             // first update carrying any `_meta` would wipe them.
             if let Some(meta) = meta.as_ref() {
                 cb_state
@@ -17400,9 +17462,10 @@ async fn emit_conversation_update(
             // the whole of it — but only on frames that said something, exactly
             // as before. See `crate::acp::air_contract`.
             let frame_had_meta = tcu.meta.is_some();
-            tcu.meta = cb_state
-                .air_tool_call_meta
-                .update(agent_type, &tool_call_id, tcu.meta.take());
+            tcu.meta =
+                cb_state
+                    .air_tool_call_meta
+                    .update(agent_type, &tool_call_id, tcu.meta.take());
             // codex-acp repeats a search's `rawInput` on its completion frame, so
             // either frame marks the request — one whose opening frame never
             // came still counts (a repeat mark is a no-op).
@@ -17429,18 +17492,19 @@ async fn emit_conversation_update(
                 agent_type,
                 activity_meta.as_ref().or(tcu.meta.as_ref()),
             ) {
-                CodexSubagentActivity::None => match cb_state.codex_activity_calls.get(&tool_call_id) {
-                    Some(Some(launch_input)) => Some(launch_input.clone()),
-                    Some(None) => return,
-                    None => None,
-                },
+                CodexSubagentActivity::None => {
+                    match cb_state.codex_activity_calls.get(&tool_call_id) {
+                        Some(Some(launch_input)) => Some(launch_input.clone()),
+                        Some(None) => return,
+                        None => None,
+                    }
+                }
                 CodexSubagentActivity::Started { thread_id, input } => {
                     codex_subagent_thread = thread_id;
                     Some(input)
                 }
                 CodexSubagentActivity::Terminal { thread_id, kind } => {
-                    settle_codex_subagent_launch(state, emitter, cb_state, &thread_id, &kind)
-                        .await;
+                    settle_codex_subagent_launch(state, emitter, cb_state, &thread_id, &kind).await;
                     return;
                 }
                 CodexSubagentActivity::Other => return,
@@ -17517,14 +17581,12 @@ async fn emit_conversation_update(
             // title is the bare "bash"). Re-synthesize whenever a titled frame
             // shows up; the reducer keeps the prior input on the title-less ones.
             // Gated on pi for the same reason as the ToolCall arm.
-            let pi_bash_input = if own_raw_input.is_none()
-                && hosted_shell
-                && matches!(agent_type, AgentType::Pi)
-            {
-                pi_bash_input_from_title(tcu.fields.title.as_deref())
-            } else {
-                None
-            };
+            let pi_bash_input =
+                if own_raw_input.is_none() && hosted_shell && matches!(agent_type, AgentType::Pi) {
+                    pi_bash_input_from_title(tcu.fields.title.as_deref())
+                } else {
+                    None
+                };
             // gemini repeats title, kind and locations on its SUCCESS
             // completion frame, so the same reconstruction applies here (see
             // `gemini_synthesize_tool_input`). Both wirings are needed: the
@@ -17651,7 +17713,8 @@ async fn emit_conversation_update(
                 .and_then(|l| serde_json::to_value(l).ok());
             let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tcu.meta.as_ref())
                 || codex_subagent_launch;
-            let meta_marks_background = codebuddy_meta_marks_background(agent_type, tcu.meta.as_ref());
+            let meta_marks_background =
+                codebuddy_meta_marks_background(agent_type, tcu.meta.as_ref());
             let grok_spawn = grok_meta_marks_spawn_subagent(agent_type, tcu.meta.as_ref());
             let meta = frame_had_meta
                 .then(|| tcu.meta.clone())
@@ -17671,12 +17734,18 @@ async fn emit_conversation_update(
             }
             // Symmetric with the ToolCall arm: an update may carry the terminal
             // status (and, on grok, usually re-carries the `x.ai/tool` meta).
-            track_grok_spawn_call(cb_state, grok_spawn, status.as_deref(), &tool_call_id, &raw_input);
+            track_grok_spawn_call(
+                cb_state,
+                grok_spawn,
+                status.as_deref(),
+                &tool_call_id,
+                &raw_input,
+            );
             // Ordering variant: `subagent_spawned` can pair BEFORE the launch
             // call's terminal frame arrives. The pairing site skipped its
             // outstanding emission then (call not yet settled), so surface the
             // count here — a completed launch with a paired, still-running
-            // child is a background subagent codeg must not idle-sweep. The
+            // child is a background subagent harness_studio must not idle-sweep. The
             // common ordering (completed first) emits from the pairing site,
             // and `subagent_finished` always re-emits the corrected count.
             if status.as_deref() == Some("completed")
@@ -17724,7 +17793,7 @@ async fn emit_conversation_update(
             // Cursor loses MCP tool identity on the wire entirely (announced as
             // "MCP: tool" before McpArgs exists; updates never resend title or
             // raw_input). The completion update's result text is the one signal
-            // left — recover the codeg-mcp companion identity from it and record
+            // left — recover the harness-studio-mcp companion identity from it and record
             // it as an authoritative override so the delegation / status cards
             // resolve instead of a generic tool. Gated to ids this connection
             // announced with the identity-less title (see the
@@ -17804,7 +17873,7 @@ async fn emit_conversation_update(
             // Agent-initiated push, applied verbatim: it reports what the agent
             // is actually running, and nothing here distinguishes "the user
             // typed /model" from "the agent re-pinned its own default". Logged
-            // because it can silently overwrite a value codeg just applied.
+            // because it can silently overwrite a value harness_studio just applied.
             //
             // Whether an establishment-time value gets defended against this is
             // decided one level up, in the idle loop's copy of this arm
@@ -17814,8 +17883,7 @@ async fn emit_conversation_update(
                 "[ACP] agent pushed config_option_update: model={:?}",
                 current_model_id_from_opts(&map_session_config_options(&update.config_options))
             );
-            emit_session_config_options_values(state, emitter, update.config_options)
-                .await;
+            emit_session_config_options_values(state, emitter, update.config_options).await;
         }
         SessionUpdate::AvailableCommandsUpdate(update) => {
             // Drop config-option state toggles (codex `/plan` — see
@@ -17833,7 +17901,9 @@ async fn emit_conversation_update(
                 .filter(|cmd| seen.insert(cmd.name.clone()))
                 .map(|cmd| {
                     let input_hint = cmd.input.as_ref().map(|input| match input {
-                        agent_client_protocol::schema::v1::AvailableCommandInput::Unstructured(u) => u.hint.clone(),
+                        agent_client_protocol::schema::v1::AvailableCommandInput::Unstructured(
+                            u,
+                        ) => u.hint.clone(),
                         _ => String::new(),
                     });
                     AvailableCommandInfo {
@@ -17851,8 +17921,7 @@ async fn emit_conversation_update(
             // it (see `crate::acp::codex_context`) — on the window this report
             // states, since a model switch moves the denominator even while the
             // figure is held (the parser tracks the window apart the same way).
-            if agent_type == AgentType::Codex
-                && !cb_state.codex_context_readings.admit(update.used)
+            if agent_type == AgentType::Codex && !cb_state.codex_context_readings.admit(update.used)
             {
                 let rekeyed = state
                     .read()
@@ -17893,7 +17962,7 @@ async fn emit_conversation_update(
             // `_meta.goal` for adapters advertising the goal extension
             // (claude-agent-acp 0.66+, codex-acp 1.2+ — which dropped the
             // legacy key), else the legacy `_meta.codex.goal`. Either way it
-            // maps onto codeg's canonical create_goal/update_goal synthetic
+            // maps onto harness_studio's canonical create_goal/update_goal synthetic
             // tool call so the existing goal-card pipeline
             // (groupGoalRuns/GoalCard) renders it — byte-identical to the
             // history path (parsers/codex.rs). Agents publishing no goal meta
@@ -17924,9 +17993,7 @@ async fn emit_conversation_update(
                 crate::acp::session_title::publish_native_title(state, emitter, title).await;
             }
             let neutral_goal_channel = state.read().await.neutral_goal_channel;
-            if let Some(goal) =
-                session_info_goal_value(neutral_goal_channel, info.meta.as_ref())
-            {
+            if let Some(goal) = session_info_goal_value(neutral_goal_channel, info.meta.as_ref()) {
                 if let Some(marker) =
                     crate::acp::codex_goal::next_goal_marker(&mut cb_state.codex_open_goal, goal)
                 {
@@ -17960,7 +18027,7 @@ async fn emit_conversation_update(
                 state.write().await.goal_active = cb_state.codex_open_goal.is_some();
             }
             // JetBrains AIR typed session failure (claude-agent-acp 0.67+/
-            // codex-acp 1.2+): published only because codeg advertises
+            // codex-acp 1.2+): published only because harness_studio advertises
             // `clientCapabilities._meta.jetbrains.air` (see
             // `build_client_capabilities`). Valid upserts are forwarded
             // verbatim — the monotonic id+revision merge runs identically in
@@ -17970,8 +18037,7 @@ async fn emit_conversation_update(
             if let Some(raw) = air_session_failure(info.meta.as_ref()) {
                 match parse_session_failure_record(raw) {
                     Some(record) => {
-                        emit_with_state(state, emitter, AcpEvent::SessionFailure { record })
-                            .await;
+                        emit_with_state(state, emitter, AcpEvent::SessionFailure { record }).await;
                     }
                     None => tracing::debug!(
                         "[ACP] dropped AIR sessionFailure without usable id/revision: {raw:?}"
@@ -18005,7 +18071,7 @@ async fn emit_conversation_update(
             // Unhandled update types, for debugging. DEBUG, not INFO: this arm
             // runs once per `session/update` notification, and `{other:?}` is the
             // whole payload — for a chunk-shaped variant that is the agent's full
-            // text. At INFO a single agent emitting an update kind codeg doesn't
+            // text. At INFO a single agent emitting an update kind harness_studio doesn't
             // map would write the entire conversation to disk several times over
             // under the default level (issue #427). Nothing acts on this line;
             // it exists to be read while adding support for a new variant, which
@@ -18159,7 +18225,10 @@ mod tests {
         assert_eq!(after_b.next.map(|c| c.request_id).as_deref(), Some("c"));
         let after_c = q.resolve("c", "allow".into());
         assert!(after_c.answered);
-        assert!(after_c.next.is_none(), "queue drained, nothing left to show");
+        assert!(
+            after_c.next.is_none(),
+            "queue drained, nothing left to show"
+        );
         assert_eq!(q.showing, None);
         assert_eq!(q.waiting_len(), 0);
 
@@ -18265,7 +18334,10 @@ mod tests {
         admit_stub(&mut q, &log, "a");
         let (tx, mut rx) = oneshot::channel::<()>();
         q.park_detached(tx);
-        assert!(rx.try_recv().is_err() && !rx.is_terminated(), "still parked");
+        assert!(
+            rx.try_recv().is_err() && !rx.is_terminated(),
+            "still parked"
+        );
 
         assert_eq!(q.drain().as_deref(), Some("a"));
         assert!(
@@ -18592,7 +18664,7 @@ mod tests {
         assert!(perms.lock().await.showing.is_none());
     }
 
-    /// An agent request codeg has no handler for still gets an answer. One
+    /// An agent request harness_studio has no handler for still gets an answer. One
     /// that names the session is claimed by the session router — ahead of the
     /// runtime's own `method_not_found` fallback — so without an explicit reply
     /// the agent would block on it forever.
@@ -18784,7 +18856,7 @@ mod tests {
         use agent_client_protocol::JsonRpcMessage;
         // Routing: the derive matches ONLY the underscore-prefixed ext method
         // (the runtime routes typed handlers on the raw wire method — verified against
-        // grok 0.2.101, where the missing underscore made codeg answer "unhandled"
+        // grok 0.2.101, where the missing underscore made harness_studio answer "unhandled"
         // and grok fall back to inert rendering).
         assert!(GrokAskUserQuestionRequest::matches_method(
             "_x.ai/ask_user_question"
@@ -18792,7 +18864,9 @@ mod tests {
         assert!(!GrokAskUserQuestionRequest::matches_method(
             "x.ai/ask_user_question"
         ));
-        assert!(!GrokAskUserQuestionRequest::matches_method("session/prompt"));
+        assert!(!GrokAskUserQuestionRequest::matches_method(
+            "session/prompt"
+        ));
 
         // The exact params grok sends (captured from a real 0.2.101 run): the
         // transparent newtype must deserialize them and the raw object must parse
@@ -18906,7 +18980,7 @@ mod tests {
         ));
         // A terminal marker is not dropped — it is the only live signal that the
         // child stopped working, and it is routed onto the LAUNCH capsule (its
-        // own `toolCallId` is a synthetic `subagent-completed-<uuid>` codeg has
+        // own `toolCallId` is a synthetic `subagent-completed-<uuid>` harness_studio has
         // never seen), keyed by the thread id.
         for kind in ["completed", "interrupted"] {
             let terminal = meta_map(serde_json::json!({
@@ -18999,14 +19073,23 @@ mod tests {
         let review = meta_map(serde_json::json!({
             "codex": { "kind": "plan_review", "planItemId": "item-7" }
         }));
-        let is_review = |agent, id: &str, meta: Option<&serde_json::Map<String, serde_json::Value>>| {
-            codex_plan_review_meta(agent, id, true, meta).is_some()
-        };
-        assert!(is_review(AgentType::Codex, "plan-review:item-7", Some(&review)));
+        let is_review =
+            |agent, id: &str, meta: Option<&serde_json::Map<String, serde_json::Value>>| {
+                codex_plan_review_meta(agent, id, true, meta).is_some()
+            };
+        assert!(is_review(
+            AgentType::Codex,
+            "plan-review:item-7",
+            Some(&review)
+        ));
         // The legacy marker alone is enough — it is the 1.x identity.
         assert!(is_review(AgentType::Codex, "anything", Some(&review)));
         // Gated on Codex: an identical meta from another agent seeds nothing.
-        assert!(!is_review(AgentType::ClaudeCode, "plan-review:item-7", Some(&review)));
+        assert!(!is_review(
+            AgentType::ClaudeCode,
+            "plan-review:item-7",
+            Some(&review)
+        ));
         // Ordinary permission requests carry no meta at all.
         assert!(!is_review(AgentType::Codex, "cmd-1", None));
         // Sibling `codex` keys and other `kind` values must not seed a card.
@@ -19038,7 +19121,9 @@ mod tests {
         assert_eq!(seeded["jetbrains"]["air"]["version"], 1);
         assert_eq!(seeded["codex"]["planItemId"], "p");
         assert!(codex_plan_review_meta(AgentType::Codex, "plan-review:", true, None).is_none());
-        assert!(codex_plan_review_meta(AgentType::ClaudeCode, "plan-review:p", true, None).is_none());
+        assert!(
+            codex_plan_review_meta(AgentType::ClaudeCode, "plan-review:p", true, None).is_none()
+        );
         // The id shape alone, on a request that is not the mode switch, is not
         // the review gate.
         assert!(codex_plan_review_meta(AgentType::Codex, "plan-review:p", false, None).is_none());
@@ -19057,7 +19142,10 @@ mod tests {
                 "presentation": "state"
             }
         }));
-        assert!(is_config_option_state_command(AgentType::Codex, Some(&plan)));
+        assert!(is_config_option_state_command(
+            AgentType::Codex,
+            Some(&plan)
+        ));
         // Gated on Codex — the same meta never suppresses another agent's command.
         assert!(!is_config_option_state_command(
             AgentType::ClaudeCode,
@@ -19068,7 +19156,10 @@ mod tests {
         let goal = meta_map(serde_json::json!({
             "commandAction": { "kind": "prefixPrompt", "presentation": "state" }
         }));
-        assert!(!is_config_option_state_command(AgentType::Codex, Some(&goal)));
+        assert!(!is_config_option_state_command(
+            AgentType::Codex,
+            Some(&goal)
+        ));
         // codex-acp 2.0.0 sends the action under `_meta.jetbrains.air` only
         // (recorded) — the same toggle, suppressed the same way.
         let air_plan = meta_map(serde_json::json!({"jetbrains": {"air": {
@@ -19081,12 +19172,18 @@ mod tests {
                 "presentation": "state"
             }
         }}}));
-        assert!(is_config_option_state_command(AgentType::Codex, Some(&air_plan)));
+        assert!(is_config_option_state_command(
+            AgentType::Codex,
+            Some(&air_plan)
+        ));
         let air_goal = meta_map(serde_json::json!({"jetbrains": {"air": {
             "version": 1,
             "commandAction": { "kind": "prefixPrompt", "presentation": "state" }
         }}}));
-        assert!(!is_config_option_state_command(AgentType::Codex, Some(&air_goal)));
+        assert!(!is_config_option_state_command(
+            AgentType::Codex,
+            Some(&air_goal)
+        ));
         // Ordinary commands (no `commandAction`) and absent meta are kept.
         assert!(!is_config_option_state_command(AgentType::Codex, None));
         let plain = meta_map(serde_json::json!({ "somethingElse": true }));
@@ -19131,9 +19228,7 @@ mod tests {
         assert!(!init_advertises_steering(Some(&off)));
 
         // Wrong nesting (e.g. another convention's namespace) must not count.
-        let nested = meta_map(
-            serde_json::json!({"symposium": {"steering": {"supported": true}}}),
-        );
+        let nested = meta_map(serde_json::json!({"symposium": {"steering": {"supported": true}}}));
         assert!(!init_advertises_steering(Some(&nested)));
 
         // Non-bool / absent → false.
@@ -19164,7 +19259,10 @@ mod tests {
         assert!(init_advertises_goal(Some(&air)));
         assert_eq!(
             goal_advertised_control(Some(&air)),
-            Some(("_session/goal".to_string(), vec!["set".to_string(), "clear".to_string()]))
+            Some((
+                "_session/goal".to_string(),
+                vec!["set".to_string(), "clear".to_string()]
+            ))
         );
 
         // Fail closed onto the legacy channel: sub-1, non-integer, stringly,
@@ -19193,9 +19291,15 @@ mod tests {
             "codex": {"goal": {"objective": "legacy", "status": "active"}},
         }));
         let neutral = session_info_goal_value(true, Some(&both)).expect("neutral value");
-        assert_eq!(neutral.get("objective").and_then(|v| v.as_str()), Some("neutral"));
+        assert_eq!(
+            neutral.get("objective").and_then(|v| v.as_str()),
+            Some("neutral")
+        );
         let legacy = session_info_goal_value(false, Some(&both)).expect("legacy value");
-        assert_eq!(legacy.get("objective").and_then(|v| v.as_str()), Some("legacy"));
+        assert_eq!(
+            legacy.get("objective").and_then(|v| v.as_str()),
+            Some("legacy")
+        );
 
         // Neutral-pinned connections ignore a legacy-only update (and vice
         // versa) — the two updates of a double-publish collapse to one marker.
@@ -19203,9 +19307,8 @@ mod tests {
             serde_json::json!({"codex": {"goal": {"objective": "legacy", "status": "active"}}}),
         );
         assert!(session_info_goal_value(true, Some(&legacy_only)).is_none());
-        let neutral_only = meta_map(
-            serde_json::json!({"goal": {"objective": "neutral", "status": "active"}}),
-        );
+        let neutral_only =
+            meta_map(serde_json::json!({"goal": {"objective": "neutral", "status": "active"}}));
         assert!(session_info_goal_value(false, Some(&neutral_only)).is_none());
 
         // `goal: null` IS a value (the clear signal), not an absent key.
@@ -19230,7 +19333,8 @@ mod tests {
             Some("Ship it")
         );
         assert!(session_info_goal_value(false, Some(&air)).is_none());
-        let air_cleared = meta_map(serde_json::json!({"jetbrains": {"air": {"version": 1, "goal": null}}}));
+        let air_cleared =
+            meta_map(serde_json::json!({"jetbrains": {"air": {"version": 1, "goal": null}}}));
         assert!(matches!(
             session_info_goal_value(true, Some(&air_cleared)),
             Some(v) if v.is_null()
@@ -19337,12 +19441,15 @@ mod tests {
             "a dropped title must not poison the skip-cache"
         );
 
-        state.write().await.apply_event(&AcpEvent::ConversationLinked {
-            conversation_id: 7,
-            folder_id: 1,
-            parent_conversation_id: None,
-            parent_tool_use_id: None,
-        });
+        state
+            .write()
+            .await
+            .apply_event(&AcpEvent::ConversationLinked {
+                conversation_id: 7,
+                folder_id: 1,
+                parent_conversation_id: None,
+                parent_tool_use_id: None,
+            });
 
         drive_session_info_title(&state, "Fix the login flow").await;
         assert_eq!(
@@ -19391,7 +19498,10 @@ mod tests {
         }}));
         assert_eq!(
             goal_advertised_control(Some(&claude)),
-            Some(("_session/goal".to_string(), vec!["set".to_string(), "clear".to_string()]))
+            Some((
+                "_session/goal".to_string(),
+                vec!["set".to_string(), "clear".to_string()]
+            ))
         );
         // Advertised-but-empty actions are honored as "no controls" — the
         // card must not offer affordances the adapter never implemented.
@@ -19566,7 +19676,10 @@ mod tests {
         assert_eq!(record.severity, "error");
         assert_eq!(record.title, "");
         assert_eq!(record.details, None);
-        assert_eq!(record.actions, vec!["retry".to_string(), "sing".to_string()]);
+        assert_eq!(
+            record.actions,
+            vec!["retry".to_string(), "sing".to_string()]
+        );
     }
 
     /// claude-agent-acp 0.74.0's mid-session sign-out record, verbatim off the
@@ -19579,7 +19692,7 @@ mod tests {
     ///   `details`, leaving the policy's client-neutral fallback as the title —
     ///   so the strip reads as a heading with the TUI advice behind its
     ///   expander, not the other way round;
-    /// * the record may carry a `reason` refinement. codeg never produces one
+    /// * the record may carry a `reason` refinement. harness_studio never produces one
     ///   (it is `--hide-claude-auth`-only; see the registry entry), and the
     ///   parser reads fields individually, so an unknown key must simply ride
     ///   through instead of failing the record.
@@ -19648,7 +19761,7 @@ mod tests {
             // "recommendedValue" IS wanted too, and from BOTH
             // (claude-agent-acp 0.76.0, codex-acp 1.11.0): it names each
             // selector's recommended row, and on claude it additionally
-            // retires the ambiguous `default` row so the value codeg journals
+            // retires the ambiguous `default` row so the value harness_studio journals
             // per turn is a real model id. Advertising a capability an agent
             // has NOT implemented is how a future meaning gets claimed by
             // accident — this one is safe only because both adapters now ship
@@ -19663,7 +19776,7 @@ mod tests {
             // explicitly narrower still (it omits anything not done through
             // `apply_patch`). And
             // "nativeSubagentSessions" would make both adapters SUPPRESS the
-            // `Agent`/`Task` tool call that codeg builds its whole subagent
+            // `Agent`/`Task` tool call that harness_studio builds its whole subagent
             // rendering around, replacing it with an announcement that carries
             // no parent tool-use id to rebuild it from. See the reasoning at
             // the advertisement site before relaxing this.
@@ -19706,16 +19819,13 @@ mod tests {
             let caps =
                 serde_json::to_value(build_client_capabilities(agent, HostToolsPolicy::Default))
                     .unwrap();
-            assert!(caps
-                .get("_meta")
-                .and_then(|m| m.get("jetbrains"))
-                .is_none());
+            assert!(caps.get("_meta").and_then(|m| m.get("jetbrains")).is_none());
         }
     }
 
     /// codex gets `terminal_output_delta` (its completion frames stop repeating
     /// the output the bridge already streamed); claude must NOT — there the
-    /// same key moves shell output onto a `_meta` channel codeg does not
+    /// same key moves shell output onto a `_meta` channel harness_studio does not
     /// bridge. Neither may get the other spelling: it would move codex's shell
     /// output onto `terminal_output`, a key its bridge does not read.
     #[test]
@@ -19760,10 +19870,7 @@ mod tests {
             "Cursor initialize must advertise parameterizedModelPicker"
         );
         // Cursor must not pick up Claude/Codex-only extensions.
-        assert!(caps
-            .get("_meta")
-            .and_then(|m| m.get("jetbrains"))
-            .is_none());
+        assert!(caps.get("_meta").and_then(|m| m.get("jetbrains")).is_none());
         assert!(caps
             .get("_meta")
             .and_then(|m| m.get("subagent-transcript"))
@@ -19936,7 +20043,7 @@ mod tests {
         assert_eq!(at("1.11.1-preview.6"), Some(QuestionInDescription));
         assert_eq!(at("1.12.0-preview.1"), Some(QuestionInDescription));
 
-        // No `agentInfo`, or one codeg cannot parse: report nothing rather than
+        // No `agentInfo`, or one harness_studio cannot parse: report nothing rather than
         // guess a generation. The elicitation parser then dates the form from
         // its own markers.
         assert_eq!(codex_user_input_shape(AgentType::Codex, None), None);
@@ -20017,7 +20124,10 @@ mod tests {
         );
         // The opt-in is what keeps the idle race host-owned — its absence
         // would regress to detached `startedNewTurn` turns.
-        assert_eq!(params["_meta"]["steering"]["idleBehavior"], "promptRequired");
+        assert_eq!(
+            params["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
     }
 
     #[test]
@@ -20044,7 +20154,10 @@ mod tests {
         assert_eq!(params["prompt"][1]["type"], "image");
         assert_eq!(params["prompt"][1]["data"], "aGk=");
         assert_eq!(params["prompt"][1]["mimeType"], "image/png");
-        assert_eq!(params["_meta"]["steering"]["idleBehavior"], "promptRequired");
+        assert_eq!(
+            params["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
     }
 
     #[test]
@@ -20202,52 +20315,56 @@ mod tests {
                 "Yes",
                 PermissionOptionKind::AllowOnce,
             ),
-            agent_client_protocol::schema::v1::PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+            agent_client_protocol::schema::v1::PermissionOption::new(
+                "reject",
+                "No",
+                PermissionOptionKind::RejectOnce,
+            ),
         ]
     }
 
     #[test]
-    fn codeg_ask_auto_allow_option_picks_allow_once_for_codegs_own_ask_tool() {
+    fn harness_studio_ask_auto_allow_option_picks_allow_once_for_harness_studios_own_ask_tool() {
         let req = claude_mcp_permission_request(
-            "mcp__codeg-mcp__ask_user_question",
+            "mcp__harness-studio-mcp__ask_user_question",
             claude_permission_options(),
         );
         assert_eq!(
-            codeg_ask_auto_allow_option(&req).as_deref(),
+            harness_studio_ask_auto_allow_option(&req).as_deref(),
             Some("allow-once")
         );
         // The title alone is enough: an agent that sends no request-level
         // `_meta.permission` block still gets the shortcut.
         let mut bare = claude_mcp_permission_request(
-            "mcp__codeg-mcp__ask_user_question",
+            "mcp__harness-studio-mcp__ask_user_question",
             claude_permission_options(),
         );
         bare.meta = None;
         assert_eq!(
-            codeg_ask_auto_allow_option(&bare).as_deref(),
+            harness_studio_ask_auto_allow_option(&bare).as_deref(),
             Some("allow-once")
         );
     }
 
     #[test]
-    fn codeg_ask_auto_allow_option_leaves_every_other_approval_on_the_card() {
+    fn harness_studio_ask_auto_allow_option_leaves_every_other_approval_on_the_card() {
         // Another server's ask tool: approving it is the user's call, not
-        // codeg's, even though the tool half of the name matches.
+        // harness_studio's, even though the tool half of the name matches.
         for foreign in [
             "mcp__other-server__ask_user_question",
-            "mcp__codeg-mcp__delegate_to_agent",
+            "mcp__harness-studio-mcp__delegate_to_agent",
             "Bash",
         ] {
             let req = claude_mcp_permission_request(foreign, claude_permission_options());
             assert!(
-                codeg_ask_auto_allow_option(&req).is_none(),
+                harness_studio_ask_auto_allow_option(&req).is_none(),
                 "{foreign} must keep its approval card"
             );
         }
         // An agent offering only a DURABLE allow writes a rule into the user's
         // own settings — that outlives this turn, so it stays their decision.
         let always_only = claude_mcp_permission_request(
-            "mcp__codeg-mcp__ask_user_question",
+            "mcp__harness-studio-mcp__ask_user_question",
             vec![
                 agent_client_protocol::schema::v1::PermissionOption::new(
                     "allow-with-updates",
@@ -20261,7 +20378,7 @@ mod tests {
                 ),
             ],
         );
-        assert!(codeg_ask_auto_allow_option(&always_only).is_none());
+        assert!(harness_studio_ask_auto_allow_option(&always_only).is_none());
     }
 
     #[test]
@@ -20375,7 +20492,10 @@ mod tests {
              019bf0c4-4d1a-7c3e-9f21-6a0e5b8d2c47 is archived. Run `codex \
              unarchive 019bf0c4-4d1a-7c3e-9f21-6a0e5b8d2c47` to restore it.\"\n}";
         assert_eq!(
-            classify_session_load_failure(agent_client_protocol::schema::v1::ErrorCode::InternalError, archived),
+            classify_session_load_failure(
+                agent_client_protocol::schema::v1::ErrorCode::InternalError,
+                archived
+            ),
             Some("session_archived"),
         );
 
@@ -20397,7 +20517,7 @@ mod tests {
             AgentType::Codex,
             Some("session_archived")
         ));
-        // A custom agent's history is codeg's own transcript, so it keeps the
+        // A custom agent's history is harness_studio's own transcript, so it keeps the
         // silent local recovery it has for the other classified failures.
         let custom = AgentType::custom("glm-acp-agent").expect("valid id");
         assert!(recovers_load_failure_locally(
@@ -20406,9 +20526,9 @@ mod tests {
         ));
     }
 
-    /// After a codex fork, the sibling row codeg creates to keep the pre-fork
+    /// After a codex fork, the sibling row harness_studio creates to keep the pre-fork
     /// history points at the PARENT thread — whose writer the forking process
-    /// holds until codex unloads the thread, about a minute after codeg closes
+    /// holds until codex unloads the thread, about a minute after harness_studio closes
     /// it, because `session/fork` only unsubscribes the child. Opening it in
     /// that window must stop with a banner, never fall through to
     /// `session/new`: that rebinds the row to a fresh empty session and
@@ -20419,7 +20539,10 @@ mod tests {
              01a0626c-c601-78f1-a13d-2b26dd168501 already has an active \
              writer\"\n}";
         assert_eq!(
-            classify_session_load_failure(agent_client_protocol::schema::v1::ErrorCode::InternalError, busy),
+            classify_session_load_failure(
+                agent_client_protocol::schema::v1::ErrorCode::InternalError,
+                busy
+            ),
             Some("session_busy"),
         );
 
@@ -20557,9 +20680,9 @@ mod tests {
     }
 
     #[test]
-    fn agents_codeg_records_itself_absorb_a_forgotten_session() {
+    fn agents_harness_studio_records_itself_absorb_a_forgotten_session() {
         // The reported case: a custom agent keeps sessions in memory, so every
-        // restart makes session/load fail with "Session not found". codeg has
+        // restart makes session/load fail with "Session not found". harness_studio has
         // the turns in its own transcript, so it must recover silently instead
         // of blanking the conversation behind a load-failed banner.
         let custom = AgentType::custom("glm-acp-agent").expect("valid id");
@@ -20585,7 +20708,7 @@ mod tests {
         ] {
             assert!(
                 !recovers_load_failure_locally(builtin, Some("session_unavailable")),
-                "{builtin:?} has no codeg-side transcript to fall back on"
+                "{builtin:?} has no harness-studio-side transcript to fall back on"
             );
         }
     }
@@ -20598,7 +20721,9 @@ mod tests {
         // No configured creds → both injected empty (⇒ spawn strips inherited).
         let mut merged = vec![("PATH".to_string(), "/usr/bin".to_string())];
         apply_cursor_env_policy(&mut merged, &sub);
-        assert!(merged.iter().any(|(k, v)| k == "CURSOR_API_KEY" && v.is_empty()));
+        assert!(merged
+            .iter()
+            .any(|(k, v)| k == "CURSOR_API_KEY" && v.is_empty()));
         assert!(merged
             .iter()
             .any(|(k, v)| k == "CURSOR_API_BASE_URL" && v.is_empty()));
@@ -20606,7 +20731,9 @@ mod tests {
         // A configured key is preserved; only the absent base URL is cleared.
         let mut with_key = vec![("CURSOR_API_KEY".to_string(), "sk-x".to_string())];
         apply_cursor_env_policy(&mut with_key, &sub);
-        assert!(with_key.iter().any(|(k, v)| k == "CURSOR_API_KEY" && v == "sk-x"));
+        assert!(with_key
+            .iter()
+            .any(|(k, v)| k == "CURSOR_API_KEY" && v == "sk-x"));
         assert!(with_key
             .iter()
             .any(|(k, v)| k == "CURSOR_API_BASE_URL" && v.is_empty()));
@@ -20648,7 +20775,9 @@ mod tests {
         // inherited XAI_API_KEY so `grok login` is used).
         let mut merged = vec![("PATH".to_string(), "/usr/bin".to_string())];
         apply_grok_env_policy(&mut merged, &sub);
-        assert!(merged.iter().any(|(k, v)| k == "XAI_API_KEY" && v.is_empty()));
+        assert!(merged
+            .iter()
+            .any(|(k, v)| k == "XAI_API_KEY" && v.is_empty()));
 
         // A configured key is preserved even in subscription mode (explicit wins).
         let mut with_key = vec![("XAI_API_KEY".to_string(), "xai-abc".to_string())];
@@ -20669,10 +20798,7 @@ mod tests {
     }
 
     fn antigravity_runtime(method: &str) -> BTreeMap<String, String> {
-        BTreeMap::from([(
-            ANTIGRAVITY_AUTH_METHOD_ENV.to_string(),
-            method.to_string(),
-        )])
+        BTreeMap::from([(ANTIGRAVITY_AUTH_METHOD_ENV.to_string(), method.to_string())])
     }
 
     #[test]
@@ -20702,7 +20828,9 @@ mod tests {
         assert!(env
             .iter()
             .any(|(k, v)| k == "GEMINI_API_KEY" && v == "real-key"));
-        assert!(env.iter().any(|(k, v)| k == "GOOGLE_API_KEY" && v.is_empty()));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_API_KEY" && v.is_empty()));
 
         // Agent Platform keeps the GOOGLE_* trio, drops GEMINI_API_KEY.
         let mut env = vec![
@@ -20711,11 +20839,15 @@ mod tests {
             ("GEMINI_API_KEY".to_string(), "leaked".to_string()),
         ];
         apply_antigravity_env_policy(&mut env, &antigravity_runtime("agent-platform"));
-        assert!(env.iter().any(|(k, v)| k == "GOOGLE_CLOUD_PROJECT" && v == "p"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_CLOUD_PROJECT" && v == "p"));
         assert!(env
             .iter()
             .any(|(k, v)| k == "GOOGLE_CLOUD_LOCATION" && v == "global"));
-        assert!(env.iter().any(|(k, v)| k == "GEMINI_API_KEY" && v.is_empty()));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GEMINI_API_KEY" && v.is_empty()));
     }
 
     /// A var the method READS but the panel did not store must still be cleared.
@@ -20749,7 +20881,9 @@ mod tests {
             "an inherited GOOGLE_API_KEY would suppress the project the user filled in"
         );
         // The credentials the panel DID store are untouched.
-        assert!(env.iter().any(|(k, v)| k == "GOOGLE_CLOUD_PROJECT" && v == "mine"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GOOGLE_CLOUD_PROJECT" && v == "mine"));
         assert!(env
             .iter()
             .any(|(k, v)| k == "GOOGLE_CLOUD_LOCATION" && v == "global"));
@@ -20759,7 +20893,9 @@ mod tests {
         // here is a leftover rather than a credential.
         let mut env = vec![("GEMINI_API_KEY".to_string(), "   ".to_string())];
         apply_antigravity_env_policy(&mut env, &antigravity_runtime("gemini-api-key"));
-        assert!(env.iter().any(|(k, v)| k == "GEMINI_API_KEY" && v.is_empty()));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GEMINI_API_KEY" && v.is_empty()));
     }
 
     #[test]
@@ -20783,10 +20919,10 @@ mod tests {
         let path = dir.path().join("settings.json");
         assert!(matches!(read_antigravity_settings(&path), Ok(None)));
 
-        // Hjson: the server accepts comments and trailing commas, codeg's
+        // Hjson: the server accepts comments and trailing commas, harness_studio's
         // parser does not — so this lands in the give-up branch instead of
         // being flattened into strict JSON with the comments (and anything
-        // else codeg misread) gone.
+        // else harness_studio misread) gone.
         std::fs::write(
             &path,
             "{\n  // my key\n  \"auth\": { \"type\": \"gemini-api-key\" },\n}\n",
@@ -20836,7 +20972,7 @@ mod tests {
         );
 
         // The FILE wins over the row, which is the whole reason this exists:
-        // the two can disagree (a hand edit, a sync codeg was refused) and only
+        // the two can disagree (a hand edit, a sync harness_studio was refused) and only
         // one of them is what the agent authenticates with.
         let mut disagreeing = antigravity_runtime("oauth-personal");
         disagreeing.extend(home());
@@ -20855,7 +20991,7 @@ mod tests {
         );
 
         // An `auth` block with no type, and a blank one, are both "no method" —
-        // still positive knowledge, because codeg read the file.
+        // still positive knowledge, because harness_studio read the file.
         std::fs::write(&path, r#"{"auth":{"scopes":[]}}"#).unwrap();
         assert_eq!(
             antigravity_effective_auth_type(&home()),
@@ -20867,20 +21003,23 @@ mod tests {
             AntigravityAuthType::Absent
         );
 
-        // Hjson: the server reads it and codeg does not, so the method is
+        // Hjson: the server reads it and harness_studio does not, so the method is
         // whatever that file says. NOT `Absent` — this is the distinction the
         // whole enum exists for. A caller that treated it as "nothing there"
         // would sign out of a `gemini-api-key` connection, clear nothing, and
         // be told `{}`.
-        std::fs::write(&path, "{\n  // mine\n  \"auth\": {\"type\": \"oauth-personal\"},\n}\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "{\n  // mine\n  \"auth\": {\"type\": \"oauth-personal\"},\n}\n",
+        )
+        .unwrap();
         assert_eq!(
             antigravity_effective_auth_type(&home()),
             AntigravityAuthType::Unreadable
         );
 
         // And a home that cannot be named at all is unknown for the same
-        // reason: there is a file somewhere, codeg just cannot say where.
+        // reason: there is a file somewhere, harness_studio just cannot say where.
         // Platform-native key, as in the path tests below: `child_home_dir`
         // reads `USERPROFILE` on Windows (`expanduser` never consults `HOME`
         // there), so blanking `HOME` removes nothing, the fallback lands on the
@@ -20969,7 +21108,7 @@ mod tests {
     #[test]
     fn antigravity_settings_merge_preserves_foreign_keys_and_skips_no_op_writes() {
         // The file is the USER's: the server parses it as Hjson and documents
-        // it as user-provided, so a codeg write may only touch `auth.type` and
+        // it as user-provided, so a harness_studio write may only touch `auth.type` and
         // the `gcp` block.
         let existing = serde_json::json!({
             "auth": { "type": "gemini-api-key" },
@@ -20982,8 +21121,8 @@ mod tests {
             GcpField::Keep,
             GcpField::Keep,
         )
-            .expect("editable")
-            .expect("auth.type changed, so this is a real write");
+        .expect("editable")
+        .expect("auth.type changed, so this is a real write");
         assert_eq!(merged["auth"]["type"], "oauth-business");
         // No panel values supplied ⇒ the hand-written gcp block is untouched.
         assert_eq!(merged["gcp"]["project"], "hand-written");
@@ -20991,30 +21130,37 @@ mod tests {
         assert_eq!(merged["someFutureKey"]["nested"][2], 3);
 
         // Panel values overwrite only the fields they carry.
-        let merged =
-            merge_antigravity_settings(
-                Some(existing.clone()),
-                "oauth-business",
-                GcpField::Set("proj"),
-                GcpField::Keep,
-            )
-                .expect("editable")
-                .expect("changed");
+        let merged = merge_antigravity_settings(
+            Some(existing.clone()),
+            "oauth-business",
+            GcpField::Set("proj"),
+            GcpField::Keep,
+        )
+        .expect("editable")
+        .expect("changed");
         assert_eq!(merged["gcp"]["project"], "proj");
         assert_eq!(merged["gcp"]["location"], "eu", "location was not supplied");
 
         // Already says exactly this ⇒ no write.
-        assert!(
-            merge_antigravity_settings(Some(existing), "gemini-api-key", GcpField::Keep, GcpField::Keep)
-                .expect("editable")
-                .is_none()
-        );
+        assert!(merge_antigravity_settings(
+            Some(existing),
+            "gemini-api-key",
+            GcpField::Keep,
+            GcpField::Keep
+        )
+        .expect("editable")
+        .is_none());
 
         // No file at all: created from scratch. (A non-object ROOT never gets
         // here — the read side already refused it.)
-        let created = merge_antigravity_settings(None, "oauth-personal", GcpField::Set("p"), GcpField::Set("global"))
-            .expect("editable")
-            .expect("created");
+        let created = merge_antigravity_settings(
+            None,
+            "oauth-personal",
+            GcpField::Set("p"),
+            GcpField::Set("global"),
+        )
+        .expect("editable")
+        .expect("created");
         assert_eq!(created["auth"]["type"], "oauth-personal");
         assert_eq!(created["gcp"]["project"], "p");
         assert_eq!(created["gcp"]["location"], "global");
@@ -21024,26 +21170,35 @@ mod tests {
     fn antigravity_settings_merge_refuses_blocks_that_are_not_objects() {
         // The vendor's `_auth_block` logs "not editing %r because `auth` is not
         // an object" and gives up. Replacing that value with an object would
-        // delete whatever the user meant by it, so codeg refuses too.
+        // delete whatever the user meant by it, so harness_studio refuses too.
         let odd_auth = serde_json::json!({ "auth": "managed-elsewhere", "keep": 1 });
-        assert!(merge_antigravity_settings(Some(odd_auth), "oauth-personal", GcpField::Keep, GcpField::Keep).is_err());
+        assert!(merge_antigravity_settings(
+            Some(odd_auth),
+            "oauth-personal",
+            GcpField::Keep,
+            GcpField::Keep
+        )
+        .is_err());
 
         // Same for `gcp` — but ONLY when there is actually something to write
         // into it. With no project or location supplied, a strange `gcp` is
-        // none of codeg's business and must not block the `auth.type` update.
+        // none of harness_studio's business and must not block the `auth.type` update.
         let odd_gcp = serde_json::json!({ "gcp": ["not", "an", "object"] });
-        assert!(
-            merge_antigravity_settings(
-                Some(odd_gcp.clone()),
-                "oauth-personal",
-                GcpField::Set("p"),
-                GcpField::Keep,
-            )
-                .is_err()
-        );
-        let untouched = merge_antigravity_settings(Some(odd_gcp), "oauth-personal", GcpField::Keep, GcpField::Keep)
-            .expect("editable")
-            .expect("auth.type still written");
+        assert!(merge_antigravity_settings(
+            Some(odd_gcp.clone()),
+            "oauth-personal",
+            GcpField::Set("p"),
+            GcpField::Keep,
+        )
+        .is_err());
+        let untouched = merge_antigravity_settings(
+            Some(odd_gcp),
+            "oauth-personal",
+            GcpField::Keep,
+            GcpField::Keep,
+        )
+        .expect("editable")
+        .expect("auth.type still written");
         assert_eq!(untouched["auth"]["type"], "oauth-personal");
         assert_eq!(untouched["gcp"], serde_json::json!(["not", "an", "object"]));
 
@@ -21055,8 +21210,8 @@ mod tests {
             GcpField::Keep,
             GcpField::Keep,
         )
-            .expect("editable")
-            .expect("changed");
+        .expect("editable")
+        .expect("changed");
         assert_eq!(filled["auth"]["type"], "gemini-api-key");
         assert_eq!(filled["keep"], 2);
     }
@@ -21080,10 +21235,14 @@ mod tests {
         };
 
         // The panel owns both fields for this method and both are now empty.
-        let cleared =
-            merge_antigravity_settings(Some(existing()), "oauth-business", GcpField::Clear, GcpField::Clear)
-                .expect("editable")
-                .expect("the gcp block changed, so this is a real write");
+        let cleared = merge_antigravity_settings(
+            Some(existing()),
+            "oauth-business",
+            GcpField::Clear,
+            GcpField::Clear,
+        )
+        .expect("editable")
+        .expect("the gcp block changed, so this is a real write");
         assert!(
             cleared.get("gcp").is_none(),
             "an emptied block should go rather than linger as {{}}: {cleared}"
@@ -21092,10 +21251,14 @@ mod tests {
         assert_eq!(cleared["keep"], 1, "foreign keys still survive a clear");
 
         // One cleared, one set.
-        let partial =
-            merge_antigravity_settings(Some(existing()), "oauth-business", GcpField::Set("new"), GcpField::Clear)
-                .expect("editable")
-                .expect("changed");
+        let partial = merge_antigravity_settings(
+            Some(existing()),
+            "oauth-business",
+            GcpField::Set("new"),
+            GcpField::Clear,
+        )
+        .expect("editable")
+        .expect("changed");
         assert_eq!(partial["gcp"]["project"], "new");
         assert!(partial["gcp"].get("location").is_none());
 
@@ -21112,14 +21275,18 @@ mod tests {
 
         // And a clear against a `gcp` that is not an object must not REFUSE the
         // edit: there is nothing there to remove, so it is the same "none of
-        // codeg's business" case as having nothing to say, and blocking would
+        // harness_studio's business" case as having nothing to say, and blocking would
         // take the `auth.type` update down with it — the one part of this file
         // the agent cannot start without.
         let odd = serde_json::json!({ "gcp": ["not", "an", "object"] });
-        let still_written =
-            merge_antigravity_settings(Some(odd), "oauth-business", GcpField::Clear, GcpField::Clear)
-                .expect("a clear must not refuse a block it cannot edit")
-                .expect("auth.type still written");
+        let still_written = merge_antigravity_settings(
+            Some(odd),
+            "oauth-business",
+            GcpField::Clear,
+            GcpField::Clear,
+        )
+        .expect("a clear must not refuse a block it cannot edit")
+        .expect("auth.type still written");
         assert_eq!(still_written["auth"]["type"], "oauth-business");
         assert_eq!(
             still_written["gcp"],
@@ -21129,7 +21296,7 @@ mod tests {
 
     /// Which fields count as the panel's is decided by the METHOD, so a
     /// hand-written block under a method that never renders those inputs is
-    /// still none of codeg's business.
+    /// still none of harness_studio's business.
     #[test]
     fn antigravity_gcp_ownership_follows_the_recorded_method() {
         let empty = BTreeMap::new();
@@ -21155,22 +21322,22 @@ mod tests {
         ));
     }
 
-    /// A `GEMINI_HOME` that only codeg's OWN environment carries still names
+    /// A `GEMINI_HOME` that only harness_studio's OWN environment carries still names
     /// the directory the agent uses.
     ///
     /// `merge_agent_env` lists the variables a launch SETS; anything absent is
     /// inherited, and relocating the tree from a container's environment
     /// (`GEMINI_HOME=/data/gemini` in the image, nothing in the per-agent row)
-    /// is exactly that shape. Treating "absent" as "unset" sent codeg to
+    /// is exactly that shape. Treating "absent" as "unset" sent harness_studio to
     /// `~/.gemini` — so on a Docker deployment it wrote `auth.type` into
     /// `/root/.gemini` while the agent read the relocated file, and the panel
     /// named a token path that was never written. The same three-state
     /// distinction `child_home_dir` makes for `HOME`, for the same reason.
     #[test]
-    fn antigravity_settings_path_follows_a_gemini_home_codeg_only_inherits() {
+    fn antigravity_settings_path_follows_a_gemini_home_harness_studio_only_inherits() {
         // Platform-native, and HOME is pinned in the row rather than read from
         // the process: other tests relocate the real one through `temp_env`,
-        // and a read here would race them. codeg's own `GEMINI_HOME` is
+        // and a read here would race them. harness_studio's own `GEMINI_HOME` is
         // injected for the same reason — see
         // [`antigravity_acp_dir_with_inherited`].
         #[cfg(windows)]
@@ -21185,12 +21352,12 @@ mod tests {
             ("HOME", "/srv/agy", "/data/gemini", "/srv/row");
         let base = || BTreeMap::from([(home_key.to_string(), child_home.to_string())]);
 
-        let codegs_own = || Some(std::ffi::OsString::from(inherited));
+        let harness_studios_own = || Some(std::ffi::OsString::from(inherited));
 
-        // ABSENT from the row: the child inherits codeg's, so codeg's own value
+        // ABSENT from the row: the child inherits harness_studio's, so harness_studio's own value
         // is the exact answer.
         assert_eq!(
-            antigravity_acp_dir_with_inherited(&base(), codegs_own()).expect("nameable"),
+            antigravity_acp_dir_with_inherited(&base(), harness_studios_own()).expect("nameable"),
             PathBuf::from(inherited).join(ANTIGRAVITY_ACP_SUBDIR)
         );
 
@@ -21199,25 +21366,26 @@ mod tests {
         let mut overridden = base();
         overridden.insert("GEMINI_HOME".to_string(), from_row.to_string());
         assert_eq!(
-            antigravity_acp_dir_with_inherited(&overridden, codegs_own()).expect("nameable"),
+            antigravity_acp_dir_with_inherited(&overridden, harness_studios_own())
+                .expect("nameable"),
             PathBuf::from(from_row).join(ANTIGRAVITY_ACP_SUBDIR)
         );
 
         // Present but EMPTY is a removal (the spawn layer reads a blank as
         // `env_remove`), and a removal is NOT the same as absent: the child then
         // sees no `GEMINI_HOME` at all and falls back to `~/.gemini` under its
-        // own home. Collapsing the two would send codeg to the inherited value
+        // own home. Collapsing the two would send harness_studio to the inherited value
         // for a launch that deliberately took it away.
         let mut removed = base();
         removed.insert("GEMINI_HOME".to_string(), String::new());
         assert_eq!(
-            antigravity_acp_dir_with_inherited(&removed, codegs_own()).expect("nameable"),
+            antigravity_acp_dir_with_inherited(&removed, harness_studios_own()).expect("nameable"),
             PathBuf::from(child_home)
                 .join(".gemini")
                 .join(ANTIGRAVITY_ACP_SUBDIR)
         );
 
-        // And codeg having none either is the plain default.
+        // And harness_studio having none either is the plain default.
         assert_eq!(
             antigravity_acp_dir_with_inherited(&base(), None).expect("nameable"),
             PathBuf::from(child_home)
@@ -21230,7 +21398,7 @@ mod tests {
     /// same thing here.
     ///
     /// Antigravity runs `os.path.expanduser` on the value
-    /// (`acp_server/paths.py`). codeg built the path with a bare
+    /// (`acp_server/paths.py`). harness_studio built the path with a bare
     /// `PathBuf::from`, so it created a directory literally named `~` under its
     /// own working directory and wrote `auth.type` into THAT — leaving
     /// `session/new` failing with `Authentication required` no matter how many
@@ -21246,7 +21414,7 @@ mod tests {
 
         // …and against the CHILD's home when the launch relocates it, since the
         // server runs its `expanduser` in that environment. Resolving against
-        // codeg's home wrote the auth file into a tree the agent never opens.
+        // harness_studio's home wrote the auth file into a tree the agent never opens.
         // Platform-native fixture: `child_home_dir` refuses a home that is not
         // absolute, and a unix-style `/srv/agy` has no drive prefix so Windows
         // does not consider it absolute. A shared literal would pass on unix
@@ -21267,8 +21435,7 @@ mod tests {
                 .join("antigravity-acp")
         );
         // The `~/.gemini` default follows it too.
-        let default_under_child =
-            BTreeMap::from([(home_key.to_string(), child_home.to_string())]);
+        let default_under_child = BTreeMap::from([(home_key.to_string(), child_home.to_string())]);
         assert_eq!(
             antigravity_acp_dir_for_env(&default_under_child).expect("nameable"),
             PathBuf::from(child_home)
@@ -21294,7 +21461,7 @@ mod tests {
 
         // An absolute value is still taken verbatim, and an EXACTLY empty one
         // means the spawn layer removed the var, so the child falls back to its
-        // own default rather than to codeg's cwd.
+        // own default rather than to harness_studio's cwd.
         let absolute = BTreeMap::from([("GEMINI_HOME".to_string(), "/srv/gemini".to_string())]);
         assert_eq!(
             antigravity_acp_dir_for_env(&absolute).expect("nameable"),
@@ -21331,7 +21498,7 @@ mod tests {
     #[test]
     fn codex_env_policy_forces_mcp_filter_off_and_overrides_user_twin() {
         // Codex gets the flag injected so codex-acp never drops the injected
-        // `codeg-mcp` server on a config.toml name collision.
+        // `harness-studio-mcp` server on a config.toml name collision.
         let mut env = vec![("PATH".to_string(), "/usr/bin".to_string())];
         apply_codex_env_policy(AgentType::Codex, &mut env, None);
         assert!(env
@@ -21349,7 +21516,10 @@ mod tests {
             .filter(|(k, _)| k == "DISABLE_MCP_CONFIG_FILTERING")
             .collect();
         assert_eq!(hits.len(), 1, "no duplicate key");
-        assert_eq!(hits[0].1, "true", "codeg override wins over user twin");
+        assert_eq!(
+            hits[0].1, "true",
+            "harness_studio override wins over user twin"
+        );
     }
 
     #[test]
@@ -21490,7 +21660,11 @@ mod tests {
         // sends one per `structuredPatch` hunk after a multi-site Edit. Keyed
         // by path, every hunk but the last used to vanish.
         let content = vec![
-            diff_content("/a.rs", Some("fn a() {\n    1\n}\n"), "fn a() {\n    2\n}\n"),
+            diff_content(
+                "/a.rs",
+                Some("fn a() {\n    1\n}\n"),
+                "fn a() {\n    2\n}\n",
+            ),
             diff_content("/a.rs", Some("fn z() {\n    1\n}"), "fn z() {\n    3\n}"),
         ];
         let v: serde_json::Value =
@@ -21513,8 +21687,14 @@ mod tests {
         ];
         let v: serde_json::Value =
             serde_json::from_str(&synthesize_edit_input_from_diffs(&content).unwrap()).unwrap();
-        assert_eq!(v["changes"]["/a.rs"]["old_text"], format!("a1\n{HUNK_SEPARATOR}\na2"));
-        assert_eq!(v["changes"]["/a.rs"]["new_text"], format!("A1\n{HUNK_SEPARATOR}\nA2"));
+        assert_eq!(
+            v["changes"]["/a.rs"]["old_text"],
+            format!("a1\n{HUNK_SEPARATOR}\na2")
+        );
+        assert_eq!(
+            v["changes"]["/a.rs"]["new_text"],
+            format!("A1\n{HUNK_SEPARATOR}\nA2")
+        );
         assert_eq!(v["changes"]["/b.rs"]["old_text"], "b1");
     }
 
@@ -21567,7 +21747,8 @@ mod tests {
             "/workspace/old.txt",
         )
         .unwrap();
-        assert!(deleted.starts_with("deleted file mode 100644\n--- a//workspace/old.txt\n+++ /dev/null\n"));
+        assert!(deleted
+            .starts_with("deleted file mode 100644\n--- a//workspace/old.txt\n+++ /dev/null\n"));
         let renamed = normalize_git_patch(
             "diff --git a/workspace/before.ts b/workspace/after.ts\nrename from workspace/before.ts\nrename to workspace/after.ts\n--- a/workspace/before.ts\n+++ b/workspace/after.ts\n@@ -1 +1 @@\n-x\n+y\n",
             "/workspace/after.ts",
@@ -21587,12 +21768,21 @@ mod tests {
         assert!(tricky.ends_with("@@ -1 +1 @@\n--- not a header\n+++ nor this\n"));
         // Windows: codex writes the drive path without a leading slash.
         assert_eq!(patch_header_path("a/C:/work/App.ts"), "C:/work/App.ts");
-        assert_eq!(patch_header_path("\"a/w/with \\\"q\\\".ts\""), "/w/with \"q\".ts");
+        assert_eq!(
+            patch_header_path("\"a/w/with \\\"q\\\".ts\""),
+            "/w/with \"q\".ts"
+        );
         assert_eq!(patch_header_path("b/w/has space.ts\t"), "/w/has space.ts");
         // Git's C quoting of a control character, and of a raw byte in octal.
         // A backslash is `\\`, a tab `\t`, a raw byte `\NNN` octal.
-        assert_eq!(patch_header_path("\"a/w/back\\\\slash.ts\""), "/w/back\\slash.ts");
-        assert_eq!(patch_header_path("\"a/w/tab\\there.ts\""), "/w/tab\there.ts");
+        assert_eq!(
+            patch_header_path("\"a/w/back\\\\slash.ts\""),
+            "/w/back\\slash.ts"
+        );
+        assert_eq!(
+            patch_header_path("\"a/w/tab\\there.ts\""),
+            "/w/tab\there.ts"
+        );
         assert_eq!(patch_header_path("\"a/w/bell\\007.ts\""), "/w/bell\u{7}.ts");
         // No hunk, no patch.
         assert!(normalize_git_patch("--- a/w/f\n+++ b/w/f\n", "/w/f").is_none());
@@ -21645,7 +21835,11 @@ mod tests {
     fn claude_edit_input_gets_its_text_back_from_the_diff() {
         // claude-agent-acp 0.82.0 (AIR), recorded: `rawInput` is `{file_path}`
         // alone and the model's strings ride only in the diff block.
-        let content = vec![diff_content("/w/app.ts", Some("const value = 1;"), "const value = 2;")];
+        let content = vec![diff_content(
+            "/w/app.ts",
+            Some("const value = 1;"),
+            "const value = 2;",
+        )];
         let merged = claude_complete_file_edit_input(
             AgentType::ClaudeCode,
             Some(&claude_meta("Edit")),
@@ -21722,7 +21916,10 @@ mod tests {
             Some("Continue? \ny\n".to_string())
         );
         // pi has no stdin channel; its unnamespaced key is not read.
-        assert_eq!(hosted_terminal_output_delta(AgentType::Pi, Some(&stdin)), None);
+        assert_eq!(
+            hosted_terminal_output_delta(AgentType::Pi, Some(&stdin)),
+            None
+        );
     }
 
     #[test]
@@ -21802,7 +21999,9 @@ mod tests {
         });
         stash_claude_viewed_results(&params, &mut cb);
         assert_eq!(
-            cb.claude_viewed_results.get("toolu_read").map(String::as_str),
+            cb.claude_viewed_results
+                .get("toolu_read")
+                .map(String::as_str),
             Some("1\tconst a = 1;")
         );
         assert!(!cb.claude_viewed_results.contains_key("toolu_bash"));
@@ -21813,7 +22012,8 @@ mod tests {
     fn codex_activity_is_classified_off_the_raw_input_once_the_marker_is_gone() {
         // codex-acp 2.0.0, recorded: no `_meta.codex.subagent`; the activity's
         // three facts ride `rawInput`, and the AIR flag says only "subagent".
-        let meta = meta_map(serde_json::json!({"jetbrains": {"air": {"subagent": true, "version": 1}}}));
+        let meta =
+            meta_map(serde_json::json!({"jetbrains": {"air": {"subagent": true, "version": 1}}}));
         let raw = serde_json::json!({
             "activityKind": "started", "agentPath": "/root/weather", "agentThreadId": "child-thread"
         });
@@ -21829,13 +22029,21 @@ mod tests {
         let legacy = meta_map(serde_json::json!({
             "codex": {"subagent": {"threadId": "t", "path": "/root/x", "activity": "started"}}
         }));
-        assert!(codex_activity_classification_meta(AgentType::Codex, Some(&legacy), Some(&raw)).is_none());
+        assert!(
+            codex_activity_classification_meta(AgentType::Codex, Some(&legacy), Some(&raw))
+                .is_none()
+        );
         // A collaboration call (same AIR flag, different input) is no activity.
         let collab = serde_json::json!({
             "senderThreadId": "s", "receiverThreadIds": ["c"], "agentsStates": {}, "prompt": "p"
         });
-        assert!(codex_activity_classification_meta(AgentType::Codex, Some(&meta), Some(&collab)).is_none());
-        assert!(codex_activity_classification_meta(AgentType::ClaudeCode, None, Some(&raw)).is_none());
+        assert!(
+            codex_activity_classification_meta(AgentType::Codex, Some(&meta), Some(&collab))
+                .is_none()
+        );
+        assert!(
+            codex_activity_classification_meta(AgentType::ClaudeCode, None, Some(&raw)).is_none()
+        );
     }
 
     #[test]
@@ -21879,7 +22087,7 @@ mod tests {
     }
 
     /// A bare `pi` is looked up on the PATH the launch hands the child, which
-    /// can differ from codeg's own (a per-agent override, the OfficeCLI prepend).
+    /// can differ from harness_studio's own (a per-agent override, the OfficeCLI prepend).
     #[cfg(unix)]
     #[test]
     fn pi_preflight_searches_the_launch_path() {
@@ -21906,7 +22114,7 @@ mod tests {
     }
 
     /// A relative `PATH` entry is searched inside the workspace, where pi-acp's
-    /// spawn runs — never in codeg's own cwd.
+    /// spawn runs — never in harness_studio's own cwd.
     #[cfg(unix)]
     #[test]
     fn pi_preflight_anchors_a_relative_path_entry_in_the_workspace() {
@@ -21921,7 +22129,7 @@ mod tests {
     }
 
     /// pi-acp spawns a relative command with the session's workspace as cwd, so
-    /// that is where it must exist — not in codeg's own cwd.
+    /// that is where it must exist — not in harness_studio's own cwd.
     #[cfg(unix)]
     #[test]
     fn pi_preflight_resolves_a_relative_command_in_the_workspace() {
@@ -21992,7 +22200,7 @@ mod tests {
         assert!(!raw.contains(MCP_SUSPECT_SENTINEL), "{raw}");
         assert!(!raw.contains(AUTH_REQUIRED_SENTINEL), "{raw}");
 
-        // Both opens end as the same coded error, with codeg's own
+        // Both opens end as the same coded error, with harness_studio's own
         // instructions in place of the wire text.
         let load_tagged = tag_pi_runtime_outdated(&load_failure, AgentType::Pi).unwrap();
         for err in [connection_failure(tagged), connection_failure(load_tagged)] {
@@ -22033,8 +22241,10 @@ mod tests {
             true,
         );
         // Exactly one PATH-ish key, the original casing preserved, value prepended.
-        let path_keys: Vec<&String> =
-            env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).collect();
+        let path_keys: Vec<&String> = env
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("PATH"))
+            .collect();
         assert_eq!(path_keys.len(), 1, "{env:?}");
         assert_eq!(
             env.get("Path").unwrap(),
@@ -22045,9 +22255,17 @@ mod tests {
     #[test]
     fn prepend_path_windows_seeds_from_fallback_with_semicolon() {
         let mut env = BTreeMap::new();
-        prepend_dir_to_path_env(&mut env, r"C:\OfficeCLI", r"C:\Windows;C:\Windows\System32", true);
+        prepend_dir_to_path_env(
+            &mut env,
+            r"C:\OfficeCLI",
+            r"C:\Windows;C:\Windows\System32",
+            true,
+        );
         // No prior key → default `Path` casing on Windows.
-        assert_eq!(env.get("Path").unwrap(), r"C:\OfficeCLI;C:\Windows;C:\Windows\System32");
+        assert_eq!(
+            env.get("Path").unwrap(),
+            r"C:\OfficeCLI;C:\Windows;C:\Windows\System32"
+        );
     }
 
     #[test]
@@ -22060,9 +22278,15 @@ mod tests {
         env.insert("PATH".to_string(), r"C:\a".to_string());
         env.insert("Path".to_string(), r"C:\b".to_string());
         prepend_dir_to_path_env(&mut env, r"C:\OfficeCLI", "ignored-fallback", true);
-        let path_keys: Vec<&String> =
-            env.keys().filter(|k| k.eq_ignore_ascii_case("PATH")).collect();
-        assert_eq!(path_keys.len(), 1, "exactly one PATH-ish key must remain: {env:?}");
+        let path_keys: Vec<&String> = env
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("PATH"))
+            .collect();
+        assert_eq!(
+            path_keys.len(),
+            1,
+            "exactly one PATH-ish key must remain: {env:?}"
+        );
         assert_eq!(env.get("Path").unwrap(), r"C:\OfficeCLI;C:\b");
     }
 
@@ -22122,11 +22346,11 @@ mod tests {
                 .expect("caps serialize")
         };
 
-        // #436: the whole point. An agent told codeg hosts neither channel
+        // #436: the whole point. An agent told harness_studio hosts neither channel
         // does its own reads and runs its own shell, so its OS sandbox — the
         // only control still working under `grok agent stdio` — covers them.
         // BOTH must go: leaving either advertised hands the agent a way back
-        // into codeg's unsandboxed process for the same file.
+        // into harness_studio's unsandboxed process for the same file.
         //
         // `ClientCapabilities` serializes its unset fields as explicit `false`
         // rather than omitting them, so assert THAT shape — not absence. The
@@ -22136,7 +22360,10 @@ mod tests {
         // `EPERM`, every shell fallback blocked, `FsViolation` audited).
         let withheld = caps_of(AgentType::Grok, HostToolsPolicy::Agent);
         assert_eq!(withheld["terminal"], serde_json::Value::Bool(false));
-        assert_eq!(withheld["fs"]["readTextFile"], serde_json::Value::Bool(false));
+        assert_eq!(
+            withheld["fs"]["readTextFile"],
+            serde_json::Value::Bool(false)
+        );
         assert_eq!(
             withheld["fs"]["writeTextFile"],
             serde_json::Value::Bool(false)
@@ -22167,10 +22394,10 @@ mod tests {
 
     #[test]
     fn a_withheld_channel_is_refused_as_method_not_found() {
-        // Every channel codeg stops advertising must also stop being SERVED.
+        // Every channel harness_studio stops advertising must also stop being SERVED.
         // Advertisement is a declaration; an agent that calls the method anyway
         // (or a future adapter that ignores client capabilities) would otherwise
-        // land the operation back in codeg's unsandboxed process — the bug.
+        // land the operation back in harness_studio's unsandboxed process — the bug.
         for method in [
             "fs/read_text_file",
             "fs/write_text_file",
@@ -22181,10 +22408,13 @@ mod tests {
             "terminal/release",
         ] {
             let error = unadvertised_channel_error(method);
-            assert_eq!(error.code, agent_client_protocol::Error::method_not_found().code);
+            assert_eq!(
+                error.code,
+                agent_client_protocol::Error::method_not_found().code
+            );
             let text = error.to_string();
             // The knob has to be named: a bare "Method not found" on a channel
-            // that worked yesterday reads as a codeg bug, not as a setting.
+            // that worked yesterday reads as a harness_studio bug, not as a setting.
             assert!(text.contains(method), "{text}");
             assert!(text.contains(HOST_TOOLS_ENV), "{text}");
         }
@@ -22193,7 +22423,7 @@ mod tests {
     #[test]
     fn strict_fs_policy_is_only_a_boundary_once_the_terminal_is_withheld() {
         // Pins the condition behind the connect-time warning: `strict` gates
-        // reads, but that gate is walkable through a shell for as long as codeg
+        // reads, but that gate is walkable through a shell for as long as harness_studio
         // serves one. The two knobs are orthogonal — this asserts the predicate
         // pair the warning keys off, so the warning can't silently stop firing.
         let strict = FsAccessPolicy::strict(Path::new("/workspace"));
@@ -22726,9 +22956,18 @@ mod tests {
                 assert_eq!(tool_call_id, "019f9475-c67f-7390-9ee5-a09d29986a6c-4");
                 assert_eq!(status, "completed");
                 let meta = meta.expect("compaction card needs meta");
-                assert_eq!(meta.get("contextCompaction").and_then(|v| v.as_bool()), Some(true));
-                assert_eq!(meta.get("tokensBefore").and_then(|v| v.as_u64()), Some(45389));
-                assert_eq!(meta.get("tokensAfter").and_then(|v| v.as_u64()), Some(16486));
+                assert_eq!(
+                    meta.get("contextCompaction").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+                assert_eq!(
+                    meta.get("tokensBefore").and_then(|v| v.as_u64()),
+                    Some(45389)
+                );
+                assert_eq!(
+                    meta.get("tokensAfter").and_then(|v| v.as_u64()),
+                    Some(16486)
+                );
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
@@ -22834,7 +23073,7 @@ mod tests {
 
     #[test]
     fn final_agent_boundary_appends_routes_for_every_agent_holding_a_snapshot() {
-        let visible = "ask [@Antigravity](codeg://agent/antigravity) to build";
+        let visible = "ask [@Antigravity](harnessstudio://agent/antigravity) to build";
         let blocks = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -22855,7 +23094,7 @@ mod tests {
             assert!(matches!(
                 &prompt[1],
                 ContentBlock::Text(text)
-                    if text.text.contains("Codeg composer routing metadata (authoritative)")
+                    if text.text.contains("harness studio composer routing metadata (authoritative)")
                         && text.text.contains(r#""agentType":"antigravity""#)
             ));
         }
@@ -23151,8 +23390,7 @@ mod tests {
             "subagent_type": "plan"
         }));
         assert!(
-            map_grok_subagent_notification(&stale_bare, AgentType::Grok, true, &mut cb)
-                .is_empty(),
+            map_grok_subagent_notification(&stale_bare, AgentType::Grok, true, &mut cb).is_empty(),
             "an event missing a captured field must not match"
         );
         assert_eq!(cb.grok_pending_spawn_ids.len(), 1, "B still keeps its slot");
@@ -23263,8 +23501,14 @@ mod tests {
                     .as_ref()
                     .and_then(|m| m.get("grokSubagentProgress"))
                     .expect("progress meta");
-                assert_eq!(progress.get("toolCallCount").and_then(|v| v.as_u64()), Some(7));
-                assert_eq!(progress.get("durationMs").and_then(|v| v.as_u64()), Some(4200));
+                assert_eq!(
+                    progress.get("toolCallCount").and_then(|v| v.as_u64()),
+                    Some(7)
+                );
+                assert_eq!(
+                    progress.get("durationMs").and_then(|v| v.as_u64()),
+                    Some(4200)
+                );
                 assert_eq!(
                     progress.get("contextUsagePct").and_then(|v| v.as_f64()),
                     Some(12.5)
@@ -23294,7 +23538,8 @@ mod tests {
         }));
         // The settle is likewise out-of-turn-safe (a background child usually
         // finishes after its launch turn ended).
-        match map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).as_slice() {
+        match map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).as_slice()
+        {
             [AcpEvent::BackgroundActivity {
                 session_id,
                 outstanding,
@@ -23313,8 +23558,9 @@ mod tests {
             other => panic!("expected BackgroundActivity, got {other:?}"),
         }
         // Lifecycle over: a duplicate finished no longer routes anywhere.
-        assert!(map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb)
-            .is_empty());
+        assert!(
+            map_grok_subagent_notification(&finished, AgentType::Grok, false, &mut cb).is_empty()
+        );
     }
 
     /// A BLOCKING spawn (call not yet settled when the child finishes) must NOT
@@ -23432,11 +23678,20 @@ mod tests {
             )
         };
         // Both compaction outcomes are visible turn output.
-        assert!(grok_ext_notification_is_turn_output(&notif("auto_compact_completed"), AgentType::Grok));
-        assert!(grok_ext_notification_is_turn_output(&notif("auto_compact_failed"), AgentType::Grok));
+        assert!(grok_ext_notification_is_turn_output(
+            &notif("auto_compact_completed"),
+            AgentType::Grok
+        ));
+        assert!(grok_ext_notification_is_turn_output(
+            &notif("auto_compact_failed"),
+            AgentType::Grok
+        ));
         // turn_completed is deliberately left to the prompt-response path — it is
         // NOT counted here (otherwise a genuinely empty turn would be masked).
-        assert!(!grok_ext_notification_is_turn_output(&notif("turn_completed"), AgentType::Grok));
+        assert!(!grok_ext_notification_is_turn_output(
+            &notif("turn_completed"),
+            AgentType::Grok
+        ));
         // Never fires for a non-grok agent.
         assert!(!grok_ext_notification_is_turn_output(
             &notif("auto_compact_completed"),
@@ -23499,7 +23754,7 @@ mod tests {
         };
 
         let claude = session_notice(&from_wire(
-            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"f11ac967-067f-480a-8acc-a3c689b40bb3","update":{"sessionUpdate":"notice","severity":"warning","title":"UserPromptSubmit operation blocked by hook:","description":"[echo 'Blocked by the codeg probe hook: prompts are not allowed in this folder.' >&2; exit 2]: Blocked by the codeg probe hook: prompts are not allowed in this folder.\n\n\nOriginal prompt: say hi"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"f11ac967-067f-480a-8acc-a3c689b40bb3","update":{"sessionUpdate":"notice","severity":"warning","title":"UserPromptSubmit operation blocked by hook:","description":"[echo 'Blocked by the harness_studio probe hook: prompts are not allowed in this folder.' >&2; exit 2]: Blocked by the harness_studio probe hook: prompts are not allowed in this folder.\n\n\nOriginal prompt: say hi"}}}"#,
         ))
         .expect("claude notice");
         assert_eq!(claude.severity, "warning");
@@ -23510,18 +23765,22 @@ mod tests {
             .is_some_and(|d| d.ends_with("\n\n\nOriginal prompt: say hi")));
 
         let codex = session_notice(&from_wire(
-            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a0cc1b-7aa2-78e3-8e55-c9ab3b7f506e","update":{"sessionUpdate":"notice","severity":"warning","title":"Model metadata for `codeg-probe-unknown-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}}"#,
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a0cc1b-7aa2-78e3-8e55-c9ab3b7f506e","update":{"sessionUpdate":"notice","severity":"warning","title":"Model metadata for `harness-studio-probe-unknown-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}}"#,
         ))
         .expect("codex notice");
         assert_eq!(codex.severity, "warning");
-        assert!(codex.title.starts_with("Model metadata for `codeg-probe-unknown-model`"));
+        assert!(codex
+            .title
+            .starts_with("Model metadata for `harness-studio-probe-unknown-model`"));
         assert_eq!(codex.description, None);
 
         let codex_multiline = session_notice(&from_wire(
             r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a0cc1b-7aa2-78e3-8e55-c9ab3b7f506e","update":{"sessionUpdate":"notice","severity":"warning","title":"Falling back from WebSockets to HTTPS transport. unexpected status 401 Unauthorized: {\n  \"error\": {\n    \"me, url: wss://api.openai.com/v1/responses, cf-ray: a3f623f1398b2eaf-LAX, request id: req_350561679b9e4cf6895346dd25919bd9, auth error: 401, auth error code: invalid_api_key"}}}"#,
         ))
         .expect("codex transport notice");
-        assert!(codex_multiline.title.starts_with("Falling back from WebSockets"));
+        assert!(codex_multiline
+            .title
+            .starts_with("Falling back from WebSockets"));
         assert!(codex_multiline.title.contains('\n'));
     }
 
@@ -23529,7 +23788,11 @@ mod tests {
     /// nothing to show, and a toast with an empty body is worse than silence.
     #[test]
     fn a_notice_without_a_usable_title_is_dropped() {
-        for title in [serde_json::json!(""), serde_json::json!("   "), serde_json::Value::Null] {
+        for title in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::Value::Null,
+        ] {
             assert!(
                 session_notice(&async_task_notif(serde_json::json!({
                     "sessionUpdate": "notice",
@@ -23568,11 +23831,13 @@ mod tests {
             "title": "not a notice",
         })))
         .is_none());
-        assert!(session_compaction_event(&async_task_notif(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "compactionId": "cmp_1",
-        })))
-        .is_none());
+        assert!(
+            session_compaction_event(&async_task_notif(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "compactionId": "cmp_1",
+            })))
+            .is_none()
+        );
         // Neither rides anything but `session/update` — an extension method
         // that happens to nest the same shape must not be swallowed.
         let other_method = Dispatch::Notification(
@@ -23619,10 +23884,22 @@ mod tests {
                     .as_ref()
                     .and_then(|m| m.get("contextCompaction"))
                     .expect("card payload");
-                assert_eq!(payload.get("trigger").and_then(|v| v.as_str()), Some("automatic"));
-                assert_eq!(payload.get("preTokens").and_then(|v| v.as_u64()), Some(180000));
-                assert_eq!(payload.get("postTokens").and_then(|v| v.as_u64()), Some(42000));
-                assert_eq!(payload.get("durationMs").and_then(|v| v.as_u64()), Some(3200));
+                assert_eq!(
+                    payload.get("trigger").and_then(|v| v.as_str()),
+                    Some("automatic")
+                );
+                assert_eq!(
+                    payload.get("preTokens").and_then(|v| v.as_u64()),
+                    Some(180000)
+                );
+                assert_eq!(
+                    payload.get("postTokens").and_then(|v| v.as_u64()),
+                    Some(42000)
+                );
+                assert_eq!(
+                    payload.get("durationMs").and_then(|v| v.as_u64()),
+                    Some(3200)
+                );
             }
             other => panic!("expected a ToolCallUpdate, got {other:?}"),
         }
@@ -23643,16 +23920,28 @@ mod tests {
             }}}},
         })))
         .expect("compaction event");
-        let AcpEvent::ToolCallUpdate { meta, raw_output, .. } = event else {
+        let AcpEvent::ToolCallUpdate {
+            meta, raw_output, ..
+        } = event
+        else {
             panic!("expected a ToolCallUpdate");
         };
         let payload = meta
             .as_ref()
             .and_then(|m| m.get("contextCompaction"))
             .expect("card payload");
-        assert_eq!(payload.get("preTokens").and_then(|v| v.as_u64()), Some(1000));
-        assert_eq!(payload.get("postTokens").and_then(|v| v.as_u64()), Some(100));
-        assert_eq!(payload.get("trigger").and_then(|v| v.as_str()), Some("automatic"));
+        assert_eq!(
+            payload.get("preTokens").and_then(|v| v.as_u64()),
+            Some(1000)
+        );
+        assert_eq!(
+            payload.get("postTokens").and_then(|v| v.as_u64()),
+            Some(100)
+        );
+        assert_eq!(
+            payload.get("trigger").and_then(|v| v.as_str()),
+            Some("automatic")
+        );
         // 0.82.0 no longer repeats the streamed summary on the completion, and
         // an absent summary must not blank what the chunks already delivered.
         assert!(raw_output.is_none());
@@ -23690,7 +23979,9 @@ mod tests {
             })))
             .expect("compaction event");
             match event {
-                AcpEvent::ToolCallUpdate { status: got, meta, .. } => {
+                AcpEvent::ToolCallUpdate {
+                    status: got, meta, ..
+                } => {
                     assert_eq!(got.as_deref(), Some(status));
                     assert!(
                         meta.as_ref()
@@ -23757,7 +24048,7 @@ mod tests {
 
     /// The retained summary is the one thing the legacy presentation could
     /// never carry. It rides `raw_output` — the streamed chunks APPEND — and
-    /// every translated update claims that channel with the codeg marker the
+    /// every translated update claims that channel with the harness_studio marker the
     /// card expands on, because a bare `raw_output` is exactly what a legacy
     /// call fills with its metadata object.
     #[test]
@@ -23781,7 +24072,8 @@ mod tests {
         assert_eq!(raw_output.as_deref(), Some("We refactored the parser."));
         assert_eq!(raw_output_append, None, "the settled summary REPLACES");
         assert_eq!(
-            meta.as_ref().and_then(|m| m.get(COMPACTION_SUMMARY_META_KEY)),
+            meta.as_ref()
+                .and_then(|m| m.get(COMPACTION_SUMMARY_META_KEY)),
             Some(&serde_json::Value::Bool(true))
         );
 
@@ -23801,7 +24093,8 @@ mod tests {
         };
         assert_eq!(raw_output, None);
         assert_eq!(
-            meta.as_ref().and_then(|m| m.get(COMPACTION_SUMMARY_META_KEY)),
+            meta.as_ref()
+                .and_then(|m| m.get(COMPACTION_SUMMARY_META_KEY)),
             Some(&serde_json::Value::Bool(true))
         );
 
@@ -23858,7 +24151,7 @@ mod tests {
             AgentType::OpenCode,
             // A custom agent wrapping either adapter is deliberately NOT
             // advertised to: the id it resolves through is the user's, so
-            // codeg cannot know what binary is behind it.
+            // harness_studio cannot know what binary is behind it.
             AgentType::Custom("my-agent"),
         ] {
             assert_eq!(
@@ -23902,7 +24195,7 @@ mod tests {
 
     /// Progress and state frames revise an announced task. They must NOT read as
     /// creates — `spawned` is what lets `apply_event` refuse to invent a row for
-    /// an announcement codeg failed to read.
+    /// an announcement harness_studio failed to read.
     #[test]
     fn async_task_progress_and_state_frames_are_not_creates() {
         let progress = air_async_task_delta(&async_task_notif(serde_json::json!({
@@ -24000,7 +24293,7 @@ mod tests {
         for payload in [
             // Observed live: a `~/.codex/config.toml` selecting a custom provider.
             serde_json::json!({"authStatus": {
-                "kind": "gateway", "label": "Custom model gateway", "detail": "codeg"
+                "kind": "gateway", "label": "Custom model gateway", "detail": "harness_studio"
             }}),
             serde_json::json!({"authStatus": {
                 "kind": "account", "label": "ChatGPT Pro",
@@ -24010,8 +24303,8 @@ mod tests {
             // A future kind, and a future sibling field, must both still parse.
             serde_json::json!({"authStatus": {"kind": "something_new"}, "extra": 1}),
         ] {
-            let notif: AuthStatusUpdateNotification =
-                serde_json::from_value(payload.clone()).unwrap_or_else(|e| {
+            let notif: AuthStatusUpdateNotification = serde_json::from_value(payload.clone())
+                .unwrap_or_else(|e| {
                     panic!("must not reject {payload}: {e}");
                 });
             assert!(notif.auth_status.is_object());
@@ -24079,7 +24372,11 @@ mod tests {
                 .unwrap(),
             )
         };
-        for variant in ["image_dropped", "auto_compact_completed", "auto_compact_failed"] {
+        for variant in [
+            "image_dropped",
+            "auto_compact_completed",
+            "auto_compact_failed",
+        ] {
             assert!(
                 grok_ext_notification_skipped_on_replay(&notif(variant), AgentType::Grok),
                 "{variant} must not replay into the live state"
@@ -24119,7 +24416,10 @@ mod tests {
             }) => {
                 assert_eq!(message, "Context compaction failed: API error (status 503)");
                 assert_eq!(code.as_deref(), Some(COMPACTION_FAILED_ERROR_CODE));
-                assert!(!terminal, "a failed compaction must not kill the connection");
+                assert!(
+                    !terminal,
+                    "a failed compaction must not kill the connection"
+                );
             }
             other => panic!("expected the companion Error, got {other:?}"),
         }
@@ -24181,18 +24481,33 @@ mod tests {
         );
         // Same count again → nothing to say (the field rides nearly every chunk).
         assert_eq!(
-            grok_live_usage_step(&streaming, AgentType::Grok, Some(500_000), Some((4200, 500_000))),
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(500_000),
+                Some((4200, 500_000))
+            ),
             None
         );
         // A different prior value is a real step → emit.
         assert_eq!(
-            grok_live_usage_step(&streaming, AgentType::Grok, Some(500_000), Some((3000, 500_000))),
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(500_000),
+                Some((3000, 500_000))
+            ),
             Some((4200, 500_000))
         );
         // Same count but a NEW window (the user switched model between turns) →
         // re-emit, or the ring would keep dividing by the old model's window.
         assert_eq!(
-            grok_live_usage_step(&streaming, AgentType::Grok, Some(256_000), Some((4200, 500_000))),
+            grok_live_usage_step(
+                &streaming,
+                AgentType::Grok,
+                Some(256_000),
+                Some((4200, 500_000))
+            ),
             Some((4200, 256_000))
         );
         // No resolvable window → still report the count, with the frontend's
@@ -24434,7 +24749,7 @@ mod tests {
     }
 
     /// The read loop drops at most one update per notification, so an agent
-    /// speaking a protocol codeg can't decode used to put a WARN on the
+    /// speaking a protocol harness_studio can't decode used to put a WARN on the
     /// per-streaming-chunk path — under the DEFAULT level, which is how a field
     /// report ended up writing 34GB in 8.8h (issue #427). The throttle collapses
     /// the burst; this pins the part that must survive it, the tally.
@@ -24561,7 +24876,10 @@ mod tests {
 
         // Without agent output, only `end_turn` is rewritten.
         let silent = TurnOutputProbe::new(0);
-        assert_eq!(finish_turn_reason(&silent, "cancelled", &tail).0, "cancelled");
+        assert_eq!(
+            finish_turn_reason(&silent, "cancelled", &tail).0,
+            "cancelled"
+        );
         assert_eq!(finish_turn_reason(&silent, "end_turn", &tail).0, "empty");
     }
 
@@ -24733,7 +25051,7 @@ mod tests {
 
     #[test]
     fn build_new_session_request_sets_claude_raw_meta() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_new_session_request(AgentType::ClaudeCode, &cwd, Vec::new());
 
         assert_eq!(
@@ -24810,13 +25128,14 @@ mod tests {
     /// user would sit on a dead session with no teardown to recover from.
     #[test]
     fn a_rejection_that_reports_a_dead_session_still_tears_the_connection_down() {
-        // The agent has no record of the id codeg just prompted on.
+        // The agent has no record of the id harness_studio just prompted on.
         assert!(prompt_rejection_is_terminal(
             &agent_client_protocol::Error::resource_not_found(None)
         ));
         // The agent answered to say its session/process is gone.
         for marker in SESSION_GONE_MARKERS {
-            let e = agent_client_protocol::Error::internal_error().data(format!("Claude Code {marker} — sorry"));
+            let e = agent_client_protocol::Error::internal_error()
+                .data(format!("Claude Code {marker} — sorry"));
             assert!(prompt_rejection_is_terminal(&e), "{e}");
         }
         // The runtime's own synthesized error: the response channel was dropped, so
@@ -24827,7 +25146,7 @@ mod tests {
         assert!(prompt_rejection_is_terminal(&dropped), "{dropped}");
     }
 
-    /// Plays an agent over the raw pipe: waits for codeg's first frame (the
+    /// Plays an agent over the raw pipe: waits for harness_studio's first frame (the
     /// prompt), then dies with it unanswered — its output ends mid-prompt, the
     /// way it does when the process exits. Fires `exited` once the pipe is gone.
     fn agent_that_dies_on_the_prompt(
@@ -24870,7 +25189,7 @@ mod tests {
         agent.await.unwrap();
     }
 
-    /// Codeg's end of a pipe to an agent that crashes the way `AcpAgent`
+    /// HarnessStudio's end of a pipe to an agent that crashes the way `AcpAgent`
     /// reports it: the agent's output ends first, and only a moment later does
     /// the child monitor come back with the exit status, as the transport's
     /// own result.
@@ -24966,7 +25285,10 @@ mod tests {
             current_model_id_from_opts(&[select("effort", "mode", "high")]),
             None
         );
-        assert_eq!(current_model_id_from_opts(&[select("m", "model", "")]), None);
+        assert_eq!(
+            current_model_id_from_opts(&[select("m", "model", "")]),
+            None
+        );
         assert_eq!(current_model_id_from_opts(&[]), None);
     }
 
@@ -25084,7 +25406,7 @@ mod tests {
             None,
             // Version missing / below the floor / not an integer: the same
             // gate `air_session_failure` applies, mirroring what the adapters
-            // run on codeg's own advertisement.
+            // run on harness_studio's own advertisement.
             Some(serde_json::json!({
                 "jetbrains": {"air": {"recommendedValue": "gpt-6-astra"}}
             })),
@@ -25106,7 +25428,11 @@ mod tests {
                 "jetbrains": {"air": {"version": 1, "recommendedValue": "   "}}
             })),
         ] {
-            assert_eq!(recommended(bad.clone()), None, "unexpected read from {bad:?}");
+            assert_eq!(
+                recommended(bad.clone()),
+                None,
+                "unexpected read from {bad:?}"
+            );
         }
 
         // A toggle has no value list to recommend into, so the hint is dropped
@@ -25129,7 +25455,7 @@ mod tests {
 
     #[test]
     fn build_load_session_request_skips_meta_for_non_claude() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_load_session_request(
             AgentType::Codex,
             SessionId::new("abc".to_string()),
@@ -25145,13 +25471,13 @@ mod tests {
     // that field on NewSessionRequest/LoadSessionRequest, so it always
     // serializes as `[]`; every agent (OpenClaw included) already receives
     // `mcpServers: []` on a fresh install with no servers configured and
-    // codeg-mcp off — the known-good payload. The connection-layer gate
+    // harness-studio-mcp off — the known-good payload. The connection-layer gate
     // (`supports_mcp == false`) forces OpenClaw onto that empty payload
     // unconditionally. This pins the wire contract: both builders emit an
     // empty list, so no server entry can ever reach OpenClaw.
     #[test]
     fn openclaw_session_requests_carry_no_mcp_servers() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
 
         let new_req = build_new_session_request(AgentType::OpenClaw, &cwd, Vec::new());
         assert!(
@@ -25194,10 +25520,12 @@ mod tests {
     // be wrong: a custom agent that was handed server entries.
     #[test]
     fn mcp_suspect_tags_only_custom_agents_with_servers() {
-        let servers = vec![stdio_server("codeg")];
+        let servers = vec![stdio_server("harness_studio")];
 
         let tagged = tag_mcp_suspect(
-            agent_client_protocol::util::internal_error("session/new failed: unknown field `mcpServers`"),
+            agent_client_protocol::util::internal_error(
+                "session/new failed: unknown field `mcpServers`",
+            ),
             AgentType::Custom("my-agent"),
             &servers,
         );
@@ -25238,7 +25566,7 @@ mod tests {
         let raw = tag_mcp_suspect(
             agent_client_protocol::util::internal_error("Unsupported parameter: mcpServers"),
             AgentType::Custom("my-agent"),
-            &[stdio_server("codeg")],
+            &[stdio_server("harness_studio")],
         )
         .to_string();
 
@@ -25258,7 +25586,7 @@ mod tests {
 
     // The reported cursor-agent failure: `session/new` answered -32000 with
     // `Please run 'agent login' first` — advice the user cannot take, since
-    // `agent` is not a command and codeg's managed `cursor-agent` is not on
+    // `agent` is not a command and harness_studio's managed `cursor-agent` is not on
     // PATH. The typed code is the only place that reading is available, so it
     // has to be classified here and not from the wire text.
     #[test]
@@ -25274,7 +25602,7 @@ mod tests {
         let tagged = tag_new_session_failure(
             refusal,
             AgentType::Custom("my-agent"),
-            &[stdio_server("codeg")],
+            &[stdio_server("harness_studio")],
         )
         .to_string();
         assert!(tagged.contains(AUTH_REQUIRED_SENTINEL));
@@ -25298,9 +25626,11 @@ mod tests {
     #[test]
     fn a_non_auth_refusal_still_takes_the_mcp_path() {
         let tagged = tag_new_session_failure(
-            agent_client_protocol::util::internal_error("session/new failed: unknown field `mcpServers`"),
+            agent_client_protocol::util::internal_error(
+                "session/new failed: unknown field `mcpServers`",
+            ),
             AgentType::Custom("my-agent"),
-            &[stdio_server("codeg")],
+            &[stdio_server("harness_studio")],
         )
         .to_string();
         assert!(tagged.contains(MCP_SUSPECT_SENTINEL));
@@ -25309,7 +25639,7 @@ mod tests {
 
     #[test]
     fn build_resume_session_request_sets_claude_raw_meta() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_resume_session_request(
             AgentType::ClaudeCode,
             SessionId::new("abc".to_string()),
@@ -25329,7 +25659,7 @@ mod tests {
 
     #[test]
     fn build_resume_session_request_skips_meta_for_non_claude() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_resume_session_request(
             AgentType::Codex,
             SessionId::new("abc".to_string()),
@@ -25350,7 +25680,7 @@ mod tests {
     // documented wire-shape divergence here.
     #[test]
     fn openclaw_resume_request_carries_no_mcp_servers() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_resume_session_request(
             AgentType::OpenClaw,
             SessionId::new("openclaw-session".to_string()),
@@ -25424,13 +25754,15 @@ mod tests {
         // Exact shape Grok returns when switching to a model whose agentType
         // differs from the established conversation's (captured from a live
         // `session/set_model` probe against grok 0.2.94).
-        let err = agent_client_protocol::Error::new(-32600, "Cannot switch to model ...").data(serde_json::json!({
-            "code": "MODEL_SWITCH_INCOMPATIBLE_AGENT",
-            "activeAgentType": "grok-build-plan",
-            "requiredAgentType": "cursor",
-            "modelId": "grok-composer-2.5-fast",
-            "suggestion": "start_new_session"
-        }));
+        let err = agent_client_protocol::Error::new(-32600, "Cannot switch to model ...").data(
+            serde_json::json!({
+                "code": "MODEL_SWITCH_INCOMPATIBLE_AGENT",
+                "activeAgentType": "grok-build-plan",
+                "requiredAgentType": "cursor",
+                "modelId": "grok-composer-2.5-fast",
+                "suggestion": "start_new_session"
+            }),
+        );
         assert!(is_grok_incompatible_agent_switch(&err));
 
         // A different data.code, or no data at all, must NOT be swallowed —
@@ -25438,7 +25770,9 @@ mod tests {
         let other = agent_client_protocol::Error::new(-32603, "boom")
             .data(serde_json::json!({ "code": "SOMETHING_ELSE" }));
         assert!(!is_grok_incompatible_agent_switch(&other));
-        assert!(!is_grok_incompatible_agent_switch(&agent_client_protocol::Error::internal_error()));
+        assert!(!is_grok_incompatible_agent_switch(
+            &agent_client_protocol::Error::internal_error()
+        ));
     }
 
     #[test]
@@ -25461,8 +25795,8 @@ mod tests {
 
         // Empty specs → the effort selector comes from the flat `x.ai/sessionConfig`
         // "mode" list (the no-`models` fallback path).
-        let opts =
-            synthesize_grok_config_options(Some(&meta), &HashMap::new()).expect("should synthesize");
+        let opts = synthesize_grok_config_options(Some(&meta), &HashMap::new())
+            .expect("should synthesize");
         assert_eq!(opts.len(), 2, "model + effort selectors");
 
         let model = &opts[0];
@@ -25472,15 +25806,24 @@ mod tests {
         // Both models appear (agent-type filtering is deliberately NOT applied —
         // cross-type switches are handled gracefully at set time instead).
         assert_eq!(model_sel.options.len(), 2);
-        assert_eq!(model_sel.current_value, "grok-4.5", "the `selected` model is current");
-        assert!(model_sel.options.iter().any(|o| o.value == "grok-composer-2.5-fast"));
+        assert_eq!(
+            model_sel.current_value, "grok-4.5",
+            "the `selected` model is current"
+        );
+        assert!(model_sel
+            .options
+            .iter()
+            .any(|o| o.value == "grok-composer-2.5-fast"));
 
         let effort = &opts[1];
         assert_eq!(effort.id, GROK_EFFORT_OPTION_ID);
         assert_eq!(effort.category.as_deref(), Some("mode"));
         let effort_sel = expect_select(&effort.kind);
         assert_eq!(effort_sel.options.len(), 2);
-        assert_eq!(effort_sel.current_value, "high", "the `selected` effort is current");
+        assert_eq!(
+            effort_sel.current_value, "high",
+            "the `selected` effort is current"
+        );
         assert!(effort_sel.options.iter().any(|o| o.value == "low"));
     }
 
@@ -25500,8 +25843,8 @@ mod tests {
         .unwrap();
         // Empty specs → the effort selector comes from the flat `x.ai/sessionConfig`
         // "mode" list (the no-`models` fallback path).
-        let opts =
-            synthesize_grok_config_options(Some(&meta), &HashMap::new()).expect("should synthesize");
+        let opts = synthesize_grok_config_options(Some(&meta), &HashMap::new())
+            .expect("should synthesize");
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].id, GROK_MODEL_OPTION_ID);
     }
@@ -25522,7 +25865,7 @@ mod tests {
     // ── config-option verdicts ──────────────────────────────────────────────
     //
     // `session/set_config_option` is advisory: the agent answers with the option
-    // list it adopted, and codeg renders that verbatim — so a refused pick reads
+    // list it adopted, and harness_studio renders that verbatim — so a refused pick reads
     // in the composer as the selector springing back for no reason. Only this
     // side can tell a request's answer from an unsolicited update, so the
     // comparison has to be exactly right here.
@@ -25585,7 +25928,9 @@ mod tests {
 
     #[test]
     fn config_option_rejection_is_silent_when_the_pick_landed() {
-        assert!(config_option_rejection(&rejection_fixture("high"), "thought_level", "high").is_none());
+        assert!(
+            config_option_rejection(&rejection_fixture("high"), "thought_level", "high").is_none()
+        );
     }
 
     #[test]
@@ -25655,7 +26000,7 @@ mod tests {
     }
 
     /// The claude model selector, as a live adapter advertises it with and
-    /// without codeg's AIR `recommendedValue` opt-in: 0.76.0+ removes the
+    /// without harness_studio's AIR `recommendedValue` opt-in: 0.76.0+ removes the
     /// `default` row for a client that asks, every older build keeps it.
     fn claude_model_option(offers_default: bool) -> SessionConfigOption {
         let mut options = vec![serde_json::json!({"value": "opus[1m]", "name": "Opus 5"})];
@@ -25677,7 +26022,7 @@ mod tests {
 
     #[test]
     fn config_option_rejects_a_value_the_select_no_longer_offers() {
-        // The `default` pick a user saved before codeg advertised
+        // The `default` pick a user saved before harness_studio advertised
         // `recommendedValue`. Replaying it can only error, and it would do so
         // on every connect for good: the row that would let the user overwrite
         // the preference is exactly the one that went away.
@@ -25688,7 +26033,7 @@ mod tests {
 
     #[test]
     fn config_option_keeps_a_value_an_older_adapter_still_offers() {
-        // The registry pin only governs what codeg INSTALLS —
+        // The registry pin only governs what harness_studio INSTALLS —
         // `resolve_npx_command` launches whatever `claude-agent-acp` is on
         // PATH. So the same built-in agent id may be speaking to a pre-0.76
         // adapter, where `default` is still a real row and dropping the
@@ -25798,7 +26143,7 @@ mod tests {
     }
 
     /// The model selector claude-agent-acp 0.84.0 answers `session/new` with
-    /// once codeg advertises `recommendedValue` (no `default` row), in either
+    /// once harness_studio advertises `recommendedValue` (no `default` row), in either
     /// Opus spelling its CLI builds: `opus[1m]` (measured live on a gateway
     /// account) or plain `opus` (the adapter's own live test, 0.83.0).
     fn claude_model_selector(opus_row: &str) -> SessionConfigOption {
@@ -26289,10 +26634,9 @@ mod tests {
         );
         assert!(sel.options.iter().all(|o| o.description.is_some()));
         // Grok's own per-tier text is preserved for the switchable tiers.
-        assert!(sel
-            .options
-            .iter()
-            .any(|o| o.value == "high" && o.name == "High" && o.description.as_deref() == Some("Highest quality")));
+        assert!(sel.options.iter().any(|o| o.value == "high"
+            && o.name == "High"
+            && o.description.as_deref() == Some("Highest quality")));
         // Unsupported model → no selector; unknown model → None.
         assert!(build_grok_effort_option("grok-composer-2.5-fast", &specs).is_none());
         assert!(build_grok_effort_option("nope", &specs).is_none());
@@ -26321,7 +26665,10 @@ mod tests {
             .expect("effort selector");
         let sel = expect_select(&effort.kind);
         assert_eq!(sel.current_value, "xhigh", "grok-4.5's real default");
-        assert!(sel.options.iter().any(|o| o.value == "xhigh" && o.name == "Max"));
+        assert!(sel
+            .options
+            .iter()
+            .any(|o| o.value == "xhigh" && o.name == "Max"));
     }
 
     #[test]
@@ -26448,9 +26795,7 @@ mod tests {
         let errors: Vec<(Option<String>, bool)> = events
             .iter()
             .filter_map(|e| match &e.payload {
-                AcpEvent::Error {
-                    code, terminal, ..
-                } => Some((code.clone(), *terminal)),
+                AcpEvent::Error { code, terminal, .. } => Some((code.clone(), *terminal)),
                 _ => None,
             })
             .collect();
@@ -26547,7 +26892,7 @@ mod tests {
         assert_eq!(grok_live_tool_output(&None, &None), None);
     }
 
-    /// The captured opencode 1.18.23 completion envelope for a codeg-mcp
+    /// The captured opencode 1.18.23 completion envelope for a harness-studio-mcp
     /// `ask_user_question` — the clean answer text on both channels, the
     /// `rawOutput` one wrapped in `{output, metadata}`.
     fn opencode_ask_raw_output() -> serde_json::Value {
@@ -26694,13 +27039,7 @@ mod tests {
     #[test]
     fn opencode_tool_name_is_stamped_only_on_the_arg_less_opening_frame() {
         let stamped = |status: &str, raw_input: serde_json::Value, title: &str| {
-            stamp_opencode_tool_name(
-                AgentType::OpenCode,
-                status,
-                &Some(raw_input),
-                title,
-                None,
-            )
+            stamp_opencode_tool_name(AgentType::OpenCode, status, &Some(raw_input), title, None)
         };
         // The real opening frame: `pending`, `rawInput: {}`, title = tool id.
         assert_eq!(
@@ -26716,15 +27055,16 @@ mod tests {
         // the COMPLETED state — display title, populated input — so the empty
         // -input gate is what keeps the marker off it.
         assert_eq!(
-            stamped("pending", serde_json::json!({"pattern": "*.txt"}), "notes.txt"),
+            stamped(
+                "pending",
+                serde_json::json!({"pattern": "*.txt"}),
+                "notes.txt"
+            ),
             None
         );
         // Later frames in the lifecycle: nothing to record, the reducer keeps
         // the opening frame's meta.
-        assert_eq!(
-            stamped("in_progress", serde_json::json!({}), "glob"),
-            None
-        );
+        assert_eq!(stamped("in_progress", serde_json::json!({}), "glob"), None);
         assert_eq!(stamped("pending", serde_json::json!({}), "   "), None);
     }
 
@@ -26758,7 +27098,10 @@ mod tests {
         )
         .expect("meta");
         assert_eq!(with_sibling["vendor"], serde_json::json!({ "x": 1 }));
-        assert_eq!(with_sibling["opencode"], serde_json::json!({ "toolName": "read" }));
+        assert_eq!(
+            with_sibling["opencode"],
+            serde_json::json!({ "toolName": "read" })
+        );
 
         let preexisting = stamp_opencode_tool_name(
             AgentType::OpenCode,
@@ -26780,7 +27123,7 @@ mod tests {
     }
 
     /// End-to-end over the frames opencode 1.18.23 actually put on the wire for a
-    /// codeg-mcp `ask_user_question` (captured by driving `opencode acp` against a
+    /// harness-studio-mcp `ask_user_question` (captured by driving `opencode acp` against a
     /// stub MCP server). The card reconstructs the answer from the result TEXT —
     /// opencode drops the MCP `structuredContent` — so the completion must hand
     /// the frontend that text, not the `{output, metadata}` blob that shadows it
@@ -26797,7 +27140,7 @@ mod tests {
             serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "call_probe_1",
-                "title": "codeg-mcp_ask_user_question",
+                "title": "harness-studio-mcp_ask_user_question",
                 "kind": "other",
                 "status": "pending",
                 "locations": [],
@@ -26938,7 +27281,7 @@ mod tests {
     // ---- the AIR tool-call contract (claude 0.82.0 / codex 2.0.0) --------
     //
     // Every frame below is copied from the adapters' own scenario harnesses,
-    // re-run with codeg's exact `clientCapabilities` against the new pins.
+    // re-run with harness_studio's exact `clientCapabilities` against the new pins.
 
     /// Drive `frames` (raw `session/update` payloads) through
     /// `emit_conversation_update` on one connection and return every emitted
@@ -26977,7 +27320,12 @@ mod tests {
             .expect("events recorded")
             .into_iter()
             .map(|e| e.payload.clone())
-            .filter(|e| matches!(e, AcpEvent::ToolCall { .. } | AcpEvent::ToolCallUpdate { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    AcpEvent::ToolCall { .. } | AcpEvent::ToolCallUpdate { .. }
+                )
+            })
             .collect();
         (state, events)
     }
@@ -27010,7 +27358,9 @@ mod tests {
         let metas: Vec<Option<serde_json::Value>> = events
             .iter()
             .map(|e| match e {
-                AcpEvent::ToolCall { meta, .. } | AcpEvent::ToolCallUpdate { meta, .. } => meta.clone(),
+                AcpEvent::ToolCall { meta, .. } | AcpEvent::ToolCallUpdate { meta, .. } => {
+                    meta.clone()
+                }
                 _ => unreachable!(),
             })
             .collect();
@@ -27026,9 +27376,14 @@ mod tests {
         assert_eq!(merged["claudeCode"]["title"], "Search");
         // The snapshot (reconnect / refresh) holds the same.
         let guard = state.read().await;
-        let call = guard.active_tool_calls.get("toolu_sub_bash").expect("tracked");
+        let call = guard
+            .active_tool_calls
+            .get("toolu_sub_bash")
+            .expect("tracked");
         assert_eq!(
-            call.meta.as_ref().and_then(|m| m.pointer("/claudeCode/parentToolUseId")),
+            call.meta
+                .as_ref()
+                .and_then(|m| m.pointer("/claudeCode/parentToolUseId")),
             Some(&serde_json::json!("toolu_task"))
         );
     }
@@ -27054,7 +27409,10 @@ mod tests {
             ],
         )
         .await;
-        let AcpEvent::ToolCallUpdate { raw_input, content, .. } = &events[2] else {
+        let AcpEvent::ToolCallUpdate {
+            raw_input, content, ..
+        } = &events[2]
+        else {
             panic!("expected the diff-bearing update");
         };
         let input: serde_json::Value =
@@ -27074,9 +27432,11 @@ mod tests {
         let (_, _) = drive_tool_frames(
             AgentType::ClaudeCode,
             &mut cb,
-            vec![serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "toolu_read",
+            vec![
+                serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "toolu_read",
                 "_meta": {"claudeCode": {"toolName": "Read"}}, "content": [], "kind": "read",
-                "locations": [], "name": "Read", "status": "pending", "title": "Read File"})],
+                "locations": [], "name": "Read", "status": "pending", "title": "Read File"}),
+            ],
         )
         .await;
         stash_claude_viewed_results(
@@ -27090,14 +27450,18 @@ mod tests {
         let (_, events) = drive_tool_frames(
             AgentType::ClaudeCode,
             &mut cb,
-            vec![serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "toolu_read",
-                "status": "completed"})],
+            vec![
+                serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "toolu_read",
+                "status": "completed"}),
+            ],
         )
         .await;
         let AcpEvent::ToolCallUpdate { raw_output, .. } = &events[0] else {
             panic!("expected the completion");
         };
-        let raw = raw_output.as_deref().expect("the withheld result is filled in");
+        let raw = raw_output
+            .as_deref()
+            .expect("the withheld result is filled in");
         assert!(raw.contains("const a = 1;"), "{raw}");
         assert!(cb.claude_viewed_results.is_empty(), "spent");
     }
@@ -27146,8 +27510,12 @@ mod tests {
         let AcpEvent::ToolCallUpdate { raw_input, .. } = &events[2] else {
             panic!("expected the settle");
         };
-        let settled: serde_json::Value = serde_json::from_str(raw_input.as_deref().unwrap()).unwrap();
-        assert_eq!(settled[crate::parsers::codex::CODEX_SUBAGENT_STATE_KEY], "completed");
+        let settled: serde_json::Value =
+            serde_json::from_str(raw_input.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            settled[crate::parsers::codex::CODEX_SUBAGENT_STATE_KEY],
+            "completed"
+        );
     }
 
     #[tokio::test]
@@ -27198,8 +27566,14 @@ mod tests {
             panic!("expected the opening frame");
         };
         let input: serde_json::Value = serde_json::from_str(raw_input.as_deref().unwrap()).unwrap();
-        assert_eq!(input["old_string"], format!("a\nb\n{HUNK_SEPARATOR}\ny\nz\n"));
-        assert_eq!(input["new_string"], format!("a\nB\n{HUNK_SEPARATOR}\nY\nz\n"));
+        assert_eq!(
+            input["old_string"],
+            format!("a\nb\n{HUNK_SEPARATOR}\ny\nz\n")
+        );
+        assert_eq!(
+            input["new_string"],
+            format!("a\nB\n{HUNK_SEPARATOR}\nY\nz\n")
+        );
     }
 
     /// Contrast guard: the Grok-only extraction must not change other agents.
@@ -27261,12 +27635,7 @@ mod tests {
         cache: &mut ToolCallOutputCache,
         cb: &mut CodeBuddyLiveState,
         wire: serde_json::Value,
-    ) -> (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<bool>,
-    ) {
+    ) -> (Option<String>, Option<String>, Option<String>, Option<bool>) {
         let st = SessionState::new(
             "conn-pi".to_string(),
             agent_type,
@@ -27291,12 +27660,7 @@ mod tests {
                     raw_input,
                     raw_output,
                     ..
-                } => Some((
-                    content.clone(),
-                    raw_input.clone(),
-                    raw_output.clone(),
-                    None,
-                )),
+                } => Some((content.clone(), raw_input.clone(), raw_output.clone(), None)),
                 AcpEvent::ToolCallUpdate {
                     content,
                     raw_input,
@@ -27609,7 +27973,7 @@ mod tests {
         })
     }
 
-    /// codex has pi's #519 shape too: it names a terminal codeg never created,
+    /// codex has pi's #519 shape too: it names a terminal harness_studio never created,
     /// so the `[Terminal: …]` placeholder can never be superseded from the
     /// terminal channel. Its own `rawInput` must survive untouched.
     #[tokio::test]
@@ -27638,7 +28002,7 @@ mod tests {
 
     /// The win: codex streams the command's output live over
     /// `_meta.terminal_output_delta` (its DEFAULT mode, no capability involved),
-    /// and codeg used to drop every one of those frames — the card sat on the
+    /// and harness_studio used to drop every one of those frames — the card sat on the
     /// placeholder until the command ended.
     #[tokio::test]
     async fn codex_terminal_output_delta_streams_as_raw_output() {
@@ -27761,7 +28125,7 @@ mod tests {
 
     /// codex streams `item/commandExecution/outputDelta` for EVERY command it
     /// runs, search / listFiles / read included (`createCommandOutputDeltaEvent`
-    /// has no action filter). So a search that printed something reaches codeg as
+    /// has no action filter). So a search that printed something reaches harness_studio as
     /// plain-text deltas while it runs — no `terminal_info` needed — and the card
     /// fills in live. Once a delta has spoken, the completion's aggregated
     /// `rawOutput` is the same text again, and must not be appended a second
@@ -27813,7 +28177,10 @@ mod tests {
             raw_output.is_none(),
             "the aggregated output repeats what the delta delivered: {raw_output:?}"
         );
-        assert!(cb.hosted_terminal_calls.is_empty(), "a final status releases the entry");
+        assert!(
+            cb.hosted_terminal_calls.is_empty(),
+            "a final status releases the entry"
+        );
     }
 
     /// Only codex's own `search` command actions carry the marker the
@@ -27838,7 +28205,10 @@ mod tests {
         let existing = serde_json::json!({"other": 1}).as_object().cloned();
         let kept = stamp_codex_search_action(AgentType::Codex, &ToolKind::Search, false, existing);
         assert!(marked(&kept));
-        assert_eq!(kept.as_ref().and_then(|m| m.get("other")), Some(&serde_json::json!(1)));
+        assert_eq!(
+            kept.as_ref().and_then(|m| m.get("other")),
+            Some(&serde_json::json!(1))
+        );
 
         for (agent, kind, hosted) in [
             (AgentType::ClaudeCode, ToolKind::Search, false),
@@ -28110,8 +28480,7 @@ mod tests {
             ] {
                 let mut cache = ToolCallOutputCache::default();
                 let mut cb = CodeBuddyLiveState::default();
-                let (content, _, _, _) =
-                    pi_emit(AgentType::Pi, &mut cache, &mut cb, wire).await;
+                let (content, _, _, _) = pi_emit(AgentType::Pi, &mut cache, &mut cb, wire).await;
                 assert_eq!(
                     content.as_deref(),
                     Some(flattened),
@@ -28209,7 +28578,7 @@ mod tests {
 
     // ---- claude file-tool argument aliases (CLI 2.1.280, adapter 0.81.1) ----
 
-    /// A Write the model spelled with the text-editor names reaches codeg as
+    /// A Write the model spelled with the text-editor names reaches harness_studio as
     /// raw `rawInput`; the card must still get `file_path` / `content`. Both
     /// frame kinds carry input — the opening `tool_call` and the refining
     /// `tool_call_update` the streamed `tool_use` produces — and the update
@@ -28281,7 +28650,7 @@ mod tests {
     /// The `_meta` Antigravity puts on every MCP frame (`unwrap_mcp_tool_call`).
     fn antigravity_mcp_meta(prompt: Option<&str>) -> serde_json::Value {
         let mut meta = serde_json::json!({
-            "mcp": {"tool": "browser_navigate", "server": "codeg-mcp"},
+            "mcp": {"tool": "browser_navigate", "server": "harness-studio-mcp"},
             "is_mcp_tool_call": true,
         });
         if let Some(prompt) = prompt {
@@ -28333,7 +28702,7 @@ mod tests {
                 "_meta": antigravity_mcp_meta(Some("Opening the example page")),
             });
             if session_update == "tool_call" {
-                wire["title"] = serde_json::json!("codeg-mcp_browser_navigate");
+                wire["title"] = serde_json::json!("harness-studio-mcp_browser_navigate");
             }
             let (_, emitted, _, _) =
                 pi_emit(AgentType::Antigravity, &mut cache, &mut cb, wire).await;
@@ -28419,13 +28788,7 @@ mod tests {
             serde_json::from_value(wire).expect("valid agent_message_chunk wire shape");
 
         emit_conversation_update(
-            &state,
-            &emitter,
-            agent_type,
-            update,
-            None,
-            &mut cache,
-            &mut cb,
+            &state, &emitter, agent_type, update, None, &mut cache, &mut cb,
         )
         .await;
 
@@ -28485,7 +28848,11 @@ mod tests {
             "Starting queued message. (1 remaining)",
             "Cleared queued prompts.",
         ] {
-            assert_eq!(route(text), PiChunkRoute::Drop, "{text:?} must not be prose");
+            assert_eq!(
+                route(text),
+                PiChunkRoute::Drop,
+                "{text:?} must not be prose"
+            );
         }
     }
 
@@ -28578,8 +28945,7 @@ mod tests {
             "main".to_string(),
             None,
         )));
-        state.write().await.pi_startup_banner =
-            pi_startup_banner(AgentType::Pi, Some(&meta));
+        state.write().await.pi_startup_banner = pi_startup_banner(AgentType::Pi, Some(&meta));
 
         assert!(
             !pi_take_startup_banner(AgentType::Pi, &state, "你好，我能帮你做什么？").await,
@@ -28686,7 +29052,7 @@ mod tests {
     /// title. Titles below are the tools' own `getDisplayTitle()` in 0.60.0.
     ///
     /// The negative half is the point of the whitelist: synthesizing the wrong
-    /// shape is worse than synthesizing nothing, because codeg classifies on
+    /// shape is worse than synthesizing nothing, because harness_studio classifies on
     /// shape and would render a card that names the wrong tool.
     #[test]
     fn gemini_tool_input_is_synthesized_only_from_identifying_titles() {
@@ -28742,11 +29108,19 @@ mod tests {
         );
 
         assert_eq!(
-            synth(ToolKind::Search, "Searching the web for: \"rust borrow\"", &[]),
+            synth(
+                ToolKind::Search,
+                "Searching the web for: \"rust borrow\"",
+                &[]
+            ),
             Some(r#"{"query":"rust borrow"}"#.to_string())
         );
         assert_eq!(
-            synth(ToolKind::Fetch, "Fetching content from: https://example.com", &[]),
+            synth(
+                ToolKind::Fetch,
+                "Fetching content from: https://example.com",
+                &[]
+            ),
             Some(r#"{"url":"https://example.com"}"#.to_string())
         );
 
@@ -28843,8 +29217,11 @@ mod tests {
     /// own counters so the banner can render its localized line.
     #[tokio::test]
     async fn pi_retry_chunk_becomes_the_retry_banner_with_counters() {
-        let events =
-            pi_emit_chunk(AgentType::Pi, pi_chunk("Retrying (attempt 2/3, waiting 4s)...")).await;
+        let events = pi_emit_chunk(
+            AgentType::Pi,
+            pi_chunk("Retrying (attempt 2/3, waiting 4s)..."),
+        )
+        .await;
         assert!(
             !events
                 .iter()
@@ -28882,7 +29259,7 @@ mod tests {
     }
 
     /// The invariant that keeps the renderer and the empty-turn diagnosis in
-    /// agreement: a chunk codeg does not render must not count as the agent
+    /// agreement: a chunk harness_studio does not render must not count as the agent
     /// having produced output, or a status-only turn ends blank AND successful.
     #[test]
     fn pi_status_chunks_do_not_count_as_agent_output() {
@@ -28993,11 +29370,11 @@ mod tests {
     fn unwrap_grok_use_tool_peels_mcp_envelope() {
         // Grok's `use_tool` envelope nests the real MCP tool name + args.
         let raw = serde_json::json!({
-            "tool_name": "codeg-mcp__delegate_to_agent",
+            "tool_name": "harness-studio-mcp__delegate_to_agent",
             "tool_input": {"agent_type": "codex", "task": "build", "working_dir": "/w"},
         });
         let (name, input) = unwrap_grok_use_tool(Some(&raw)).expect("envelope peels");
-        assert_eq!(name, "codeg-mcp__delegate_to_agent");
+        assert_eq!(name, "harness-studio-mcp__delegate_to_agent");
         assert_eq!(input.get("task").and_then(|v| v.as_str()), Some("build"));
         assert_eq!(
             input.get("agent_type").and_then(|v| v.as_str()),
@@ -29014,10 +29391,10 @@ mod tests {
         // Missing tool_input.
         assert!(unwrap_grok_use_tool(Some(&serde_json::json!({"tool_name": "x"}))).is_none());
         // Empty tool_name.
-        assert!(
-            unwrap_grok_use_tool(Some(&serde_json::json!({"tool_name": "", "tool_input": {}})))
-                .is_none()
-        );
+        assert!(unwrap_grok_use_tool(Some(
+            &serde_json::json!({"tool_name": "", "tool_input": {}})
+        ))
+        .is_none());
         // Absent / non-object.
         assert!(unwrap_grok_use_tool(None).is_none());
         assert!(unwrap_grok_use_tool(Some(&serde_json::json!("s"))).is_none());
@@ -29064,11 +29441,11 @@ mod tests {
                    Call get_delegation_status with this id in the task_ids array.";
         assert_eq!(
             cursor_companion_title_from_content(Some(ack)),
-            Some("codeg-mcp__delegate_to_agent")
+            Some("harness-studio-mcp__delegate_to_agent")
         );
         assert_eq!(
             cursor_companion_title_from_content(Some(&format!("  {ack}"))),
-            Some("codeg-mcp__delegate_to_agent")
+            Some("harness-studio-mcp__delegate_to_agent")
         );
     }
 
@@ -29078,13 +29455,14 @@ mod tests {
         let report = r#"{"tasks":[{"agent_type":"claude_code","child_conversation_id":1576,"duration_ms":27288,"status":"completed","task_id":"799467c7-0188-4e7a-b5ef-241d4b141a83","text":"done"}]}"#;
         assert_eq!(
             cursor_companion_title_from_content(Some(report)),
-            Some("codeg-mcp__get_delegation_status")
+            Some("harness-studio-mcp__get_delegation_status")
         );
         // Mixed batch with a running item still resolves.
-        let mixed = r#"{"tasks":[{"task_id":"a","status":"running"},{"task_id":"b","status":"unknown"}]}"#;
+        let mixed =
+            r#"{"tasks":[{"task_id":"a","status":"running"},{"task_id":"b","status":"unknown"}]}"#;
         assert_eq!(
             cursor_companion_title_from_content(Some(mixed)),
-            Some("codeg-mcp__get_delegation_status")
+            Some("harness-studio-mcp__get_delegation_status")
         );
     }
 
@@ -29107,9 +29485,7 @@ mod tests {
         assert_eq!(cursor_companion_title_from_content(None), None);
         // Ack prefix must match from the start, not mid-string.
         assert_eq!(
-            cursor_companion_title_from_content(Some(
-                "Note: Delegation successful. task_id=x."
-            )),
+            cursor_companion_title_from_content(Some("Note: Delegation successful. task_id=x.")),
             None
         );
     }
@@ -29121,7 +29497,7 @@ mod tests {
         let raw = Some(serde_json::json!({
             "type": "MCP",
             "tool_name": "delegate_to_agent",
-            "server_name": "codeg-mcp",
+            "server_name": "harness-studio-mcp",
             "output": {"OkayOutput": "Delegation successful. task_id=2dc85849-5426."},
         }));
         assert_eq!(
@@ -29157,7 +29533,7 @@ mod tests {
             "toolCallId": "call-d",
             "title": "use_tool",
             "rawInput": {
-                "tool_name": "codeg-mcp__delegate_to_agent",
+                "tool_name": "harness-studio-mcp__delegate_to_agent",
                 "tool_input": {"agent_type": "codex", "working_dir": "/w", "task": "run build"},
             },
         }))
@@ -29185,7 +29561,7 @@ mod tests {
             "rawOutput": {
                 "type": "MCP",
                 "tool_name": "delegate_to_agent",
-                "server_name": "codeg-mcp",
+                "server_name": "harness-studio-mcp",
                 "output": {"OkayOutput": "Delegation successful. task_id=2dc85849-5426-44f7."},
             },
         }))
@@ -29215,7 +29591,7 @@ mod tests {
                 _ => None,
             })
             .expect("a tool_call event is emitted");
-        assert_eq!(title, "codeg-mcp__delegate_to_agent");
+        assert_eq!(title, "harness-studio-mcp__delegate_to_agent");
         let raw_input = raw_input.expect("raw_input present after unwrap");
         assert!(
             raw_input.contains("\"agent_type\":\"codex\""),
@@ -29248,7 +29624,7 @@ mod tests {
         );
         assert_eq!(
             upd_title.as_deref(),
-            Some("codeg-mcp__delegate_to_agent"),
+            Some("harness-studio-mcp__delegate_to_agent"),
             "the sparse-update wrapper title is overridden by the recorded name"
         );
         // No emitted event ever ships the generic `use_tool` wrapper title.
@@ -29287,7 +29663,7 @@ mod tests {
             "title": "use_tool",
             "status": "in_progress",
             "rawInput": {
-                "tool_name": "codeg-mcp__cancel_delegation",
+                "tool_name": "harness-studio-mcp__cancel_delegation",
                 "tool_input": {"task_id": "abc-123"},
             },
         }))
@@ -29314,7 +29690,10 @@ mod tests {
                 _ => None,
             })
             .expect("a tool_call_update event is emitted");
-        assert_eq!(title.as_deref(), Some("codeg-mcp__cancel_delegation"));
+        assert_eq!(
+            title.as_deref(),
+            Some("harness-studio-mcp__cancel_delegation")
+        );
         let raw_input = raw_input.expect("raw_input present after unwrap");
         assert!(
             raw_input.contains("\"task_id\":\"abc-123\""),
@@ -29554,7 +29933,7 @@ mod tests {
     /// `TEMP` (Windows `GetTempPathW`). If a per-agent `env_json` `TMP` were
     /// allowed to win — which it would under the ordinary `runtime_env`-last
     /// rule every other variable follows — the extraction would land wherever
-    /// that points while codeg deleted an empty scratch directory and reported
+    /// that points while harness_studio deleted an empty scratch directory and reported
     /// the leak fixed. The whole fix is this one ordering, so it gets a test.
     #[test]
     fn scratch_dir_outranks_a_per_agent_temp_override() {
@@ -29562,30 +29941,26 @@ mod tests {
         for key in crate::acp::scratch_dir::TEMP_ENV_KEYS {
             runtime_env.insert(key.to_string(), "/somewhere/the/user/picked".to_string());
         }
-        let scratch = Path::new("/scratch/codeg-acp/123-deadbeef");
+        let scratch = Path::new("/scratch/harness-studio-acp/123-deadbeef");
 
         let merged = merge_agent_env_with_color(false, &[], &runtime_env, Some(scratch));
 
         for key in crate::acp::scratch_dir::TEMP_ENV_KEYS {
             assert_eq!(
                 merged_value(&merged, key),
-                Some("/scratch/codeg-acp/123-deadbeef"),
+                Some("/scratch/harness-studio-acp/123-deadbeef"),
                 "{key} must point at the scratch dir, not the per-agent override"
             );
         }
     }
 
     /// All three names, every time. Setting only `TMPDIR` would leave `TMP`
-    /// inherited from codeg's own environment, and `GetTempPathW` reads `TMP`
+    /// inherited from harness_studio's own environment, and `GetTempPathW` reads `TMP`
     /// first.
     #[test]
     fn scratch_dir_sets_every_temp_variable_the_child_might_read() {
-        let merged = merge_agent_env_with_color(
-            false,
-            &[],
-            &BTreeMap::new(),
-            Some(Path::new("/scratch/x")),
-        );
+        let merged =
+            merge_agent_env_with_color(false, &[], &BTreeMap::new(), Some(Path::new("/scratch/x")));
         for key in crate::acp::scratch_dir::TEMP_ENV_KEYS {
             assert_eq!(merged_value(&merged, key), Some("/scratch/x"), "{key}");
         }
@@ -29675,10 +30050,8 @@ mod tests {
     /// machine's environment; `*` is what an inherited `NO_PROXY=*` yields.
     #[test]
     fn a_proxied_launch_env_carries_the_loopback_exception() {
-        let runtime_env = BTreeMap::from([(
-            "HTTP_PROXY".to_string(),
-            "http://10.0.0.2:3128".to_string(),
-        )]);
+        let runtime_env =
+            BTreeMap::from([("HTTP_PROXY".to_string(), "http://10.0.0.2:3128".to_string())]);
         let merged = merge_agent_env_with_color(false, &[], &runtime_env, None);
         for key in ["NO_PROXY", "no_proxy"] {
             let value = merged_value(&merged, key).unwrap_or_default();
@@ -29810,10 +30183,7 @@ mod tests {
         // returns false. Regression guard against any future "optimisation"
         // that conflates the substring check with the field check.
         let input = Some(r#"{"description":"use subagent_type=foo"}"#.to_string());
-        assert!(!is_subagent_invocation(
-            AgentType::OpenCode,
-            &input
-        ));
+        assert!(!is_subagent_invocation(AgentType::OpenCode, &input));
     }
 
     #[test]
@@ -29834,33 +30204,34 @@ mod tests {
     fn deferred_unwraps_codebuddy_mcp_tool_name() {
         // CodeBuddy wraps MCP calls as `{toolName, params}` via DeferExecuteTool.
         let input = Some(
-            r#"{"params":{"agent_type":"codex","task":"build"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+            r#"{"params":{"agent_type":"codex","task":"build"},"toolName":"mcp__harness-studio-mcp__delegate_to_agent"}"#
                 .to_string(),
         );
         assert_eq!(
             codebuddy_deferred_tool_name(AgentType::CodeBuddy, &input).as_deref(),
-            Some("mcp__codeg-mcp__delegate_to_agent")
+            Some("mcp__harness-studio-mcp__delegate_to_agent")
         );
     }
 
     #[test]
     fn deferred_gates_on_codebuddy_and_shape() {
         let wrapped = Some(
-            r#"{"params":{"task_id":"a"},"toolName":"mcp__codeg-mcp__cancel_delegation"}"#
+            r#"{"params":{"task_id":"a"},"toolName":"mcp__harness-studio-mcp__cancel_delegation"}"#
                 .to_string(),
         );
         // Only CodeBuddy is unwrapped.
         assert!(codebuddy_deferred_tool_name(AgentType::OpenCode, &wrapped).is_none());
         // Missing `params`, missing/blank `toolName`, or non-wrapper shapes → None.
         for raw in [
-            r#"{"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#, // no params
-            r#"{"params":{"x":1},"toolName":""}"#,                 // blank toolName
-            r#"{"params":{"x":1}}"#,                               // no toolName
-            r#"{"command":"ls"}"#,                                 // plain tool
+            r#"{"toolName":"mcp__harness-studio-mcp__delegate_to_agent"}"#, // no params
+            r#"{"params":{"x":1},"toolName":""}"#,                          // blank toolName
+            r#"{"params":{"x":1}}"#,                                        // no toolName
+            r#"{"command":"ls"}"#,                                          // plain tool
             "not json",
         ] {
             assert!(
-                codebuddy_deferred_tool_name(AgentType::CodeBuddy, &Some(raw.to_string())).is_none(),
+                codebuddy_deferred_tool_name(AgentType::CodeBuddy, &Some(raw.to_string()))
+                    .is_none(),
                 "expected None for raw_input={raw}"
             );
         }
@@ -29920,48 +30291,97 @@ mod tests {
         );
         // Initial event carrying the subagent marker → "agent", recorded.
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &subagent, "tc1", false, false, &mut overrides)
-                .as_deref(),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &subagent,
+                "tc1",
+                false,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
             Some("agent")
         );
         // The bug: a later status-only update lost the marker (raw_input None).
         // The override must be RE-ASSERTED, not downgraded to the event's title.
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", true, false, &mut overrides)
-                .as_deref(),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &None,
+                "tc1",
+                true,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
             Some("agent"),
             "a status-only update must not downgrade the Agent card mid-stream"
         );
         // Even an update whose raw_input looks like a different tool keeps it.
         let bash = Some(r#"{"command":"ls"}"#.to_string());
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &bash, "tc1", true, false, &mut overrides)
-                .as_deref(),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &bash,
+                "tc1",
+                true,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
             Some("agent")
         );
         // A never-classified tool call returns None → caller uses its own title.
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc2", true, false, &mut overrides),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &None,
+                "tc2",
+                true,
+                false,
+                &mut overrides
+            ),
             None
         );
         // Deferred MCP tool: inner name recorded, then re-asserted on a bare update.
         let deferred = Some(
-            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__harness-studio-mcp__delegate_to_agent"}"#
                 .to_string(),
         );
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &deferred, "tc3", false, false, &mut overrides)
-                .as_deref(),
-            Some("mcp__codeg-mcp__delegate_to_agent")
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &deferred,
+                "tc3",
+                false,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
+            Some("mcp__harness-studio-mcp__delegate_to_agent")
         );
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc3", true, false, &mut overrides)
-                .as_deref(),
-            Some("mcp__codeg-mcp__delegate_to_agent")
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &None,
+                "tc3",
+                true,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
+            Some("mcp__harness-studio-mcp__delegate_to_agent")
         );
         // Non-CodeBuddy agent with no prior classification: never rewritten.
         assert_eq!(
-            resolve_rewritten_title(AgentType::OpenCode, &None, "tc9", true, false, &mut overrides),
+            resolve_rewritten_title(
+                AgentType::OpenCode,
+                &None,
+                "tc9",
+                true,
+                false,
+                &mut overrides
+            ),
             None
         );
     }
@@ -30005,21 +30425,35 @@ mod tests {
         // Frame 1: `raw_input` has NO `subagent_type` yet, but `_meta` already
         // marks it (the early, reliable signal). Title must already be "agent".
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", false, true, &mut overrides)
-                .as_deref(),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &None,
+                "tc1",
+                false,
+                true,
+                &mut overrides
+            )
+            .as_deref(),
             Some("agent")
         );
         // Later sparse frames carry NEITHER signal — the override is re-asserted,
         // so the pill never flickers back to a generic tool mid-stream.
         assert_eq!(
-            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", true, false, &mut overrides)
-                .as_deref(),
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &None,
+                "tc1",
+                true,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
             Some("agent"),
             "meta-classified Agent pill must stay 'agent' across signal-less frames"
         );
         // DeferExecuteTool still wins over the meta path (distinct mechanism).
         let deferred = Some(
-            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__harness-studio-mcp__delegate_to_agent"}"#
                 .to_string(),
         );
         assert_eq!(
@@ -30032,7 +30466,7 @@ mod tests {
                 &mut overrides
             )
             .as_deref(),
-            Some("mcp__codeg-mcp__delegate_to_agent")
+            Some("mcp__harness-studio-mcp__delegate_to_agent")
         );
     }
 
@@ -30043,7 +30477,7 @@ mod tests {
         let mut open: HashSet<String> = HashSet::new();
         let mut closed: HashSet<String> = HashSet::new();
         let fg = false; // foreground (not background)
-        // A non-final foreground agent frame opens the window.
+                        // A non-final foreground agent frame opens the window.
         track_subagent_window(
             AgentType::CodeBuddy,
             true,
@@ -30144,7 +30578,11 @@ mod tests {
         // the parent model is suspended — so every chunk in the window is the
         // sub-agent's, never main-agent output (background sub-agents, which could
         // interleave main output, are excluded from the window upstream).
-        assert!(should_suppress_subagent_chunk(AgentType::CodeBuddy, true, None));
+        assert!(should_suppress_subagent_chunk(
+            AgentType::CodeBuddy,
+            true,
+            None
+        ));
         // Window closed and no chunk meta → emit (e.g. main-agent text before the
         // sub-agent opens or after it closes).
         assert!(!should_suppress_subagent_chunk(
@@ -30164,7 +30602,11 @@ mod tests {
             ));
         }
         // Other agents never suppress, even inside a (spurious) open window.
-        assert!(!should_suppress_subagent_chunk(AgentType::OpenCode, true, None));
+        assert!(!should_suppress_subagent_chunk(
+            AgentType::OpenCode,
+            true,
+            None
+        ));
     }
 
     #[test]
@@ -30231,7 +30673,7 @@ mod tests {
                 .collect()
         };
 
-        // The BYO case: codeg exports the provider, so cline refuses every
+        // The BYO case: harness_studio exports the provider, so cline refuses every
         // choice the selector offers.
         assert_eq!(
             env_pinned_config_option_ids(
@@ -30283,10 +30725,7 @@ mod tests {
         };
 
         assert_eq!(
-            ids(visible_config_options(
-                &["provider".to_string()],
-                options()
-            )),
+            ids(visible_config_options(&["provider".to_string()], options())),
             vec!["auto_approve".to_string()],
             "a dropdown whose every choice errors must not reach the composer"
         );
@@ -30367,7 +30806,7 @@ mod tests {
         DelegationInjection {
             broker,
             tokens: Arc::new(TokenRegistry::default()),
-            socket_path: std::path::PathBuf::from("/tmp/codeg-mcp.sock"),
+            socket_path: std::path::PathBuf::from("/tmp/harness-studio-mcp.sock"),
             agent_availability,
             feedback: crate::acp::feedback::FeedbackRuntimeConfig::new(),
             ask: crate::acp::question::QuestionRuntimeConfig::new(),
@@ -30382,17 +30821,17 @@ mod tests {
         }
     }
 
-    // ─── inject_codeg_mcp: enabled=false short-circuit ──────────
+    // ─── inject_harness_studio_mcp: enabled=false short-circuit ──────────
     //
     // Guards the "default off" product contract: when the broker config has
     // `enabled: false` (the new production default for fresh installs), the
     // delegate-MCP injection must not push a server entry and must not
     // register a per-launch token. The early return at the top of
-    // `inject_codeg_mcp` is the single chokepoint that keeps a
-    // codeg-mcp stdio MCP out of every ACP session until the user
+    // `inject_harness_studio_mcp` is the single chokepoint that keeps a
+    // harness-studio-mcp stdio MCP out of every ACP session until the user
     // opts in via the settings panel.
     #[tokio::test]
-    async fn inject_codeg_delegate_skipped_when_broker_disabled() {
+    async fn inject_harness_studio_delegate_skipped_when_broker_disabled() {
         // No set_config call: broker carries its default config, which is
         // `enabled: false` after the product-default flip. This is the
         // exact state a fresh install reaches before the user touches the
@@ -30403,7 +30842,7 @@ mod tests {
         );
 
         let mut servers: Vec<McpServer> = Vec::new();
-        let result = inject_codeg_mcp(
+        let result = inject_harness_studio_mcp(
             &mut servers,
             &injection,
             "parent-conn",
@@ -30491,11 +30930,11 @@ mod tests {
     #[test]
     fn host_tools_agent_also_withholds_the_delegation_group() {
         // `delegate_to_agent` is the third door into the room `fs/*` and
-        // `terminal/*` open: it has codeg spawn a SECOND agent, in codeg's
+        // `terminal/*` open: it has harness_studio spawn a SECOND agent, in harness_studio's
         // process tree under that agent's own policy, and relays its output
         // back. Without this gate a sandboxed agent that cannot read `.env`
         // itself just asks a sibling to read it, and the switch's promise is
-        // false. This pins the exact boolean `inject_codeg_mcp` computes.
+        // false. This pins the exact boolean `inject_harness_studio_mcp` computes.
         let delegation_for = |broker_enabled: bool, host_tools: HostToolsPolicy| {
             broker_enabled && host_tools.hosts_channels()
         };
@@ -30514,7 +30953,7 @@ mod tests {
         };
         assert_eq!(companion_features_arg(flags), None);
 
-        // But the groups that only surface codeg's OWN state keep working —
+        // But the groups that only surface harness_studio's OWN state keep working —
         // they execute nothing on the user's machine, so withholding them
         // would cost function for no boundary.
         flags.ask = true;
@@ -30610,7 +31049,7 @@ mod tests {
 
     // ── Boolean config options (cline 3.0.50 `auto_approve`) ──
 
-    /// The exact `configOptions` entry cline 3.0.50 ships. Before codeg's schema
+    /// The exact `configOptions` entry cline 3.0.50 ships. Before harness_studio's schema
     /// could parse boolean options (then behind `unstable_boolean_config`,
     /// stable in the 1.x schema) this failed to deserialize with
     /// `unknown variant 'boolean', expected 'select'` — and because
@@ -30711,7 +31150,7 @@ mod tests {
     /// An option kind newer than this build must cost its own selector, never
     /// the whole response — a failed `session/new` parse would leave the agent
     /// unusable. The schema (1.9+) guarantees that on every channel options
-    /// arrive on (`configOptions` skips an undecodable entry), and codeg relies
+    /// arrive on (`configOptions` skips an undecodable entry), and harness_studio relies
     /// on it rather than sanitizing the raw JSON first, as it once had to. This
     /// pins that guarantee through a schema bump: all five responses (new, load,
     /// resume, fork, set_config_option) and the `config_option_update` push must
@@ -30768,7 +31207,7 @@ mod tests {
     /// on the request, so this pins the payload rather than the mechanism.
     #[test]
     fn untyped_new_session_carries_the_typed_request_payload() {
-        let cwd = std::path::PathBuf::from("/tmp/codeg");
+        let cwd = std::path::PathBuf::from("/tmp/harness_studio");
         let req = build_new_session_request(AgentType::Cline, &cwd, Vec::new());
         let expected = serde_json::to_value(&req).unwrap();
 
@@ -30852,7 +31291,7 @@ mod tests {
         assert_eq!(ordered, vec!["llm", "effort"]);
 
         // Nothing model-shaped: the order is untouched, and an id the agent
-        // never advertised is still replayed (it is not codeg's call to drop).
+        // never advertised is still replayed (it is not harness_studio's call to drop).
         let preferred = BTreeMap::from([
             ("a_thing".to_string(), "1".to_string()),
             ("z_thing".to_string(), "2".to_string()),
@@ -30904,7 +31343,7 @@ mod tests {
         Arc::new(RwLock::new(st))
     }
 
-    /// The fork symptom in miniature: codeg applies the parent's `sonnet[1m]`,
+    /// The fork symptom in miniature: harness_studio applies the parent's `sonnet[1m]`,
     /// claude answers OK, then ~2ms later pushes its own re-pin. Effort rides
     /// along because a model switch re-scopes it — one push, two reverted
     /// options, and BOTH have to come back.
@@ -30929,7 +31368,7 @@ mod tests {
                 ("model".to_string(), "sonnet[1m]".to_string()),
                 ("effort".to_string(), "high".to_string()),
             ],
-            "both reverted options come back, at the values codeg applied, model first"
+            "both reverted options come back, at the values harness_studio applied, model first"
         );
     }
 
@@ -30953,11 +31392,12 @@ mod tests {
     #[tokio::test]
     async fn an_agreeing_push_and_an_empty_ledger_produce_no_drift() {
         let agreeing = asserted_drift_state(&[("model", "sonnet[1m]"), ("effort", "high")]);
-        assert!(
-            take_asserted_config_drift(&agreeing, &asserted_drift_options("sonnet[1m]", "high"))
-                .await
-                .is_empty()
-        );
+        assert!(take_asserted_config_drift(
+            &agreeing,
+            &asserted_drift_options("sonnet[1m]", "high")
+        )
+        .await
+        .is_empty());
         assert_eq!(
             agreeing.read().await.asserted_config_values.len(),
             2,
@@ -30987,7 +31427,12 @@ mod tests {
 
         assert_eq!(drift, vec![("model".to_string(), "sonnet[1m]".to_string())]);
         assert_eq!(
-            state.read().await.asserted_config_values.keys().collect::<Vec<_>>(),
+            state
+                .read()
+                .await
+                .asserted_config_values
+                .keys()
+                .collect::<Vec<_>>(),
             vec!["sandbox"],
             "the unmentioned option stays defended"
         );
@@ -31094,7 +31539,7 @@ mod tests {
     }
 
     /// A `workflow_updated` snapshot as grok 1.0.41 sends it (trimmed to the
-    /// fields codeg reads plus a few it ignores).
+    /// fields harness_studio reads plus a few it ignores).
     fn grok_workflow_update(
         revision: u64,
         status: &str,
@@ -31105,8 +31550,8 @@ mod tests {
             "sessionUpdate": "workflow_updated",
             "run_id": GROK_RUN_ID,
             "revision": revision,
-            "name": "codeg-probe",
-            "objective": "codeg wire probe: two phases, one tiny agent",
+            "name": "harness-studio-probe",
+            "objective": "harness_studio wire probe: two phases, one tiny agent",
             "status": status,
             "foreground": false,
             "phases": [{"title": "Alpha", "state": "active"}, {"title": "Beta", "state": "pending"}],
@@ -31303,7 +31748,8 @@ mod tests {
                                 }
                                 let mut meta = serde_json::Map::new();
                                 meta.insert("promptId".into(), script.prompt_id.into());
-                                responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta))?;
+                                responder
+                                    .respond(PromptResponse::new(StopReason::EndTurn).meta(meta))?;
                                 if script.after_response.is_empty() {
                                     return Ok(());
                                 }
@@ -31353,7 +31799,8 @@ mod tests {
             let catalog_state = Arc::clone(&state);
             let asks = Arc::new(RecordingAsks::default());
             let injection = DelegationInjection {
-                questions: Arc::clone(&asks) as Arc<dyn crate::acp::question::SessionQuestionAccess>,
+                questions: Arc::clone(&asks)
+                    as Arc<dyn crate::acp::question::SessionQuestionAccess>,
                 plan_approvals: Arc::clone(&asks)
                     as Arc<dyn crate::acp::plan_approval::SessionPlanApprovalAccess>,
                 ..test_delegation_injection(
@@ -31450,9 +31897,16 @@ mod tests {
         /// approvals were reclaimed.
         fn reclaimed_asks(&self) -> (usize, usize) {
             let count = |log: &std::sync::Mutex<Vec<String>>| {
-                log.lock().unwrap().iter().filter(|c| *c == "conn-grok").count()
+                log.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| *c == "conn-grok")
+                    .count()
             };
-            (count(&self.asks.questions), count(&self.asks.plan_approvals))
+            (
+                count(&self.asks.questions),
+                count(&self.asks.plan_approvals),
+            )
         }
 
         /// Wait for the prompt's turn to end, then let the frames the idle
@@ -31473,7 +31927,9 @@ mod tests {
             loop {
                 let envelope = tokio::time::timeout(deadline, self.events.recv())
                     .await
-                    .unwrap_or_else(|_| panic!("timed out waiting for {what}; saw {:#?}", self.seen))
+                    .unwrap_or_else(|_| {
+                        panic!("timed out waiting for {what}; saw {:#?}", self.seen)
+                    })
                     .expect("event stream");
                 self.seen.push(envelope.payload.clone());
                 if matches(&envelope.payload) {
@@ -31521,7 +31977,7 @@ mod tests {
             .collect()
     }
 
-    /// The captured `/workflow codeg-probe` run: the launch turn, the run
+    /// The captured `/workflow harness-studio-probe` run: the launch turn, the run
     /// ticking between turns, and the follow-up turn Grok starts on its own
     /// once the run stops.
     fn grok_workflow_script() -> GrokScript {
@@ -31531,7 +31987,7 @@ mod tests {
                 grok_workflow_update(2, "active", Some("Alpha"), None),
                 grok_chunk(
                     "agent_message_chunk",
-                    "Workflow 'codeg-probe' started in the background.",
+                    "Workflow 'harness-studio-probe' started in the background.",
                     Some("p1"),
                 ),
             ],
@@ -31541,7 +31997,11 @@ mod tests {
             // random, so this ordering is what the idle loop reads whenever
             // the response wins.
             after_response: vec![
-                grok_chunk("agent_message_chunk", " Watch it in /workflow runs.", Some("p1")),
+                grok_chunk(
+                    "agent_message_chunk",
+                    " Watch it in /workflow runs.",
+                    Some("p1"),
+                ),
                 grok_turn_completed_frame("p1", "end_turn"),
                 grok_workflow_update(5, "active", Some("Alpha"), Some("probe-agent")),
                 grok_barrier(),
@@ -31556,10 +32016,14 @@ mod tests {
                 ),
                 grok_chunk(
                     "agent_message_chunk",
-                    "**codeg-probe** finished",
+                    "**harness-studio-probe** finished",
                     Some(GROK_FOLLOW_UP_ID),
                 ),
-                grok_chunk("agent_message_chunk", " successfully.", Some(GROK_FOLLOW_UP_ID)),
+                grok_chunk(
+                    "agent_message_chunk",
+                    " successfully.",
+                    Some(GROK_FOLLOW_UP_ID),
+                ),
                 grok_turn_completed_frame(GROK_FOLLOW_UP_ID, "end_turn"),
                 grok_barrier(),
             ],
@@ -31572,13 +32036,13 @@ mod tests {
         }
     }
 
-    /// Send the `/workflow codeg-probe` launch and see its turn through: its
+    /// Send the `/workflow harness-studio-probe` launch and see its turn through: its
     /// frames read in-turn, then the response, then the frames the idle loop
     /// reads after it. Returns the launch turn's `TurnComplete` index.
     async fn launch_grok_workflow(grok: &mut GrokLoop) -> usize {
-        grok.prompt("/workflow codeg-probe").await;
+        grok.prompt("/workflow harness-studio-probe").await;
         grok.until("the launch turn's reply", |e| {
-            matches!(e, AcpEvent::ContentDelta { text, .. } if text.starts_with("Workflow 'codeg-probe'"))
+            matches!(e, AcpEvent::ContentDelta { text, .. } if text.starts_with("Workflow 'harness-studio-probe'"))
         })
         .await;
         grok.release_response();
@@ -31596,17 +32060,26 @@ mod tests {
 
         let launch_end = launch_grok_workflow(&mut grok).await;
         assert!(
-            grok.seen[..launch_end]
-                .iter()
-                .any(|e| matches!(e, AcpEvent::AsyncTask { delta } if delta.task_id == GROK_RUN_ID)),
+            grok.seen[..launch_end].iter().any(
+                |e| matches!(e, AcpEvent::AsyncTask { delta } if delta.task_id == GROK_RUN_ID)
+            ),
             "the run is on the strip while its launch turn is still open"
         );
-        let running = grok.state.read().await.async_tasks.get(GROK_RUN_ID).cloned();
+        let running = grok
+            .state
+            .read()
+            .await
+            .async_tasks
+            .get(GROK_RUN_ID)
+            .cloned();
         let running = running.expect("the launched workflow has a strip row");
         assert_eq!(running.state, "running");
-        assert_eq!(running.name, "codeg-probe");
+        assert_eq!(running.name, "harness-studio-probe");
         assert_eq!(running.task_type, "workflow");
-        assert_eq!(running.description, "codeg wire probe: two phases, one tiny agent");
+        assert_eq!(
+            running.description,
+            "harness_studio wire probe: two phases, one tiny agent"
+        );
         assert!(!running.can_stop, "Grok has no stop request");
         assert_eq!(running.phase.as_deref(), Some("Alpha"));
         assert_eq!(running.current_agent.as_deref(), Some("probe-agent"));
@@ -31647,7 +32120,10 @@ mod tests {
             "the prompt's own turn, then the follow-up — nothing twice: {completes:?}"
         );
         let (parent_end, follow_up_end) = (completes[0].0, completes[1].0);
-        assert_eq!(completes[0].1, "end_turn", "the launch turn was not misread");
+        assert_eq!(
+            completes[0].1, "end_turn",
+            "the launch turn was not misread"
+        );
         assert_eq!(completes[1].1, "end_turn");
         assert_eq!(
             prompting_edges(&seen).len(),
@@ -31656,7 +32132,9 @@ mod tests {
         );
         let follow_up_start = seen
             .iter()
-            .position(|e| matches!(e, AcpEvent::Thinking { text, .. } if text == "Report the result."))
+            .position(
+                |e| matches!(e, AcpEvent::Thinking { text, .. } if text == "Report the result."),
+            )
             .expect("the follow-up's first chunk is emitted");
         let opened: Vec<usize> = prompting_edges(&seen)
             .into_iter()
@@ -31688,7 +32166,7 @@ mod tests {
         assert!(!s.turn_in_flight);
         assert_eq!(
             s.last_assistant_text.as_deref(),
-            Some("**codeg-probe** finished successfully.")
+            Some("**harness-studio-probe** finished successfully.")
         );
         drop(s);
         assert_eq!(
@@ -31711,7 +32189,11 @@ mod tests {
         ] {
             let mut grok = GrokLoop::start(GrokScript {
                 later: vec![
-                    grok_chunk("agent_message_chunk", "Partial report", Some(GROK_FOLLOW_UP_ID)),
+                    grok_chunk(
+                        "agent_message_chunk",
+                        "Partial report",
+                        Some(GROK_FOLLOW_UP_ID),
+                    ),
                     grok_turn_completed_frame(GROK_FOLLOW_UP_ID, grok_reason),
                     grok_barrier(),
                 ],
@@ -31746,7 +32228,11 @@ mod tests {
     async fn stopping_a_grok_follow_up_turn_ends_it_once_and_ignores_the_stragglers() {
         let mut grok = GrokLoop::start(GrokScript {
             later: vec![
-                grok_chunk("agent_thought_chunk", "The user wants", Some(GROK_FOLLOW_UP_ID)),
+                grok_chunk(
+                    "agent_thought_chunk",
+                    "The user wants",
+                    Some(GROK_FOLLOW_UP_ID),
+                ),
                 grok_barrier(),
             ],
             on_cancel: vec![
@@ -31807,7 +32293,11 @@ mod tests {
             prompt_id: "p2",
             after_response: vec![grok_barrier()],
             later: vec![
-                grok_chunk("agent_thought_chunk", "Report the result.", Some(GROK_FOLLOW_UP_ID)),
+                grok_chunk(
+                    "agent_thought_chunk",
+                    "Report the result.",
+                    Some(GROK_FOLLOW_UP_ID),
+                ),
                 grok_barrier(),
             ],
             ..GrokScript::default()
@@ -31822,9 +32312,10 @@ mod tests {
                 matches!(e, AcpEvent::TurnComplete { .. })
             })
             .await;
-        grok.until("the prompt's reply", |e| {
-            matches!(e, AcpEvent::ContentDelta { text, .. } if text == "Hi.")
-        })
+        grok.until(
+            "the prompt's reply",
+            |e| matches!(e, AcpEvent::ContentDelta { text, .. } if text == "Hi."),
+        )
         .await;
         // The prompt's turn is still open (its response is held), and the
         // follow-up's end did not release the gate out from under it.
@@ -31870,7 +32361,11 @@ mod tests {
     async fn a_fork_is_refused_while_a_grok_follow_up_turn_runs() {
         let mut grok = GrokLoop::start(GrokScript {
             later: vec![
-                grok_chunk("agent_thought_chunk", "Report the result.", Some(GROK_FOLLOW_UP_ID)),
+                grok_chunk(
+                    "agent_thought_chunk",
+                    "Report the result.",
+                    Some(GROK_FOLLOW_UP_ID),
+                ),
                 grok_barrier(),
             ],
             forks: true,
@@ -32443,7 +32938,7 @@ mod tests {
 
     /// A claude connection's conversation loop behind an agent that holds each
     /// prompt response until told to answer and accepts every steer — for the
-    /// places a question parked by codeg's `ask_user_question` is swept.
+    /// places a question parked by harness_studio's `ask_user_question` is swept.
     struct AskSweepLoop {
         state: Arc<RwLock<SessionState>>,
         asks: Arc<RecordingAsks>,
@@ -32937,7 +33432,7 @@ mod tests {
 
         /// Prompt the session the loop is on and wait out the turn; returns
         /// the session it ran on and its stop reason. The agent answers every
-        /// prompt with `end_turn` and nothing else, which codeg reports as
+        /// prompt with `end_turn` and nothing else, which harness_studio reports as
         /// `empty` — what counts is that the answer arrives.
         async fn prompt_to_end(&mut self) -> (String, String) {
             self.state.write().await.turn_in_flight = true;
@@ -33064,12 +33559,13 @@ mod tests {
 
     #[test]
     fn grok_workflow_update_maps_to_one_restating_async_task_delta() {
-        let (method, params) = grok_workflow_update(5, "active", Some("Alpha"), Some("probe-agent"));
+        let (method, params) =
+            grok_workflow_update(5, "active", Some("Alpha"), Some("probe-agent"));
         let dispatch = Dispatch::Notification(UntypedMessage::new(method, params).unwrap());
         let delta = grok_workflow_task_delta(&dispatch, AgentType::Grok).expect("maps");
         assert_eq!(delta.task_id, GROK_RUN_ID);
         assert!(delta.spawned, "every frame restates the run");
-        assert_eq!(delta.name.as_deref(), Some("codeg-probe"));
+        assert_eq!(delta.name.as_deref(), Some("harness-studio-probe"));
         assert_eq!(delta.task_type.as_deref(), Some("workflow"));
         assert_eq!(delta.can_stop, Some(false));
         assert_eq!(delta.state.as_deref(), Some("running"));
@@ -33087,10 +33583,14 @@ mod tests {
         );
         assert!(grok_workflow_task_delta(&persisted, AgentType::Grok).is_some());
         // Never on the standard channel, and never without a run id.
-        let standard = Dispatch::Notification(UntypedMessage::new("session/update", params).unwrap());
+        let standard =
+            Dispatch::Notification(UntypedMessage::new("session/update", params).unwrap());
         assert!(grok_workflow_task_delta(&standard, AgentType::Grok).is_none());
         let mut anonymous = grok_workflow_update(1, "active", None, None).1;
-        anonymous["update"].as_object_mut().unwrap().remove("run_id");
+        anonymous["update"]
+            .as_object_mut()
+            .unwrap()
+            .remove("run_id");
         let anonymous = Dispatch::Notification(
             UntypedMessage::new("_x.ai/session_notification", anonymous).unwrap(),
         );
@@ -33114,25 +33614,31 @@ mod tests {
         };
         let paused = frame(
             "user_paused",
-            serde_json::json!({"pause_message": "codeg probe gate: resume me"}),
+            serde_json::json!({"pause_message": "harness_studio probe gate: resume me"}),
         );
         assert_eq!(paused.state.as_deref(), Some("paused"));
-        assert_eq!(paused.summary.as_deref(), Some("codeg probe gate: resume me"));
+        assert_eq!(
+            paused.summary.as_deref(),
+            Some("harness_studio probe gate: resume me")
+        );
         let failed = frame(
             "failed",
-            serde_json::json!({"pause_message": "Runtime error: codeg probe failure (line 8, position 1)"}),
+            serde_json::json!({"pause_message": "Runtime error: harness_studio probe failure (line 8, position 1)"}),
         );
         assert_eq!(failed.state.as_deref(), Some("failed"));
         assert_eq!(
             failed.summary.as_deref(),
-            Some("Runtime error: codeg probe failure (line 8, position 1)")
+            Some("Runtime error: harness_studio probe failure (line 8, position 1)")
         );
         let complete = frame(
             "complete",
             serde_json::json!({"result_summary": "{\"summary\":\"gate passed\"}"}),
         );
         assert_eq!(complete.state.as_deref(), Some("completed"));
-        assert_eq!(complete.summary.as_deref(), Some("{\"summary\":\"gate passed\"}"));
+        assert_eq!(
+            complete.summary.as_deref(),
+            Some("{\"summary\":\"gate passed\"}")
+        );
     }
 
     #[test]
@@ -33170,7 +33676,10 @@ mod tests {
             )
         };
         assert_eq!(
-            read(grok_turn_completed_frame(GROK_FOLLOW_UP_ID, "end_turn"), AgentType::Grok),
+            read(
+                grok_turn_completed_frame(GROK_FOLLOW_UP_ID, "end_turn"),
+                AgentType::Grok
+            ),
             Some(GrokTurnCompleted {
                 prompt_id: Some(GROK_FOLLOW_UP_ID.to_string()),
                 stop_reason: "end_turn",
@@ -33182,8 +33691,16 @@ mod tests {
                 .stop_reason,
             "unknown"
         );
-        assert!(read(grok_turn_completed_frame("p1", "end_turn"), AgentType::Codex).is_none());
-        assert!(read(grok_workflow_update(1, "active", None, None), AgentType::Grok).is_none());
+        assert!(read(
+            grok_turn_completed_frame("p1", "end_turn"),
+            AgentType::Codex
+        )
+        .is_none());
+        assert!(read(
+            grok_workflow_update(1, "active", None, None),
+            AgentType::Grok
+        )
+        .is_none());
     }
 
     #[test]
@@ -33198,7 +33715,11 @@ mod tests {
         let mut cb = CodeBuddyLiveState::default();
         remember_grok_ended_prompt(&mut cb.grok_ended_prompt_ids, "p1");
         assert_eq!(
-            opener(grok_chunk("agent_thought_chunk", "x", Some(GROK_FOLLOW_UP_ID)), &cb).as_deref(),
+            opener(
+                grok_chunk("agent_thought_chunk", "x", Some(GROK_FOLLOW_UP_ID)),
+                &cb
+            )
+            .as_deref(),
             Some(GROK_FOLLOW_UP_ID)
         );
         assert!(opener(grok_chunk("agent_message_chunk", "x", Some("p2")), &cb).is_some());
@@ -33264,7 +33785,10 @@ mod tests {
             s.apply_event(&AcpEvent::AsyncTask { delta });
         };
         apply(&mut s, grok_workflow_update(1, "active", None, None));
-        apply(&mut s, grok_workflow_update(5, "active", Some("Alpha"), Some("probe-agent")));
+        apply(
+            &mut s,
+            grok_workflow_update(5, "active", Some("Alpha"), Some("probe-agent")),
+        );
         let (method, mut second) = grok_workflow_update(1, "active", None, None);
         second["update"]["run_id"] = "wf_second".into();
         apply(&mut s, (method, second));

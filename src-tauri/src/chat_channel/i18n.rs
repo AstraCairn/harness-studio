@@ -175,16 +175,22 @@ pub fn permission_request_title(lang: Lang) -> &'static str {
 
 pub fn permission_request_body(lang: Lang) -> &'static str {
     match lang {
-        Lang::ZhCn => "智能体正在请求权限，请在 Codeg 中查看并批准。",
-        Lang::ZhTw => "智慧代理正在請求權限，請在 Codeg 中查看並批准。",
-        Lang::Ja => "エージェントが権限を要求しています。Codeg で確認して承認してください。",
-        Lang::Ko => "에이전트가 권한을 요청하고 있습니다. Codeg에서 확인하고 승인하세요.",
-        Lang::Es => "Un agente solicita permiso. Revísalo y apruébalo en Codeg.",
-        Lang::De => "Ein Agent fordert eine Berechtigung an. Bitte in Codeg prüfen und genehmigen.",
-        Lang::Fr => "Un agent demande une autorisation. Vérifiez-la et approuvez-la dans Codeg.",
-        Lang::Pt => "Um agente está solicitando permissão. Revise e aprove no Codeg.",
-        Lang::Ar => "يطلب أحد الوكلاء إذنًا. يرجى مراجعته والموافقة عليه في Codeg.",
-        Lang::En => "An agent is requesting permission. Review and approve it in Codeg.",
+        Lang::ZhCn => "智能体正在请求权限，请在 harness studio 中查看并批准。",
+        Lang::ZhTw => "智慧代理正在請求權限，請在 harness studio 中查看並批准。",
+        Lang::Ja => {
+            "エージェントが権限を要求しています。harness studio で確認して承認してください。"
+        }
+        Lang::Ko => "에이전트가 권한을 요청하고 있습니다. harness studio에서 확인하고 승인하세요.",
+        Lang::Es => "Un agente solicita permiso. Revísalo y apruébalo en harness studio.",
+        Lang::De => {
+            "Ein Agent fordert eine Berechtigung an. Bitte in harness studio prüfen und genehmigen."
+        }
+        Lang::Fr => {
+            "Un agent demande une autorisation. Vérifiez-la et approuvez-la dans harness studio."
+        }
+        Lang::Pt => "Um agente está solicitando permissão. Revise e aprove no harness studio.",
+        Lang::Ar => "يطلب أحد الوكلاء إذنًا. يرجى مراجعته والموافقة عليه في harness studio.",
+        Lang::En => "An agent is requesting permission. Review and approve it in harness studio.",
     }
 }
 
@@ -239,16 +245,16 @@ pub fn question_request_title(lang: Lang) -> &'static str {
 
 pub fn question_request_body(lang: Lang) -> &'static str {
     match lang {
-        Lang::ZhCn => "智能体正在向你提问，请在 Codeg 中回答。",
-        Lang::ZhTw => "智慧代理正在向你提問，請在 Codeg 中回答。",
-        Lang::Ja => "エージェントが質問しています。Codeg で回答してください。",
-        Lang::Ko => "에이전트가 질문하고 있습니다. Codeg에서 답변하세요.",
-        Lang::Es => "Un agente te hace una pregunta. Respóndela en Codeg.",
-        Lang::De => "Ein Agent stellt eine Frage. Bitte in Codeg beantworten.",
-        Lang::Fr => "Un agent vous pose une question. Répondez-y dans Codeg.",
-        Lang::Pt => "Um agente está fazendo uma pergunta. Responda no Codeg.",
-        Lang::Ar => "يطرح أحد الوكلاء سؤالاً. يرجى الإجابة عليه في Codeg.",
-        Lang::En => "An agent is asking a question. Answer it in Codeg.",
+        Lang::ZhCn => "智能体正在向你提问，请在 harness studio 中回答。",
+        Lang::ZhTw => "智慧代理正在向你提問，請在 harness studio 中回答。",
+        Lang::Ja => "エージェントが質問しています。harness studio で回答してください。",
+        Lang::Ko => "에이전트가 질문하고 있습니다. harness studio에서 답변하세요.",
+        Lang::Es => "Un agente te hace una pregunta. Respóndela en harness studio.",
+        Lang::De => "Ein Agent stellt eine Frage. Bitte in harness studio beantworten.",
+        Lang::Fr => "Un agent vous pose une question. Répondez-y dans harness studio.",
+        Lang::Pt => "Um agente está fazendo uma pergunta. Responda no harness studio.",
+        Lang::Ar => "يطرح أحد الوكلاء سؤالاً. يرجى الإجابة عليه في harness studio.",
+        Lang::En => "An agent is asking a question. Answer it in harness studio.",
     }
 }
 
@@ -556,16 +562,16 @@ pub fn channel_status_title(lang: Lang) -> &'static str {
 
 pub fn help_title(lang: Lang) -> &'static str {
     match lang {
-        Lang::ZhCn => "Codeg Bot 帮助",
-        Lang::ZhTw => "Codeg Bot 幫助",
-        Lang::Ja => "Codeg Bot ヘルプ",
-        Lang::Ko => "Codeg Bot 도움말",
-        Lang::Es => "Ayuda de Codeg Bot",
-        Lang::De => "Codeg Bot Hilfe",
-        Lang::Fr => "Aide Codeg Bot",
-        Lang::Pt => "Ajuda do Codeg Bot",
-        Lang::Ar => "مساعدة Codeg Bot",
-        Lang::En => "Codeg Bot Help",
+        Lang::ZhCn => "harness studio Bot 帮助",
+        Lang::ZhTw => "harness studio Bot 幫助",
+        Lang::Ja => "harness studio Bot ヘルプ",
+        Lang::Ko => "harness studio Bot 도움말",
+        Lang::Es => "Ayuda de harness studio Bot",
+        Lang::De => "harness studio Bot Hilfe",
+        Lang::Fr => "Aide harness studio Bot",
+        Lang::Pt => "Ajuda do harness studio Bot",
+        Lang::Ar => "مساعدة harness studio Bot",
+        Lang::En => "harness studio Bot Help",
     }
 }
 

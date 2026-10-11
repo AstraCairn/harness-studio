@@ -1,6 +1,6 @@
 //! Live ACP session titles.
 //!
-//! Agents publish a session name through `session_info_update.title`. Codeg
+//! Agents publish a session name through `session_info_update.title`. HarnessStudio
 //! used to ignore that field and only adopt a title the next time the
 //! conversation was loaded from disk. These helpers extract a usable title
 //! from the live notification so the lifecycle worker can write it immediately.
@@ -29,7 +29,7 @@ use tokio::sync::RwLock;
 
 use crate::acp::session_state::SessionState;
 use crate::acp::types::AcpEvent;
-use crate::web::event_bridge::{emit_with_state, EventEmitter};
+use crate::events::{emit_with_state, EventEmitter};
 
 /// Pull a usable session title out of ACP `session_info_update.title`.
 ///
@@ -89,8 +89,8 @@ pub(crate) async fn publish_native_title(
 ) {
     let admit = {
         let mut s = state.write().await;
-        let admit = s.conversation_id.is_some()
-            && s.last_native_title.as_deref() != Some(title.as_str());
+        let admit =
+            s.conversation_id.is_some() && s.last_native_title.as_deref() != Some(title.as_str());
         if admit {
             s.last_native_title = Some(title.clone());
         }
@@ -106,8 +106,8 @@ mod tests {
     use super::{native_title_from_session_info, publish_native_title};
     use crate::acp::session_state::SessionState;
     use crate::acp::types::AcpEvent;
+    use crate::events::EventEmitter;
     use crate::models::agent::AgentType;
-    use crate::web::event_bridge::EventEmitter;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -242,12 +242,7 @@ mod tests {
         ] {
             let record = serde_json::json!({ "type": "ai-title", "aiTitle": raw });
             let (mut custom, mut ai) = (None, None);
-            crate::parsers::claude::capture_title_record(
-                &record,
-                "ai-title",
-                &mut custom,
-                &mut ai,
-            );
+            crate::parsers::claude::capture_title_record(&record, "ai-title", &mut custom, &mut ai);
             assert_eq!(
                 native_title_from_session_info(Some(raw)),
                 ai,

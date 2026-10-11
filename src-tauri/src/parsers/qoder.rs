@@ -26,7 +26,7 @@ use crate::parsers::{
 /// Resolve Qoder's global config dir the way Qoder itself does.
 ///
 /// The resolver is three env vars deep, and reading only the first of them
-/// puts codeg in a different directory than the CLI it just launched —
+/// puts harness_studio in a different directory than the CLI it just launched —
 /// sessions vanish from the list, and skills install where nothing loads them:
 ///
 /// ```js
@@ -53,7 +53,7 @@ use crate::parsers::{
 /// Re-checked against the pinned 1.1.45 bundle: same precedence, same keys,
 /// same `.qoder` config-dir name.)
 ///
-/// Not mirrored, deliberately: the `--config-dir` FLAG, which codeg never
+/// Not mirrored, deliberately: the `--config-dir` FLAG, which harness_studio never
 /// passes, and the `QODERCN_*` twin, which belongs to the separate `.qoder-cn`
 /// distribution rather than the `@qoder-ai/qodercli` package pinned here.
 pub(crate) fn resolve_qoder_config_dir() -> PathBuf {
@@ -520,8 +520,7 @@ fn active_branch(records: &[Value]) -> Vec<usize> {
                     .get("logicalParentUuid")
                     .and_then(Value::as_str)
                     .filter(|parent| !parent.is_empty())
-            })
-        {
+            }) {
             // `null`, absent or empty on BOTH: this record starts the session.
             None => {
                 reached_root = true;
@@ -751,7 +750,7 @@ fn parse_transcript(bytes: &[u8]) -> Transcript {
                     duration_ms: None,
                     model: None,
                     completed_at: Some(timestamp),
-                agent_message_id: None,
+                    agent_message_id: None,
                 });
                 pending_assistant_chat_id = None;
             }
@@ -830,7 +829,7 @@ fn parse_transcript(bytes: &[u8]) -> Transcript {
                         duration_ms: None,
                         model: entry_model,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 pending_assistant_chat_id = message_id;
@@ -1016,7 +1015,11 @@ fn parse_detail(path: &Path, conversation_id: &str) -> Result<ConversationDetail
     // (`qfmodel`) that the table cannot match at all.
     let max_tokens = transcript
         .reported_context_window
-        .or_else(|| transcript.reported_context.and_then(ReportedContext::window))
+        .or_else(|| {
+            transcript
+                .reported_context
+                .and_then(ReportedContext::window)
+        })
         .or_else(|| infer_context_window_max_tokens(transcript.model.as_deref()));
     // The stated occupancy goes on LAST, over whatever the used/max division
     // produced: for a session recorded before `QODER_EXPOSE_TOKEN_USAGE` there
@@ -1086,16 +1089,17 @@ mod tests {
     const TOOL_RESULT_LINE: &str = r#"{"type":"user","uuid":"u2","timestamp":"2026-08-16T15:45:33.200Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"1\tthe secret number is 42\n2\t"}]},"sourceToolAssistantUUID":"a2","promptId":"s1","toolUseResult":{"type":"text","file":{"filePath":"NOTES.md","content":"the secret number is 42\n","numLines":2,"startLine":1,"totalLines":2}},"parentUuid":"a2","isSidechain":false,"cwd":"/private/tmp/probe","sessionId":"s1","userType":"external","entrypoint":"cli","version":"1.1.23","gitBranch":"main"}"#;
     const ANSWER_LINE: &str = r#"{"type":"assistant","uuid":"a3","timestamp":"2026-08-16T15:45:34.000Z","message":{"id":"chatcmpl-1","type":"message","role":"assistant","model":"qmodel_38max","stop_reason":"end_turn","content":[{"type":"text","text":"42","citations":null}],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":5,"output_tokens":2,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0}}},"parentUuid":"u2","isSidechain":false,"cwd":"/private/tmp/probe","sessionId":"s1","userType":"external","entrypoint":"cli","version":"1.1.23","gitBranch":"main"}"#;
     const ACTIVE_LEAF_LINE: &str = r#"{"type":"active-leaf","sessionId":"s1","leafUuid":"a3","explicit":false,"timestamp":1786895133089}"#;
-    const LAST_PROMPT_LINE: &str = r#"{"type":"last-prompt","sessionId":"s1","lastPrompt":"read NOTES.md and reply"}"#;
+    const LAST_PROMPT_LINE: &str =
+        r#"{"type":"last-prompt","sessionId":"s1","lastPrompt":"read NOTES.md and reply"}"#;
     const SIDECHAIN_LINE: &str = r#"{"type":"assistant","uuid":"sc1","timestamp":"2026-08-16T15:45:35.000Z","message":{"role":"assistant","model":"qmodel_38max","content":[{"type":"text","text":"sub-agent internal output"}]},"parentUuid":null,"isSidechain":true,"cwd":"/private/tmp/probe","sessionId":"s1","userType":"external","entrypoint":"cli","version":"1.1.23","gitBranch":"main"}"#;
 
     // The shape a REAL ACP-entrypoint session writes (captured from
-    // `~/.qoder/projects/*/*.jsonl` on a machine codeg drove): the human prompt
+    // `~/.qoder/projects/*/*.jsonl` on a machine harness_studio drove): the human prompt
     // is a block ARRAY, not a string, and there is no `gitBranch`.
-    const ACP_USER_LINE: &str = r#"{"type":"user","uuid":"au1","timestamp":"2026-07-25T12:08:58.095Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"permissionMode":"bypassPermissions","origin":{"kind":"human"},"promptId":"351c","parentUuid":null,"isSidechain":false,"cwd":"/Users/x/work/codeg","sessionId":"s2","userType":"external","entrypoint":"acp","version":"unknown"}"#;
+    const ACP_USER_LINE: &str = r#"{"type":"user","uuid":"au1","timestamp":"2026-07-25T12:08:58.095Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"permissionMode":"bypassPermissions","origin":{"kind":"human"},"promptId":"351c","parentUuid":null,"isSidechain":false,"cwd":"/Users/x/work/harness_studio","sessionId":"s2","userType":"external","entrypoint":"acp","version":"unknown"}"#;
     // …and a failed turn is a real assistant record carrying the raw provider
     // payload under `<synthetic>` + `isApiErrorMessage`.
-    const ACP_ERROR_LINE: &str = r#"{"type":"assistant","uuid":"aa1","timestamp":"2026-07-25T12:09:00.807Z","message":{"id":"eb4c","type":"message","role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"{\"pricingUrl\":\"https://qoder.com/pricing?client=qoder\"}"}]},"isApiErrorMessage":true,"error":"unknown","displayErrorCode":"112","parentUuid":"au1","isSidechain":false,"cwd":"/Users/x/work/codeg","sessionId":"s2","userType":"external","entrypoint":"acp","version":"unknown"}"#;
+    const ACP_ERROR_LINE: &str = r#"{"type":"assistant","uuid":"aa1","timestamp":"2026-07-25T12:09:00.807Z","message":{"id":"eb4c","type":"message","role":"assistant","model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"{\"pricingUrl\":\"https://qoder.com/pricing?client=qoder\"}"}]},"isApiErrorMessage":true,"error":"unknown","displayErrorCode":"112","parentUuid":"au1","isSidechain":false,"cwd":"/Users/x/work/harness_studio","sessionId":"s2","userType":"external","entrypoint":"acp","version":"unknown"}"#;
 
     #[test]
     fn summary_reads_real_layout() {
@@ -1167,7 +1171,10 @@ mod tests {
         // paired tool result is absorbed, and the end-turn answer (which lands
         // after that tool-result boundary) forms the next turn.
         assert_eq!(detail.turns.len(), 3);
-        assert!(matches!(detail.turns[0].role, crate::models::TurnRole::User));
+        assert!(matches!(
+            detail.turns[0].role,
+            crate::models::TurnRole::User
+        ));
         assert!(matches!(
             detail.turns[1].role,
             crate::models::TurnRole::Assistant
@@ -1362,8 +1369,12 @@ mod tests {
             "the absolute override wins over both of the other two"
         );
         // Empty is the same as unset, everywhere — never an empty path segment.
-        let resolved =
-            resolve_qoder_config_dir_from(Some("".into()), Some("".into()), Some("".into()), home());
+        let resolved = resolve_qoder_config_dir_from(
+            Some("".into()),
+            Some("".into()),
+            Some("".into()),
+            home(),
+        );
         assert_eq!(resolved, PathBuf::from("/Users/default/.qoder"));
         let resolved = resolve_qoder_config_dir_from(None, None, None, home());
         assert_eq!(resolved, PathBuf::from("/Users/default/.qoder"));
@@ -1372,7 +1383,8 @@ mod tests {
             resolve_qoder_config_dir_from(None, Some("/sandbox/home".into()), None, home());
         assert_eq!(resolved, PathBuf::from("/sandbox/home/.qoder"));
         // …and `QODER_CONFIG_DIR_NAME` renames the dir itself, independently.
-        let resolved = resolve_qoder_config_dir_from(None, None, Some(".qoder-work".into()), home());
+        let resolved =
+            resolve_qoder_config_dir_from(None, None, Some(".qoder-work".into()), home());
         assert_eq!(resolved, PathBuf::from("/Users/default/.qoder-work"));
         let resolved = resolve_qoder_config_dir_from(
             None,
@@ -1403,7 +1415,7 @@ mod tests {
         // The consequence, named on purpose: with no content record left there
         // is no `started_at`, so a cleared session drops out of the SCAN list —
         // the same path every content-free transcript already takes. It is not a
-        // deletion: an already-imported session keeps its row in codeg's DB, and
+        // deletion: an already-imported session keeps its row in harness_studio's DB, and
         // the file itself is untouched.
         assert!(parse_summary(&path).is_none());
     }
@@ -1429,10 +1441,13 @@ mod tests {
             r#"{"type":"active-leaf","sessionId":"s1","explicit":true,"timestamp":1786895140000}"#;
         write_session(tmp.path(), "s2", &[USER_LINE, ANSWER_LINE, malformed]);
         let detail = parser_in(tmp.path()).get_conversation("s2").unwrap();
-        assert!(!detail.turns.is_empty(), "missing key is not an empty branch");
+        assert!(
+            !detail.turns.is_empty(),
+            "missing key is not an empty branch"
+        );
     }
 
-    // The ACP entrypoint — the one codeg itself drives — writes the human
+    // The ACP entrypoint — the one harness_studio itself drives — writes the human
     // prompt as a block ARRAY. Reading only `content.as_str()` dropped the whole
     // user turn AND left the session untitled.
     #[test]
@@ -1448,10 +1463,16 @@ mod tests {
 
         let detail = parser_in(tmp.path()).get_conversation("s2").unwrap();
         assert_eq!(detail.turns.len(), 1);
-        assert!(matches!(detail.turns[0].role, crate::models::TurnRole::User));
+        assert!(matches!(
+            detail.turns[0].role,
+            crate::models::TurnRole::User
+        ));
         assert_eq!(text_of(&detail.turns[0]), "hi");
         assert!(
-            !detail.turns.iter().any(|t| text_of(t).contains("pricingUrl")),
+            !detail
+                .turns
+                .iter()
+                .any(|t| text_of(t).contains("pricingUrl")),
             "a failed API turn must not render as the assistant's answer"
         );
     }
@@ -1464,11 +1485,9 @@ mod tests {
 
         let detail = parser_in(tmp.path()).get_conversation("s3").unwrap();
         assert_eq!(detail.turns.len(), 1);
-        assert!(detail
-            .turns[0]
-            .blocks
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Image { mime_type, .. } if mime_type == "image/png")));
+        assert!(detail.turns[0].blocks.iter().any(
+            |b| matches!(b, ContentBlock::Image { mime_type, .. } if mime_type == "image/png")
+        ));
         assert_eq!(detail.summary.title.as_deref(), Some("what is this"));
     }
 
@@ -1489,7 +1508,10 @@ mod tests {
                 .any(|t| text_of(t).contains("Continue from where")),
             "meta injections are addressed to the model"
         );
-        assert_eq!(detail.summary.title.as_deref(), Some("read NOTES.md and reply"));
+        assert_eq!(
+            detail.summary.title.as_deref(),
+            Some("read NOTES.md and reply")
+        );
     }
 
     // A rewind leaves the abandoned branch in the file forever. Replaying in
@@ -1672,10 +1694,7 @@ mod tests {
             .iter()
             .find(|t| text_of(t).contains("SUMMARY OF EARLIER WORK"))
             .expect("summary rendered");
-        assert!(matches!(
-            summary_turn.role,
-            crate::models::TurnRole::System
-        ));
+        assert!(matches!(summary_turn.role, crate::models::TurnRole::System));
         assert_eq!(
             detail.summary.title.as_deref(),
             Some("read NOTES.md and reply")
@@ -1765,7 +1784,10 @@ mod tests {
         assert_eq!(s.context_window_used_tokens, Some(2803));
         assert_eq!(s.context_window_max_tokens, Some(180_000));
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - 1.557_222_222_222_222_2).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 1.557_222_222_222_222_2).abs() < 1e-9,
+            "{percent}"
+        );
     }
 
     // Occupancy is a level, not a sum: the newest response describes the
@@ -1786,7 +1808,10 @@ mod tests {
         let detail = parser_in(tmp.path()).get_conversation("s1").unwrap();
         let s = detail.session_stats.expect("session stats");
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - 1.557_222_222_222_222_2).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 1.557_222_222_222_222_2).abs() < 1e-9,
+            "{percent}"
+        );
     }
 
     // A rewound branch describes a context that no longer exists. `a8` stays in
@@ -1809,7 +1834,10 @@ mod tests {
         let detail = parser_in(tmp.path()).get_conversation("s1").unwrap();
         let s = detail.session_stats.expect("session stats");
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - 1.557_222_222_222_222_2).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 1.557_222_222_222_222_2).abs() < 1e-9,
+            "{percent}"
+        );
         assert_eq!(s.context_window_max_tokens, Some(180_000));
     }
 
@@ -1833,7 +1861,10 @@ mod tests {
         assert_eq!(s.context_window_max_tokens, Some(262_144));
         // ...but the percentage is still Qoder's own, not 2803/262144.
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - 1.557_222_222_222_222_2).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 1.557_222_222_222_222_2).abs() < 1e-9,
+            "{percent}"
+        );
     }
 
     // A ratio Qoder clamped to 1.0 means "full or overflowing"; inverting it
@@ -1878,10 +1909,16 @@ mod tests {
         // the very numerator Qoder divided to get its ratio.
         assert_eq!(s.context_window_used_tokens, Some(2803));
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - 1.557_222_222_222_222_2).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 1.557_222_222_222_222_2).abs() < 1e-9,
+            "{percent}"
+        );
         // The stated percentage and the used/max pair now tell the same story.
         let recomputed = 2803.0 / 180_000.0 * 100.0;
-        assert!((percent - recomputed).abs() < 1e-6, "{percent} vs {recomputed}");
+        assert!(
+            (percent - recomputed).abs() < 1e-6,
+            "{percent} vs {recomputed}"
+        );
 
         // The split is a re-labelling, not a deduction: the turn's own counters
         // still add back up to the prompt Qoder charged for.
@@ -1890,9 +1927,7 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 900);
         assert_eq!(usage.cache_creation_input_tokens, 100);
         assert_eq!(
-            usage.input_tokens
-                + usage.cache_read_input_tokens
-                + usage.cache_creation_input_tokens,
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens,
             2803
         );
     }
@@ -1931,6 +1966,9 @@ mod tests {
         assert_eq!(s.context_window_used_tokens, Some(10));
         assert_eq!(s.context_window_max_tokens, Some(262_144));
         let percent = s.context_window_usage_percent.expect("percent");
-        assert!((percent - (10.0 / 262_144.0) * 100.0).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - (10.0 / 262_144.0) * 100.0).abs() < 1e-9,
+            "{percent}"
+        );
     }
 }

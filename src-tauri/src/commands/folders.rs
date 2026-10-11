@@ -21,9 +21,9 @@ use crate::app_error::AppCommandError;
 use crate::db::error::DbError;
 use crate::db::service::{folder_group_service, folder_service};
 use crate::db::AppDatabase;
+use crate::events::EventEmitter;
 use crate::models::GitCredentials;
 use crate::models::{FolderDetail, FolderGroupDetail, FolderHistoryEntry, SidebarLayoutEntry};
-use crate::web::event_bridge::EventEmitter;
 
 /// Configure a git command for remote operations:
 /// - Always disable interactive prompts (prevent hanging in a GUI app)
@@ -472,10 +472,7 @@ pub(crate) fn ensure_pushable_branch_name(branch: &str) -> Result<(), AppCommand
 /// `show-ref --verify` deliberately, NOT `rev-parse --verify`: the latter takes
 /// a revision EXPRESSION, so `main^` and `main@{1}` would both resolve and slip
 /// through. `show-ref --verify` only accepts an exact ref path.
-async fn ensure_local_branch_exists(
-    path: &str,
-    branch: &str,
-) -> Result<(), AppCommandError> {
+async fn ensure_local_branch_exists(path: &str, branch: &str) -> Result<(), AppCommandError> {
     let output = crate::process::tokio_command("git")
         .args([
             "show-ref",
@@ -488,8 +485,9 @@ async fn ensure_local_branch_exists(
         .await
         .map_err(AppCommandError::io)?;
     if !output.status.success() {
-        return Err(AppCommandError::not_found("Branch not found")
-            .with_detail(format!("branch={branch}")));
+        return Err(
+            AppCommandError::not_found("Branch not found").with_detail(format!("branch={branch}"))
+        );
     }
     Ok(())
 }
@@ -602,10 +600,10 @@ pub async fn get_folder_core(db: &AppDatabase, folder_id: i32) -> Result<FolderD
 /// Unlike [`open_folder_in_workspace_core`], this ONLY syncs the folder list — it
 /// never opens or focuses a tab — so a background emitter can't steal focus.
 pub(crate) fn emit_folder_upsert(emitter: &EventEmitter, detail: FolderDetail) {
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
-        crate::web::event_bridge::FOLDER_CHANGED_EVENT,
-        crate::web::event_bridge::FolderChange::Upsert {
+        crate::events::FOLDER_CHANGED_EVENT,
+        crate::events::FolderChange::Upsert {
             folder: Box::new(detail),
         },
     );
@@ -621,10 +619,10 @@ pub(crate) fn emit_folder_upsert(emitter: &EventEmitter, detail: FolderDetail) {
 /// ([`remove_folder_from_workspace_core`]) leaves the row alive and must not
 /// broadcast this.
 pub(crate) fn emit_folder_deleted(emitter: &EventEmitter, folder_id: i32) {
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
-        crate::web::event_bridge::FOLDER_CHANGED_EVENT,
-        crate::web::event_bridge::FolderChange::Deleted { id: folder_id },
+        crate::events::FOLDER_CHANGED_EVENT,
+        crate::events::FolderChange::Deleted { id: folder_id },
     );
 }
 
@@ -697,8 +695,8 @@ pub async fn open_folder_core(
 /// than erroring.
 ///
 /// Also defaults the folder's display alias to the checked-out branch (see
-/// [`seed_worktree_alias`]) — a worktree's directory name (`codeg-task-49`,
-/// `codeg-automation-3-run-8`) says far less about it than the branch does, and
+/// [`seed_worktree_alias`]) — a worktree's directory name (`harness-studio-task-49`,
+/// `harness-studio-automation-3-run-8`) says far less about it than the branch does, and
 /// this is the one place every worktree registration passes through: the branch
 /// dropdown's "new worktree", switch-to-branch landing on an unregistered
 /// checkout, the automation engine's per-run worktree, and the work-task
@@ -815,7 +813,7 @@ pub async fn open_folder_in_workspace_core(
     path: String,
 ) -> Result<FolderDetail, AppCommandError> {
     let detail = open_folder_core(db, path).await?;
-    crate::web::event_bridge::emit_event(emitter, "folder://open-in-workspace", &detail);
+    crate::events::emit_event(emitter, "folder://open-in-workspace", &detail);
     Ok(detail)
 }
 
@@ -862,10 +860,10 @@ pub async fn remove_folder_from_workspace_core(
         .await
         .map_err(AppCommandError::from)?;
     if let Some(tabs) = inv.emit {
-        crate::web::event_bridge::emit_event(
+        crate::events::emit_event(
             emitter,
-            crate::web::event_bridge::TABS_CHANGED_EVENT,
-            crate::web::event_bridge::TabsChanged {
+            crate::events::TABS_CHANGED_EVENT,
+            crate::events::TabsChanged {
                 version: inv.version,
                 origin: "server".to_string(),
                 tabs,
@@ -880,15 +878,8 @@ pub async fn remove_folder_from_workspace_core(
 }
 
 /// Broadcast a folder-group change so every window / WebSocket client converges.
-fn emit_folder_group_change(
-    emitter: &EventEmitter,
-    change: crate::web::event_bridge::FolderGroupChange,
-) {
-    crate::web::event_bridge::emit_event(
-        emitter,
-        crate::web::event_bridge::FOLDER_GROUP_CHANGED_EVENT,
-        change,
-    );
+fn emit_folder_group_change(emitter: &EventEmitter, change: crate::events::FolderGroupChange) {
+    crate::events::emit_event(emitter, crate::events::FOLDER_GROUP_CHANGED_EVENT, change);
 }
 
 pub async fn list_folder_groups_core(
@@ -926,7 +917,7 @@ pub async fn create_folder_group_core(
         .map_err(AppCommandError::from)?;
     emit_folder_group_change(
         emitter,
-        crate::web::event_bridge::FolderGroupChange::Upsert {
+        crate::events::FolderGroupChange::Upsert {
             group: group.clone(),
         },
     );
@@ -947,7 +938,7 @@ pub async fn update_folder_group_core(
         .ok_or_else(|| AppCommandError::not_found("Folder group not found"))?;
     emit_folder_group_change(
         emitter,
-        crate::web::event_bridge::FolderGroupChange::Upsert {
+        crate::events::FolderGroupChange::Upsert {
             group: group.clone(),
         },
     );
@@ -965,9 +956,12 @@ pub async fn delete_folder_group_core(
     if !removed {
         return Err(AppCommandError::not_found("Folder group not found"));
     }
-    emit_folder_group_change(emitter, crate::web::event_bridge::FolderGroupChange::Deleted { id: group_id });
+    emit_folder_group_change(
+        emitter,
+        crate::events::FolderGroupChange::Deleted { id: group_id },
+    );
     // Members moved back to the top level, so their rows changed too.
-    emit_folder_group_change(emitter, crate::web::event_bridge::FolderGroupChange::Layout);
+    emit_folder_group_change(emitter, crate::events::FolderGroupChange::Layout);
     Ok(())
 }
 
@@ -981,7 +975,7 @@ pub async fn apply_sidebar_layout_core(
     folder_group_service::apply_sidebar_layout(&db.conn, entries)
         .await
         .map_err(AppCommandError::from)?;
-    emit_folder_group_change(emitter, crate::web::event_bridge::FolderGroupChange::Layout);
+    emit_folder_group_change(emitter, crate::events::FolderGroupChange::Layout);
     Ok(())
 }
 
@@ -996,7 +990,7 @@ pub async fn set_folder_group_core(
     folder_group_service::set_folder_group(&db.conn, folder_id, group_id)
         .await
         .map_err(AppCommandError::from)?;
-    emit_folder_group_change(emitter, crate::web::event_bridge::FolderGroupChange::Layout);
+    emit_folder_group_change(emitter, crate::events::FolderGroupChange::Layout);
     Ok(())
 }
 
@@ -1044,10 +1038,10 @@ pub async fn update_folder_default_agent_core(
             .await
             .map_err(AppCommandError::from)?
             .ok_or_else(|| AppCommandError::not_found("Folder not found"))?;
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
-        crate::web::event_bridge::WORK_TASK_CHANGED_EVENT,
-        crate::web::event_bridge::WorkTaskChange::Settings { folder_id },
+        crate::events::WORK_TASK_CHANGED_EVENT,
+        crate::events::WorkTaskChange::Settings { folder_id },
     );
     Ok(detail)
 }
@@ -1306,7 +1300,7 @@ pub async fn clone_repository(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     clone_repository_core(&url, &target_dir, credentials.as_ref(), &db, &data_dir).await
@@ -1377,10 +1371,7 @@ pub struct GitHeadInfo {
     pub short_sha: Option<String>,
 }
 
-async fn git_output(
-    path: &str,
-    args: &[&str],
-) -> Result<std::process::Output, AppCommandError> {
+async fn git_output(path: &str, args: &[&str]) -> Result<std::process::Output, AppCommandError> {
     crate::process::tokio_command("git")
         .args(args)
         .current_dir(path)
@@ -1617,7 +1608,7 @@ pub async fn git_pull(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     git_pull_core(&path, credentials.as_ref(), &db, &data_dir).await
@@ -1693,7 +1684,7 @@ pub async fn git_fetch(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     git_fetch_core(&path, credentials.as_ref(), &db, &data_dir).await
@@ -1880,7 +1871,7 @@ pub async fn git_update_branch(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     git_update_branch_core(
@@ -2073,7 +2064,7 @@ pub(crate) async fn git_push_core(
     let upstream_set = needs_set_upstream;
 
     if let Some(folder_id) = folder_id {
-        crate::web::event_bridge::emit_event(
+        crate::events::emit_event(
             emitter,
             "folder://git-push-succeeded",
             GitPushSucceededEvent {
@@ -2113,7 +2104,7 @@ pub async fn git_push(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     let emitter = EventEmitter::Tauri(app.clone());
@@ -2751,7 +2742,9 @@ pub async fn git_show_file_base64(
         .map_err(AppCommandError::io)?;
 
     let oid = if oid_output.status.success() {
-        String::from_utf8_lossy(&oid_output.stdout).trim().to_string()
+        String::from_utf8_lossy(&oid_output.stdout)
+            .trim()
+            .to_string()
     } else {
         String::new()
     };
@@ -2798,7 +2791,9 @@ pub async fn git_show_file_base64(
         .map_err(|_| {
             AppCommandError::external_command(
                 "git cat-file returned an unreadable object size",
-                String::from_utf8_lossy(&size_output.stdout).trim().to_string(),
+                String::from_utf8_lossy(&size_output.stdout)
+                    .trim()
+                    .to_string(),
             )
         })?;
 
@@ -2911,7 +2906,7 @@ pub(crate) async fn git_commit_core(
         .unwrap_or(files.len());
 
     if let Some(folder_id) = folder_id {
-        crate::web::event_bridge::emit_event(
+        crate::events::emit_event(
             emitter,
             "folder://git-commit-succeeded",
             GitCommitSucceededEvent {
@@ -3271,8 +3266,8 @@ pub async fn git_remove_worktree_core(
     };
 
     if let Some(worktree_path) = hosting {
-        let canonical = std::fs::canonicalize(&worktree_path)
-            .unwrap_or_else(|_| PathBuf::from(&worktree_path));
+        let canonical =
+            std::fs::canonicalize(&worktree_path).unwrap_or_else(|_| PathBuf::from(&worktree_path));
         if main_path.as_deref() == Some(worktree_path.as_str()) {
             return Err(
                 AppCommandError::invalid_input("The main working tree cannot be removed")
@@ -3410,11 +3405,13 @@ async fn reparent_target(
         .and_then(|f| f.parent_id);
     let target = match recorded {
         Some(parent_id) => Some(parent_id),
-        None if source_folder_id > 0 => folder_service::get_folder_by_id(&db.conn, source_folder_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|source| source.parent_id.unwrap_or(source.id)),
+        None if source_folder_id > 0 => {
+            folder_service::get_folder_by_id(&db.conn, source_folder_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|source| source.parent_id.unwrap_or(source.id))
+        }
         None => None,
     };
     target.filter(|id| *id != worktree_folder_id)
@@ -3454,10 +3451,10 @@ async fn converge_removed_worktree_folder(
     match tab_service::delete_folder_tabs_and_bump(&db.conn, worktree_folder_id).await {
         Ok(inv) => {
             if let Some(tabs) = inv.emit {
-                crate::web::event_bridge::emit_event(
+                crate::events::emit_event(
                     emitter,
-                    crate::web::event_bridge::TABS_CHANGED_EVENT,
-                    crate::web::event_bridge::TabsChanged {
+                    crate::events::TABS_CHANGED_EVENT,
+                    crate::events::TabsChanged {
                         version: inv.version,
                         origin: "server".to_string(),
                         tabs,
@@ -3475,7 +3472,9 @@ async fn converge_removed_worktree_folder(
     let folder_gone = match folder_service::soft_delete_folder(&db.conn, worktree_folder_id).await {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!("[folders] worktree folder {worktree_folder_id} soft-delete failed: {e}");
+            tracing::warn!(
+                "[folders] worktree folder {worktree_folder_id} soft-delete failed: {e}"
+            );
             false
         }
     };
@@ -3492,10 +3491,10 @@ async fn converge_removed_worktree_folder(
 
     // Conversations first: this starts every client's refetch, so the moved rows
     // have the shortest possible window with no folder to render under.
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
-        crate::web::event_bridge::CONVERSATIONS_BULK_CHANGED_EVENT,
-        crate::web::event_bridge::ConversationsBulkChanged {
+        crate::events::CONVERSATIONS_BULK_CHANGED_EVENT,
+        crate::events::ConversationsBulkChanged {
             imported: 0,
             updated: moved,
             folder_ids: vec![project_folder_id],
@@ -3505,10 +3504,10 @@ async fn converge_removed_worktree_folder(
         emit_folder_deleted(emitter, worktree_folder_id);
     }
     for task_id in detached {
-        crate::web::event_bridge::emit_event(
+        crate::events::emit_event(
             emitter,
-            crate::web::event_bridge::WORK_TASK_CHANGED_EVENT,
-            crate::web::event_bridge::WorkTaskChange::Upsert { id: task_id },
+            crate::events::WORK_TASK_CHANGED_EVENT,
+            crate::events::WorkTaskChange::Upsert { id: task_id },
         );
     }
     crate::office_watch::stop_office_watches_under_root(worktree_path);
@@ -3607,7 +3606,7 @@ pub async fn git_fetch_remote(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     git_fetch_remote_core(&path, &name, credentials.as_ref(), &db, &data_dir).await
@@ -3805,7 +3804,7 @@ pub async fn git_delete_remote_branch(
         AppCommandError::external_command("Failed to resolve app data dir", e.to_string())
     })?;
     // Resolve through the effective data dir so a custom
-    // `CODEG_DATA_DIR` reaches the git credential helper invoked by
+    // `HARNESS_STUDIO_DATA_DIR` reaches the git credential helper invoked by
     // this subprocess.
     let data_dir = crate::paths::resolve_effective_data_dir(&data_dir);
     git_delete_remote_branch_core(
@@ -3985,10 +3984,7 @@ fn unquote_git_path(path: &str) -> String {
     }
 }
 
-pub(crate) fn resolve_tree_path(
-    root: &Path,
-    rel_path: &str,
-) -> Result<PathBuf, AppCommandError> {
+pub(crate) fn resolve_tree_path(root: &Path, rel_path: &str) -> Result<PathBuf, AppCommandError> {
     let rel = Path::new(rel_path);
     if rel.is_absolute() {
         return Err(AppCommandError::invalid_input("Path must be relative"));
@@ -4357,7 +4353,7 @@ fn atomic_write_text(path: &Path, bytes: &[u8]) -> Result<(), AppCommandError> {
     }
 
     let temp_path = parent.join(format!(
-        ".codeg-edit-{}.{}.tmp",
+        ".harness-studio-edit-{}.{}.tmp",
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
@@ -5194,17 +5190,14 @@ pub async fn read_workspace_file_base64(
         // read race: the original `target` symlink can't be re-resolved (we use
         // the canonical path), a final-component symlink swapped in after the
         // check makes the open fail, and metadata/read never re-look-up the path.
-        let canonical_root =
-            std::fs::canonicalize(&root).map_err(AppCommandError::io)?;
-        let canonical_target =
-            std::fs::canonicalize(&target).map_err(AppCommandError::io)?;
+        let canonical_root = std::fs::canonicalize(&root).map_err(AppCommandError::io)?;
+        let canonical_target = std::fs::canonicalize(&target).map_err(AppCommandError::io)?;
         if !is_within_workspace(&canonical_root, &canonical_target) {
             return Err(AppCommandError::invalid_input(
                 "Path is outside workspace root",
             ));
         }
-        let mut file =
-            open_no_follow(&canonical_target).map_err(AppCommandError::io)?;
+        let mut file = open_no_follow(&canonical_target).map_err(AppCommandError::io)?;
         let metadata = file.metadata().map_err(AppCommandError::io)?;
         if !metadata.is_file() {
             return Err(AppCommandError::invalid_input("Path is not a file"));
@@ -6296,10 +6289,7 @@ async fn get_unpushed_hashes(
             .current_dir(path)
             .output()
             .await
-            .map(|o| {
-                o.status.success()
-                    && !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-            })
+            .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         let mut rev_args = vec!["rev-list".to_string(), limit_arg.clone()];
         if let Some(a) = author.filter(|a| !a.is_empty()) {
@@ -6537,10 +6527,7 @@ mod tests {
         // BRE metacharacters are backslash-escaped...
         assert_eq!(git_author_match_pattern("a.b*c"), "^a\\.b\\*c <");
         assert_eq!(git_author_match_pattern("na[me]"), "^na\\[me\\] <");
-        assert_eq!(
-            git_author_match_pattern("back\\slash"),
-            "^back\\\\slash <"
-        );
+        assert_eq!(git_author_match_pattern("back\\slash"), "^back\\\\slash <");
         // ...but `|` is literal in BRE, so a name like `程相|cx` is left as-is.
         assert_eq!(git_author_match_pattern("程相|cx"), "^程相|cx <");
     }
@@ -6566,12 +6553,12 @@ mod tests {
         // `folder://changed` carrying its full detail, so the sidebar can place a
         // conversation produced inside it without a re-fetch.
         use crate::db::entities::folder::FolderKind;
-        use crate::web::event_bridge::{WebEventBroadcaster, FOLDER_CHANGED_EVENT};
+        use crate::events::{EventBroadcaster, FOLDER_CHANGED_EVENT};
         use std::sync::Arc;
 
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
 
         emit_folder_upsert(
             &emitter,
@@ -6669,9 +6656,9 @@ mod tests {
         // Intermediate directory entries are emitted alongside files — the
         // `@`-mention picker relies on directories being present.
         assert!(
-            entries.iter().any(
-                |e| e.path == "a" && matches!(e.kind, WorkspaceEntryKind::Dir)
-            ),
+            entries
+                .iter()
+                .any(|e| e.path == "a" && matches!(e.kind, WorkspaceEntryKind::Dir)),
             "directory entries must be present"
         );
     }
@@ -6950,7 +6937,7 @@ mod tests {
 
         let result = git_log(
             p.to_string_lossy().to_string(),
-            Some(5),                   // limit → status window is `-5`
+            Some(5), // limit → status window is `-5`
             None,
             None,
             None,
@@ -6989,7 +6976,14 @@ mod tests {
         // combination that made the literal-HEAD comparison wrong. Remote-tracking
         // refs are faked with update-ref so the test needs no network.
         git_run(p, &["update-ref", "refs/remotes/origin/main", &base]);
-        git_run(p, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git_run(
+            p,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         git_run(p, &["checkout", "-q", "-b", "feature"]);
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "f1"]);
         let f1 = git_capture(p, &["rev-parse", "HEAD"]);
@@ -7068,7 +7062,14 @@ mod tests {
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "c1"]);
         let c1 = git_capture(p, &["rev-parse", "HEAD"]);
         git_run(p, &["update-ref", "refs/remotes/origin/main", &c1]);
-        git_run(p, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git_run(
+            p,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         git_run(p, &["commit", "-q", "--allow-empty", "-m", "c2"]);
         git_run(p, &["checkout", "-q", "--detach"]);
 
@@ -7282,17 +7283,17 @@ mod tests {
     #[tokio::test]
     async fn add_folder_to_history_core_derives_name_from_path() {
         let db = fresh_in_memory_db().await;
-        let entry = add_folder_to_history_core(&db, "/tmp/codeg-test-project".into())
+        let entry = add_folder_to_history_core(&db, "/tmp/harness-studio-test-project".into())
             .await
             .expect("add folder");
-        assert_eq!(entry.name, "codeg-test-project");
-        assert_eq!(entry.path, "/tmp/codeg-test-project");
+        assert_eq!(entry.name, "harness-studio-test-project");
+        assert_eq!(entry.path, "/tmp/harness-studio-test-project");
     }
 
     #[tokio::test]
     async fn add_folder_to_history_core_upserts_on_duplicate_path() {
         let db = fresh_in_memory_db().await;
-        let path = "/tmp/codeg-dup-test".to_string();
+        let path = "/tmp/harness-studio-dup-test".to_string();
         let first = add_folder_to_history_core(&db, path.clone())
             .await
             .expect("add 1st");
@@ -7312,7 +7313,7 @@ mod tests {
     #[tokio::test]
     async fn remove_folder_from_history_core_soft_deletes() {
         let db = fresh_in_memory_db().await;
-        let path = "/tmp/codeg-remove-test".to_string();
+        let path = "/tmp/harness-studio-remove-test".to_string();
         add_folder_to_history_core(&db, path.clone())
             .await
             .expect("add");
@@ -7349,7 +7350,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_folder_for_path_creates_a_closed_row() {
         let db = fresh_in_memory_db().await;
-        let entry = folder_service::ensure_folder_for_path(&db.conn, "/tmp/codeg-pr666")
+        let entry = folder_service::ensure_folder_for_path(&db.conn, "/tmp/harness-studio-pr666")
             .await
             .expect("ensure folder");
 
@@ -7378,13 +7379,14 @@ mod tests {
     #[tokio::test]
     async fn ensure_folder_for_path_leaves_an_open_folder_untouched() {
         let db = fresh_in_memory_db().await;
-        let opened = open_folder_core(&db, "/tmp/codeg-ensure-open".into())
+        let opened = open_folder_core(&db, "/tmp/harness-studio-ensure-open".into())
             .await
             .expect("open folder");
 
-        let entry = folder_service::ensure_folder_for_path(&db.conn, "/tmp/codeg-ensure-open")
-            .await
-            .expect("ensure folder");
+        let entry =
+            folder_service::ensure_folder_for_path(&db.conn, "/tmp/harness-studio-ensure-open")
+                .await
+                .expect("ensure folder");
 
         assert_eq!(entry.id, opened.id, "the existing row is reused");
         assert_eq!(
@@ -7404,14 +7406,14 @@ mod tests {
     #[tokio::test]
     async fn ensure_folder_for_path_does_not_reopen_a_closed_folder() {
         let db = fresh_in_memory_db().await;
-        let opened = open_folder_core(&db, "/tmp/codeg-ensure-closed".into())
+        let opened = open_folder_core(&db, "/tmp/harness-studio-ensure-closed".into())
             .await
             .expect("open folder");
         folder_service::set_folder_open(&db.conn, opened.id, false)
             .await
             .expect("close folder");
 
-        folder_service::ensure_folder_for_path(&db.conn, "/tmp/codeg-ensure-closed")
+        folder_service::ensure_folder_for_path(&db.conn, "/tmp/harness-studio-ensure-closed")
             .await
             .expect("ensure folder");
 
@@ -7428,10 +7430,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_folder_for_path_revives_a_soft_deleted_row_but_leaves_it_closed() {
         let db = fresh_in_memory_db().await;
-        let opened = open_folder_core(&db, "/tmp/codeg-ensure-deleted".into())
+        let opened = open_folder_core(&db, "/tmp/harness-studio-ensure-deleted".into())
             .await
             .expect("open folder");
-        remove_folder_from_history_core(&db, "/tmp/codeg-ensure-deleted".into())
+        remove_folder_from_history_core(&db, "/tmp/harness-studio-ensure-deleted".into())
             .await
             .expect("soft delete");
         assert!(
@@ -7442,11 +7444,15 @@ mod tests {
             "precondition: a soft-deleted row is invisible to cwd resolution"
         );
 
-        let entry = folder_service::ensure_folder_for_path(&db.conn, "/tmp/codeg-ensure-deleted")
-            .await
-            .expect("ensure folder");
+        let entry =
+            folder_service::ensure_folder_for_path(&db.conn, "/tmp/harness-studio-ensure-deleted")
+                .await
+                .expect("ensure folder");
 
-        assert_eq!(entry.id, opened.id, "the same row is revived, not a new one");
+        assert_eq!(
+            entry.id, opened.id,
+            "the same row is revived, not a new one"
+        );
         assert!(
             folder_service::get_folder_by_id(&db.conn, opened.id)
                 .await
@@ -7464,12 +7470,12 @@ mod tests {
     #[tokio::test]
     async fn open_worktree_folder_core_records_parent_as_root() {
         let db = fresh_in_memory_db().await;
-        let root = open_folder_core(&db, "/tmp/codeg-wt-root".into())
+        let root = open_folder_core(&db, "/tmp/harness-studio-wt-root".into())
             .await
             .expect("open root");
         assert_eq!(root.parent_id, None, "root folder has no parent");
 
-        let wt = open_worktree_folder_core(&db, "/tmp/codeg-wt-a".into(), root.id)
+        let wt = open_worktree_folder_core(&db, "/tmp/harness-studio-wt-a".into(), root.id)
             .await
             .expect("open worktree");
         assert_eq!(
@@ -7482,17 +7488,18 @@ mod tests {
     #[tokio::test]
     async fn open_worktree_folder_core_flattens_nested_worktrees() {
         let db = fresh_in_memory_db().await;
-        let root = open_folder_core(&db, "/tmp/codeg-wt-flat-root".into())
+        let root = open_folder_core(&db, "/tmp/harness-studio-wt-flat-root".into())
             .await
             .expect("open root");
-        let child = open_worktree_folder_core(&db, "/tmp/codeg-wt-flat-1".into(), root.id)
+        let child = open_worktree_folder_core(&db, "/tmp/harness-studio-wt-flat-1".into(), root.id)
             .await
             .expect("open child worktree");
         // A worktree created *from* the child must still point at the root, not
         // the intermediate child.
-        let grandchild = open_worktree_folder_core(&db, "/tmp/codeg-wt-flat-2".into(), child.id)
-            .await
-            .expect("open grandchild worktree");
+        let grandchild =
+            open_worktree_folder_core(&db, "/tmp/harness-studio-wt-flat-2".into(), child.id)
+                .await
+                .expect("open grandchild worktree");
         assert_eq!(child.parent_id, Some(root.id));
         assert_eq!(
             grandchild.parent_id,
@@ -7504,7 +7511,7 @@ mod tests {
     #[tokio::test]
     async fn open_worktree_folder_core_unknown_source_is_root() {
         let db = fresh_in_memory_db().await;
-        let wt = open_worktree_folder_core(&db, "/tmp/codeg-wt-orphan".into(), 0)
+        let wt = open_worktree_folder_core(&db, "/tmp/harness-studio-wt-orphan".into(), 0)
             .await
             .expect("open worktree with no source");
         assert_eq!(
@@ -7620,7 +7627,7 @@ mod tests {
     /// should already read as the branch — but stay silent about it.
     #[tokio::test]
     async fn backfill_labels_a_closed_worktree_without_announcing_it() {
-        use crate::web::event_bridge::WebEventBroadcaster;
+        use crate::events::EventBroadcaster;
 
         let db = fresh_in_memory_db().await;
         let (_dir, repo, wt_path) = repo_with_worktree();
@@ -7640,8 +7647,8 @@ mod tests {
                 .await
                 .expect("clear the alias");
         }
-        let broadcaster = std::sync::Arc::new(WebEventBroadcaster::new());
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let broadcaster = std::sync::Arc::new(EventBroadcaster::new());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
         remove_folder_from_workspace_core(&emitter, &db, closed_wt.id)
             .await
             .expect("close the folder");
@@ -7662,7 +7669,7 @@ mod tests {
         // …but only the open one is announced.
         let mut announced = Vec::new();
         while let Ok(evt) = rx.try_recv() {
-            if evt.channel == crate::web::event_bridge::FOLDER_CHANGED_EVENT {
+            if evt.channel == crate::events::FOLDER_CHANGED_EVENT {
                 let p = &*evt.payload;
                 if p["kind"] == "upsert" {
                     announced.push(p["folder"]["id"].as_i64().unwrap_or(-1) as i32);
@@ -7754,9 +7761,7 @@ mod tests {
     }
 
     fn test_emitter() -> EventEmitter {
-        EventEmitter::test_web_only(std::sync::Arc::new(
-            crate::web::event_bridge::WebEventBroadcaster::new(),
-        ))
+        EventEmitter::test_local(std::sync::Arc::new(crate::events::EventBroadcaster::new()))
     }
 
     /// Spell a path git printed and one we resolved ourselves the same way
@@ -8125,15 +8130,15 @@ branch refs/heads/main";
     #[tokio::test]
     async fn open_folder_core_preserves_existing_worktree_parent() {
         let db = fresh_in_memory_db().await;
-        let root = open_folder_core(&db, "/tmp/codeg-wt-preserve-root".into())
+        let root = open_folder_core(&db, "/tmp/harness-studio-wt-preserve-root".into())
             .await
             .expect("open root");
-        let wt = open_worktree_folder_core(&db, "/tmp/codeg-wt-preserve".into(), root.id)
+        let wt = open_worktree_folder_core(&db, "/tmp/harness-studio-wt-preserve".into(), root.id)
             .await
             .expect("open worktree");
         assert_eq!(wt.parent_id, Some(root.id));
         // A plain reopen of the same path must not clear the recorded parent.
-        let reopened = open_folder_core(&db, "/tmp/codeg-wt-preserve".into())
+        let reopened = open_folder_core(&db, "/tmp/harness-studio-wt-preserve".into())
             .await
             .expect("reopen plain");
         assert_eq!(
@@ -8146,10 +8151,10 @@ branch refs/heads/main";
     #[tokio::test]
     async fn open_worktree_folder_core_unknown_source_demotes_existing_to_root() {
         let db = fresh_in_memory_db().await;
-        let root = open_folder_core(&db, "/tmp/codeg-wt-demote-root".into())
+        let root = open_folder_core(&db, "/tmp/harness-studio-wt-demote-root".into())
             .await
             .expect("open root");
-        let path = "/tmp/codeg-wt-demote".to_string();
+        let path = "/tmp/harness-studio-wt-demote".to_string();
         let wt = open_worktree_folder_core(&db, path.clone(), root.id)
             .await
             .expect("open worktree");
@@ -8168,7 +8173,7 @@ branch refs/heads/main";
     #[tokio::test]
     async fn update_folder_color_core_roundtrips() {
         let db = fresh_in_memory_db().await;
-        let entry = add_folder_to_history_core(&db, "/tmp/codeg-color-test".into())
+        let entry = add_folder_to_history_core(&db, "/tmp/harness-studio-color-test".into())
             .await
             .expect("add");
         let updated = update_folder_color_core(&db, entry.id, "#ff8800".into())
@@ -8181,16 +8186,16 @@ branch refs/heads/main";
 
     #[tokio::test]
     async fn update_folder_default_agent_core_set_then_clear() {
-        use crate::web::event_bridge::{WebEventBroadcaster, WORK_TASK_CHANGED_EVENT};
+        use crate::events::{EventBroadcaster, WORK_TASK_CHANGED_EVENT};
         use std::sync::Arc;
 
         let db = fresh_in_memory_db().await;
-        let entry = add_folder_to_history_core(&db, "/tmp/codeg-agent-test".into())
+        let entry = add_folder_to_history_core(&db, "/tmp/harness-studio-agent-test".into())
             .await
             .expect("add");
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
 
         let set =
             update_folder_default_agent_core(&emitter, &db, entry.id, Some(AgentType::ClaudeCode))
@@ -8211,9 +8216,7 @@ branch refs/heads/main";
         assert_eq!(cleared.default_agent_type, None);
         // Clearing it changes the inherited value just as much as setting it.
         assert_eq!(
-            rx.try_recv()
-                .expect("clearing should nudge too")
-                .payload["kind"],
+            rx.try_recv().expect("clearing should nudge too").payload["kind"],
             "settings"
         );
     }
@@ -8267,7 +8270,10 @@ branch refs/heads/main";
             "src/inner".to_string(),
         )
         .await;
-        assert!(res.is_err(), "moving a dir into its own descendant must fail");
+        assert!(
+            res.is_err(),
+            "moving a dir into its own descendant must fail"
+        );
         assert!(root.path().join("src/inner").is_dir(), "source untouched");
     }
 
@@ -8346,8 +8352,7 @@ mod workspace_confinement_tests {
         let root = tempfile::tempdir().expect("root");
         let outside = tempfile::tempdir().expect("outside");
         std::fs::write(outside.path().join("secret"), b"top").expect("write");
-        symlink(outside.path().join("secret"), root.path().join("link"))
-            .expect("symlink");
+        symlink(outside.path().join("secret"), root.path().join("link")).expect("symlink");
         // The canonical target resolves outside the root, so the read is denied
         // even though `root/link` is lexically inside the workspace.
         let res = read_workspace_file_base64(
@@ -8356,7 +8361,10 @@ mod workspace_confinement_tests {
             None,
         )
         .await;
-        assert!(res.is_err(), "symlink escaping the workspace must be rejected");
+        assert!(
+            res.is_err(),
+            "symlink escaping the workspace must be rejected"
+        );
     }
 
     /// The strict predicate, applied the way the guarded call sites apply it:
@@ -8402,7 +8410,10 @@ mod workspace_confinement_tests {
             "sub".to_string(),
         )
         .await;
-        assert!(res.is_err(), "must not clobber a dangling destination symlink");
+        assert!(
+            res.is_err(),
+            "must not clobber a dangling destination symlink"
+        );
         assert!(
             std::fs::symlink_metadata(root.path().join("sub/a.txt")).is_ok(),
             "dangling symlink must remain intact",
@@ -8414,11 +8425,7 @@ mod workspace_confinement_tests {
     async fn move_file_tree_entry_moves_a_symlink_entry() {
         let root = tempfile::tempdir().expect("root");
         std::fs::write(root.path().join("target.txt"), b"x").expect("write");
-        symlink(
-            root.path().join("target.txt"),
-            root.path().join("link.txt"),
-        )
-        .expect("symlink");
+        symlink(root.path().join("target.txt"), root.path().join("link.txt")).expect("symlink");
         std::fs::create_dir(root.path().join("sub")).expect("mkdir");
 
         let new_rel = move_file_tree_entry(
@@ -8430,8 +8437,8 @@ mod workspace_confinement_tests {
         .expect("move symlink");
         assert_eq!(new_rel.replace('\\', "/"), "sub/link.txt");
         // The moved entry is still a symlink (the link itself moved, not its target).
-        let meta = std::fs::symlink_metadata(root.path().join("sub/link.txt"))
-            .expect("moved link exists");
+        let meta =
+            std::fs::symlink_metadata(root.path().join("sub/link.txt")).expect("moved link exists");
         assert!(meta.file_type().is_symlink(), "entry stays a symlink");
         assert!(!root.path().join("link.txt").exists(), "old link gone");
     }

@@ -944,7 +944,7 @@ const ConversationTabView = memo(function ConversationTabView({
     )
   )
 
-  // An agent can run a turn CODEG never started: CodeBuddy drains a finished
+  // An agent can run a turn HARNESS_STUDIO never started: CodeBuddy drains a finished
   // background task by prompting itself, and streams a whole turn for it.
   // `applyStreamingAction`'s out-of-turn guard drops that content because the
   // `background_activity` overlay is supposed to own it — but that overlay only
@@ -2335,7 +2335,7 @@ const ConversationTabView = memo(function ConversationTabView({
       steerChannel={feedback.channel}
     >
       {isWelcomeMode ? (
-        // Same overlay scrollbar as the sidebar / file lists (os-theme-codeg)
+        // Same overlay scrollbar as the sidebar / file lists (os-theme-harness_studio)
         // instead of the platform's native bar. `min-h-full` on the inner column
         // keeps the original layout: content parked between two spacers, the
         // page scrolling only once it outgrows the viewport.

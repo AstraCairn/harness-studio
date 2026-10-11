@@ -38,11 +38,11 @@
 //!    browser that completes the consent does not have to be the process that
 //!    delivers the result.
 //!
-//! So: codeg starts a short-lived agent process purely to sign in, drives ACP
+//! So: harness_studio starts a short-lived agent process purely to sign in, drives ACP
 //! `initialize` + `authenticate` over its stdio, scrapes the printed URL, and
 //! shows it. The user opens it in whatever browser they have, consents, and
 //! lands on a `http://127.0.0.1:<port>/?state=…&code=…` page their browser
-//! cannot reach. They paste that address back, and codeg — which *is* on the
+//! cannot reach. They paste that address back, and harness_studio — which *is* on the
 //! machine where that port is listening — performs the redirect on their
 //! behalf. The agent then completes the exchange, runs its own onboarding, and
 //! writes the credential exactly where a real session will look for it.
@@ -62,13 +62,13 @@
 //!
 //! # Security
 //!
-//! `finish` takes a URL typed by the user and makes codeg issue an HTTP request
+//! `finish` takes a URL typed by the user and makes harness_studio issue an HTTP request
 //! — the shape of an SSRF. It is closed by construction: the request target is
-//! rebuilt from the `redirect_uri` **codeg captured from the agent's own
+//! rebuilt from the `redirect_uri` **harness_studio captured from the agent's own
 //! authorization URL**, and only `code`/`state`/`error` are taken from the
 //! paste. The captured value is additionally required to be
 //! `http://127.0.0.1:<port>/`, matching the agent's hardcoded `_LOOPBACK_HOST`,
-//! so even a compromised upstream cannot redirect codeg off the loopback. The
+//! so even a compromised upstream cannot redirect harness_studio off the loopback. The
 //! request also bypasses any configured proxy: a loopback address must never
 //! leave the machine.
 //!
@@ -80,7 +80,7 @@
 //! is the other half, and it drives the agent's own ACP `logout` for the same
 //! reason [`start`] drives its `authenticate` — where the credential lives
 //! (a macOS login-keychain item, or a file under `GEMINI_HOME`) is decided by
-//! rules inside the agent, so deleting it from here would be codeg guessing at
+//! rules inside the agent, so deleting it from here would be harness_studio guessing at
 //! someone else's storage layout.
 
 use std::collections::BTreeMap;
@@ -147,7 +147,7 @@ const PENDING_TTL: Duration = Duration::from_secs(300);
 /// Worth spending, and not only for politeness: the ACP server reads stdin EOF
 /// as "the client is gone" and shuts down, and a graceful exit is the one path
 /// on which a self-extracting build removes its OWN unpacked directory. Every
-/// hard kill below leaves that to codeg's scratch cleanup instead.
+/// hard kill below leaves that to harness_studio's scratch cleanup instead.
 const STDIN_EOF_GRACE: Duration = Duration::from_millis(1_500);
 
 /// How long the tree gets to honor `SIGTERM` before the escalation to
@@ -203,12 +203,12 @@ pub struct AntigravityLoginOutcome {
     /// The agent's own words when it refused, already redacted. `None` on
     /// success.
     pub message: Option<String>,
-    /// Whether the same link can still be used. True only for a paste codeg
+    /// Whether the same link can still be used. True only for a paste harness_studio
     /// rejected on its own — the agent's listener never saw it, so the consent
     /// the user already gave is still good and only the paste needs fixing.
     /// False once the redirect has been delivered: it is one-shot.
     pub retryable: bool,
-    /// Where the agent stores the credential this sign-in produced, when codeg
+    /// Where the agent stores the credential this sign-in produced, when harness_studio
     /// can name it. Worth surfacing: it is a portable file, so a user with
     /// several headless machines can sign in once and copy it.
     pub credential_path: Option<String>,
@@ -221,9 +221,8 @@ pub struct AntigravityLoginOutcome {
 /// state must expire on its own: in server mode a client disconnect drops the
 /// handler future mid-`await`, and a `Finishing` that nothing ever clears would
 /// refuse every later sign-in for the life of the process.
-const FINISH_BUDGET: Duration = Duration::from_secs(
-    REDIRECT_WAIT.as_secs() + AUTHENTICATE_WAIT.as_secs() + 30,
-);
+const FINISH_BUDGET: Duration =
+    Duration::from_secs(REDIRECT_WAIT.as_secs() + AUTHENTICATE_WAIT.as_secs() + 30);
 
 /// A sign-in waiting for its redirect.
 struct Pending {
@@ -520,7 +519,7 @@ async fn abandon_start(generation: u64) {
 /// `method_id` is taken from the caller rather than from the stored row on
 /// purpose. The panel can offer "sign in" for the method currently selected in
 /// the form, and the agent persists the choice itself (`_remember_auth_type`
-/// runs at the end of a successful `authenticate`), so codeg does not write
+/// runs at the end of a successful `authenticate`), so harness_studio does not write
 /// `settings.json` here — doing so would record the *saved* method, which is
 /// not necessarily the one being signed in.
 pub async fn start(
@@ -587,7 +586,7 @@ async fn start_claimed(
     // `initialize` first, and its answer awaited before `authenticate` goes
     // out. Not just protocol politeness: it keeps the URL `print` — which the
     // agent emits during `authenticate`, onto the same fd as the JSON-RPC
-    // frames — from racing a response codeg still has to parse.
+    // frames — from racing a response harness_studio still has to parse.
     // Not `?`: an early return here would drop `child` — which `kill_on_drop`
     // turns into a signal to the DIRECT process only, leaving a onefile
     // payload alive — and strand the scratch directory with it.
@@ -647,9 +646,7 @@ async fn start_claimed(
         StartSignal::Url(url) => url,
         StartSignal::Authenticated => {
             reap_and_release(child, stdin, scratch).await;
-            tracing::info!(
-                "[ACP][Antigravity] {method_id} was already signed in; no link needed"
-            );
+            tracing::info!("[ACP][Antigravity] {method_id} was already signed in; no link needed");
             return Ok(AntigravityLoginStart {
                 already_signed_in: true,
                 handle: None,
@@ -860,7 +857,7 @@ async fn initialize(
         "params": {
             "protocolVersion": 1,
             "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false } },
-            "clientInfo": { "name": "codeg", "version": env!("CARGO_PKG_VERSION") },
+            "clientInfo": { "name": "harness_studio", "version": env!("CARGO_PKG_VERSION") },
         },
     });
     write_frame(stdin, &init).await?;
@@ -871,7 +868,7 @@ async fn initialize(
         })
 }
 
-/// The first thing the agent does after `authenticate` that codeg can act on.
+/// The first thing the agent does after `authenticate` that harness_studio can act on.
 enum StartSignal {
     /// It printed a link and is now blocking on its loopback listener.
     Url(String),
@@ -893,7 +890,7 @@ enum StartSignal {
 pub async fn finish(handle: &str, pasted: &str) -> Result<AntigravityLoginOutcome, AcpError> {
     let parsed = ParsedRedirect::parse(pasted);
 
-    // Validate WITHOUT consuming the attempt. A paste codeg itself rejects
+    // Validate WITHOUT consuming the attempt. A paste harness_studio itself rejects
     // never reached the agent, so the listener is still open and the consent
     // the user already gave in their browser is still good — making them redo
     // the whole Google round trip over a truncated copy would be gratuitous.
@@ -902,9 +899,7 @@ pub async fn finish(handle: &str, pasted: &str) -> Result<AntigravityLoginOutcom
     let (target, pending, generation) = {
         let mut slot = pending_slot().lock().await;
         let SlotState::Waiting(pending) = &slot.state else {
-            return Err(AcpError::protocol(
-                "no sign-in is waiting; start a new one",
-            ));
+            return Err(AcpError::protocol("no sign-in is waiting; start a new one"));
         };
         if pending.handle != handle {
             return Err(AcpError::protocol(
@@ -1043,7 +1038,7 @@ async fn finish_delivering(target: String, pending: Pending) -> AntigravityLogin
     }
 }
 
-/// Why codeg will not send this paste on, if it will not.
+/// Why harness_studio will not send this paste on, if it will not.
 ///
 /// Everything here is decidable without touching the agent, which is exactly
 /// what makes these failures cheap to retry. Takes the expected `state` rather
@@ -1077,9 +1072,7 @@ pub async fn cancel(handle: &str) -> Result<(), AcpError> {
     let abandoned = {
         let mut slot = pending_slot().lock().await;
         let SlotState::Waiting(pending) = &slot.state else {
-            return Err(AcpError::protocol(
-                "no sign-in is waiting; start a new one",
-            ));
+            return Err(AcpError::protocol("no sign-in is waiting; start a new one"));
         };
         // A handle that is not the current one belongs to an attempt already
         // displaced (a stale browser tab, a double submit). Reporting that is
@@ -1115,17 +1108,17 @@ const SIGN_OUT_BUDGET: Duration =
 /// last one they ever get. Nothing the user can reasonably reach fixes that
 /// either: the credential is a login-keychain item on macOS and a file under
 /// `GEMINI_HOME` elsewhere, so it outlives uninstalling the Antigravity CLI and
-/// reinstalling codeg.
+/// reinstalling harness_studio.
 ///
 /// Driven through the agent's own ACP `logout` rather than by deleting the
 /// store from here. Which backend holds the credential is decided inside the
 /// agent (`credential_store.py::create_default_store` probes for a usable
 /// keychain and falls back to the file), and its `clear` deliberately wipes
-/// BOTH so an older plaintext token cannot survive — rules codeg would have to
+/// BOTH so an older plaintext token cannot survive — rules harness_studio would have to
 /// copy, and re-copy whenever they change.
 ///
 /// `logout` also removes `auth.type` from the server's `settings.json`, which
-/// is codeg's business: a session whose `auth.type` is missing fails outright
+/// is harness_studio's business: a session whose `auth.type` is missing fails outright
 /// with `Authentication required`. The caller puts the saved method back (see
 /// `acp_antigravity_sign_out_core`).
 pub async fn sign_out(runtime_env: &BTreeMap<String, String>) -> Result<(), AcpError> {
@@ -1181,15 +1174,10 @@ async fn request_logout(agent: &mut AgentChild) -> Result<(), AcpError> {
         "params": {},
     });
     write_frame(&mut agent.stdin, &logout).await?;
-    await_response(
-        &mut agent.responses,
-        ID_LOGOUT,
-        LOGOUT_WAIT,
-        &agent.stderr,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|reason| AcpError::protocol(format!("Antigravity refused to sign out: {reason}")))
+    await_response(&mut agent.responses, ID_LOGOUT, LOGOUT_WAIT, &agent.stderr)
+        .await
+        .map(|_| ())
+        .map_err(|reason| AcpError::protocol(format!("Antigravity refused to sign out: {reason}")))
 }
 
 /// Whether the agent's `initialize` answer offers the ACP `logout` method.
@@ -1204,7 +1192,7 @@ fn advertises_logout(handshake: &serde_json::Value) -> bool {
         .is_some_and(|value| !value.is_null())
 }
 
-/// The bits of a pasted redirect codeg is willing to act on.
+/// The bits of a pasted redirect harness_studio is willing to act on.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ParsedRedirect {
     code: Option<String>,
@@ -1262,7 +1250,7 @@ impl ParsedRedirect {
 /// Rebuild the redirect request from the captured listener address.
 ///
 /// The single place the SSRF question is answered: the host, port and path come
-/// from `redirect_uri`, which codeg read out of the agent's own authorization
+/// from `redirect_uri`, which harness_studio read out of the agent's own authorization
 /// URL and re-checks here against the agent's hardcoded loopback host. Only the
 /// three OAuth parameters come from the user.
 fn build_redirect_request(
@@ -1306,10 +1294,10 @@ fn is_loopback_redirect(redirect_uri: &str) -> bool {
 /// Perform the redirect against the agent's one-shot listener.
 async fn deliver_redirect(target: &str) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        // A loopback address must never be handed to a proxy — and codeg's
+        // A loopback address must never be handed to a proxy — and harness_studio's
         // users routinely run behind one.
         .no_proxy()
-        // The loopback-only invariant is checked on the target codeg builds;
+        // The loopback-only invariant is checked on the target harness_studio builds;
         // following a redirect would let the response choose the next one and
         // step straight out of it. The shipped listener only ever answers 200,
         // so nothing legitimate is lost.
@@ -1528,7 +1516,7 @@ fn find_auth_url(line: &str) -> Option<String> {
 /// authorization URL.
 fn extract_redirect_uri(auth_url: &str) -> Result<String, String> {
     let redirect = query_param(auth_url, "redirect_uri").ok_or_else(|| {
-        "Antigravity's sign-in link carries no redirect address, so codeg cannot complete it"
+        "Antigravity's sign-in link carries no redirect address, so harness_studio cannot complete it"
             .to_string()
     })?;
     if !is_loopback_redirect(&redirect) {
@@ -1754,7 +1742,9 @@ mod tests {
 
         // A second start displaces the published attempt AND reaps its child —
         // otherwise that agent holds its loopback listener for 300s.
-        let second = claim_slot().await.expect("a published attempt is displaceable");
+        let second = claim_slot()
+            .await
+            .expect("a published attempt is displaceable");
         assert!(second > first);
         assert_reaped(out1, "the displaced attempt").await;
 
@@ -1806,10 +1796,7 @@ mod tests {
             "a stale abandon must not release a newer start"
         );
         abandon_start(third).await;
-        assert!(matches!(
-            pending_slot().lock().await.state,
-            SlotState::Idle
-        ));
+        assert!(matches!(pending_slot().lock().await.state, SlotState::Idle));
 
         // And `release_finishing` is a no-op unless the slot is actually
         // completing, so a late one cannot cancel a fresh start.
@@ -1847,10 +1834,7 @@ mod tests {
         );
 
         release_finishing(attempt_b).await;
-        assert!(matches!(
-            pending_slot().lock().await.state,
-            SlotState::Idle
-        ));
+        assert!(matches!(pending_slot().lock().await.state, SlotState::Idle));
 
         // A sign-out takes the same exclusive state, and takes it in ONE lock
         // acquisition. It is about to erase the credential from the moment it
@@ -1872,10 +1856,7 @@ mod tests {
             "a sign-in during a sign-out must be refused"
         );
         release_finishing(sign_out).await;
-        assert!(matches!(
-            pending_slot().lock().await.state,
-            SlotState::Idle
-        ));
+        assert!(matches!(pending_slot().lock().await.state, SlotState::Idle));
     }
 
     /// The protocol requires the check ("Clients MUST NOT call `logout` unless
@@ -2044,7 +2025,9 @@ mod tests {
         // With nothing but the prompt to report, the hint is empty rather than
         // a dangling "Last output:".
         let only_prompt = StderrTail::new();
-        only_prompt.push(&format!("{AUTH_PROMPT_MARKER}https://accounts.google.com/x"));
+        only_prompt.push(&format!(
+            "{AUTH_PROMPT_MARKER}https://accounts.google.com/x"
+        ));
         assert_eq!(stderr_hint(&only_prompt), "");
     }
 
@@ -2067,7 +2050,7 @@ mod tests {
     }
 
     /// The whole SSRF surface: whatever the user pastes, the request must go to
-    /// the address codeg captured.
+    /// the address harness_studio captured.
     #[test]
     fn the_request_target_ignores_the_pasted_host() {
         let parsed = ParsedRedirect::parse("http://evil.example/?code=4%2Fabc&state=good");
@@ -2178,7 +2161,10 @@ mod tests {
             error_message(&with_data).as_deref(),
             Some("the long actionable one")
         );
-        assert_eq!(error_message(&serde_json::json!({"id": 2, "result": {}})), None);
+        assert_eq!(
+            error_message(&serde_json::json!({"id": 2, "result": {}})),
+            None
+        );
     }
 
     /// The agent's message is rendered in the panel, so it goes through the

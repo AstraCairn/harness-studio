@@ -1,12 +1,12 @@
 //! Smoke test that exercises the externally-visible test scaffolding:
-//! `fresh_in_memory_db` + `EventEmitter::test_web_only`. These are the
+//! `fresh_in_memory_db` + `EventEmitter::test_local`. These are the
 //! foundations for parser snapshot tests (Phase 2) and HTTP API
 //! integration tests (Phase 4).
 
 use std::sync::Arc;
 
-use codeg_lib::db::test_helpers::fresh_in_memory_db;
-use codeg_lib::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+use harness_studio_lib::db::test_helpers::fresh_in_memory_db;
+use harness_studio_lib::events::{EventBroadcaster, EventEmitter};
 
 #[tokio::test]
 async fn in_memory_db_boots_and_runs_migrations() {
@@ -18,7 +18,7 @@ async fn in_memory_db_boots_and_runs_migrations() {
 }
 
 #[test]
-fn test_web_only_emitter_constructs() {
-    let broadcaster = Arc::new(WebEventBroadcaster::new());
-    let _emitter = EventEmitter::test_web_only(broadcaster);
+fn test_local_emitter_constructs() {
+    let broadcaster = Arc::new(EventBroadcaster::new());
+    let _emitter = EventEmitter::test_local(broadcaster);
 }

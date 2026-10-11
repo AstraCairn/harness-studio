@@ -59,7 +59,11 @@ fn git_failure_message(err: AppCommandError) -> String {
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        Some(detail) => format!("{}: {}", err.message, truncate_chars(&redact_userinfo(detail))),
+        Some(detail) => format!(
+            "{}: {}",
+            err.message,
+            truncate_chars(&redact_userinfo(detail))
+        ),
         None => err.message,
     }
 }
@@ -213,7 +217,7 @@ pub fn adopt_pull_request(
 /// is server-derived: the caller passes coordinates, never URLs or tokens.
 pub struct DeliveryCtx<'a> {
     pub conn: &'a DatabaseConnection,
-    /// codeg data dir — where the GIT_ASKPASS helper script lives.
+    /// harness_studio data dir — where the GIT_ASKPASS helper script lives.
     pub data_dir: &'a Path,
     /// The forge this task came from, read back from its own provenance —
     /// never "whatever this host looks like now". Every method below routes on
@@ -349,9 +353,7 @@ impl ForgeDeliveryApi for ForgeDelivery {
             ForgeProvider::GitLab => {
                 gitlab::find_merge_requests(&auth, ctx.owner_repo, head_branch).await
             }
-            ForgeProvider::Gitea => {
-                gitea::find_pulls(&auth, ctx.owner_repo, head_branch).await
-            }
+            ForgeProvider::Gitea => gitea::find_pulls(&auth, ctx.owner_repo, head_branch).await,
         }
         .map_err(|e| e.to_string())
     }
@@ -364,9 +366,7 @@ impl ForgeDeliveryApi for ForgeDelivery {
         let auth = resolve(ctx).await?;
         match ctx.provider {
             ForgeProvider::GitHub => create_pull(&auth, ctx.owner_repo, req).await,
-            ForgeProvider::GitLab => {
-                gitlab::create_merge_request(&auth, ctx.owner_repo, req).await
-            }
+            ForgeProvider::GitLab => gitlab::create_merge_request(&auth, ctx.owner_repo, req).await,
             ForgeProvider::Gitea => gitea::create_pull(&auth, ctx.owner_repo, req).await,
         }
         .map_err(|e| e.to_string())
@@ -376,9 +376,7 @@ impl ForgeDeliveryApi for ForgeDelivery {
         let auth = resolve(ctx).await?;
         match ctx.provider {
             ForgeProvider::GitHub => get_pull(&auth, ctx.owner_repo, number).await,
-            ForgeProvider::GitLab => {
-                gitlab::get_merge_request(&auth, ctx.owner_repo, number).await
-            }
+            ForgeProvider::GitLab => gitlab::get_merge_request(&auth, ctx.owner_repo, number).await,
             ForgeProvider::Gitea => gitea::get_pull(&auth, ctx.owner_repo, number).await,
         }
         .map_err(|e| e.to_string())
@@ -414,7 +412,9 @@ impl ForgeDeliveryApi for ForgeDelivery {
     ) -> Result<String, String> {
         let auth = resolve(ctx).await?;
         match ctx.provider {
-            ForgeProvider::GitHub => create_issue_comment(&auth, ctx.owner_repo, number, body).await,
+            ForgeProvider::GitHub => {
+                create_issue_comment(&auth, ctx.owner_repo, number, body).await
+            }
             ForgeProvider::GitLab => gitlab::create_note(&auth, ctx.owner_repo, kind, number, body)
                 .await
                 // The write-back wants the LINK; the composer wants the whole
@@ -433,9 +433,14 @@ impl ForgeDeliveryApi for ForgeDelivery {
 }
 
 async fn resolve(ctx: &DeliveryCtx<'_>) -> Result<ResolvedAuth, String> {
-    super::resolve_forge_auth(ctx.conn, ctx.provider, ctx.server_host, Some(ctx.account_id))
-        .await
-        .map_err(|e| e.to_string())
+    super::resolve_forge_auth(
+        ctx.conn,
+        ctx.provider,
+        ctx.server_host,
+        Some(ctx.account_id),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// `GET /repos/{o}/{r}/pulls?head={owner}:{branch}&state=all`.
@@ -484,7 +489,9 @@ pub async fn get_pull(
     let repo = super::normalize_repo(owner_repo)
         .ok_or_else(|| ForgeError::Invalid(format!("bad repository path: {owner_repo}")))?;
     if number <= 0 {
-        return Err(ForgeError::Invalid(format!("bad work item number: {number}")));
+        return Err(ForgeError::Invalid(format!(
+            "bad work item number: {number}"
+        )));
     }
     let url = format!("{}/repos/{repo}/pulls/{number}", auth.api_base);
     let raw: RawPull = github::api_get(auth, &url)
@@ -512,7 +519,7 @@ pub async fn get_pull(
 /// maintainer edits. That grant cannot be read reliably up front, so it is not
 /// gated here: a refused push bounces the task back to review with the reason,
 /// and a review turn that added no commits settles without pushing at all.
-/// What IS refused is a fork codeg cannot even name — a deleted or invisible
+/// What IS refused is a fork harness_studio cannot even name — a deleted or invisible
 /// head repository — because a push there can never work for anyone.
 pub fn pull_is_workable(
     provider: ForgeProvider,
@@ -524,7 +531,7 @@ pub fn pull_is_workable(
         && super::normalize_repo(&pull.head_repo).is_none()
     {
         return Err(format!(
-            "{noun} #{} comes from a fork whose repository codeg cannot see (it may be private \
+            "{noun} #{} comes from a fork whose repository harness_studio cannot see (it may be private \
              or deleted), so there would be no way to push work back to it",
             pull.number
         ));
@@ -608,8 +615,7 @@ async fn push_work_branch(
 ) -> Result<(), String> {
     // Everything here is interpolated into a URL or a refspec. Validate
     // BEFORE building either.
-    let repo = super::normalize_repo(repo)
-        .ok_or_else(|| format!("bad repository path: {repo}"))?;
+    let repo = super::normalize_repo(repo).ok_or_else(|| format!("bad repository path: {repo}"))?;
     ensure_pushable_branch(work_branch)?;
     ensure_pushable_branch(remote_branch)?;
     let url = format!("{}/{}.git", web_origin(auth), repo);
@@ -682,9 +688,14 @@ async fn fetch_base_tip(
     ensure_pushable_branch(base_branch).ok()?;
     let url = format!("{}/{}.git", web_origin(auth), ctx.owner_repo);
     let mut cmd = crate::process::tokio_command("git");
-    cmd.args(["fetch", "--quiet", &url, &format!("refs/heads/{base_branch}")])
-        .current_dir(worktree_path)
-        .stdin(std::process::Stdio::null());
+    cmd.args([
+        "fetch",
+        "--quiet",
+        &url,
+        &format!("refs/heads/{base_branch}"),
+    ])
+    .current_dir(worktree_path)
+    .stdin(std::process::Stdio::null());
     with_credentials(&mut cmd, ctx, auth);
     let fetched = cmd.output().await.ok()?;
     if !fetched.status.success() {
@@ -737,9 +748,9 @@ fn ensure_pushable_branch(branch: &str) -> Result<(), String> {
     crate::commands::folders::ensure_pushable_branch_name(branch).map_err(|e| e.to_string())
 }
 
-/// How a codeg task id is written into text that lands on a forge.
+/// How a harness_studio task id is written into text that lands on a forge.
 ///
-/// The number is codeg-local: it names a row in this workspace's task list,
+/// The number is harness-studio-local: it names a row in this workspace's task list,
 /// not anything in the repository the text is posted to. Both halves of the
 /// form below carry weight — neither is decoration:
 ///
@@ -756,7 +767,7 @@ fn task_ref(task_id: i32) -> String {
     format!("`{task_id}`")
 }
 
-/// Body of the pull request codeg opens. `Closes #N` is what links it to the
+/// Body of the pull request harness_studio opens. `Closes #N` is what links it to the
 /// issue: GitHub's native closing keyword beats an API `close` call — it fires
 /// only if the pull request actually merges, and only into the right branch.
 /// That reference is the intended one; the task id beside it is not, hence
@@ -765,7 +776,7 @@ pub fn pull_request_body(issue_url: &str, issue_number: i64, task_id: i32) -> St
     let task = task_ref(task_id);
     format!(
         "Closes #{issue_number}\n\n\
-         Prepared by [codeg](https://github.com/xggz/codeg) work task {task} \
+         Prepared by harness studio work task {task} \
          from {issue_url}.\n\n\
          Review the diff before merging — the task ran against issue text \
          written by an external author."
@@ -776,10 +787,13 @@ pub fn pull_request_body(issue_url: &str, issue_number: i64, task_id: i32) -> St
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskOutcome<'a> {
     /// Landed on the base branch of the local checkout.
-    Merged { commit: &'a str, base_branch: &'a str },
+    Merged {
+        commit: &'a str,
+        base_branch: &'a str,
+    },
     /// Published as a pull request.
     Delivered { pr_url: &'a str },
-    /// The third settlement: accepted in codeg without anything landing.
+    /// The third settlement: accepted in harness_studio without anything landing.
     /// `nothing_to_land` tells the two ways that happens apart — an empty diff,
     /// versus a worktree that was already gone (whose branch may still hold
     /// real commits). Saying the task made no changes about the second would
@@ -787,7 +801,7 @@ pub enum TaskOutcome<'a> {
     Accepted { nothing_to_land: bool },
 }
 
-/// The comment codeg posts when a task finishes.
+/// The comment harness_studio posts when a task finishes.
 ///
 /// Deliberately built from nothing but the task id, the thread it goes to, the
 /// outcome and the diff counters: NO agent-written text (result summary,
@@ -797,7 +811,7 @@ pub enum TaskOutcome<'a> {
 /// a noun string), which is what makes the rule hold as this evolves.
 ///
 /// Every sentence reports what happened to the TASK's work, never a verdict on
-/// the item the thread is about. "Accepted" is codeg's word for the user
+/// the item the thread is about. "Accepted" is harness_studio's word for the user
 /// signing off on a task, and a thread reads it as its own: on a pull request
 /// it says the change was approved, on an issue that the report was accepted.
 /// Neither follows from a task that landed nothing — least of all from a
@@ -821,7 +835,10 @@ pub fn writeback_comment_body(
     };
     let task = task_ref(task_id);
     match outcome {
-        TaskOutcome::Merged { commit, base_branch } => {
+        TaskOutcome::Merged {
+            commit,
+            base_branch,
+        } => {
             let short: String = commit.chars().take(7).collect();
             // "merged locally", not "merged": this landed in the triggering
             // user's own checkout and was never pushed, so to everyone else
@@ -829,12 +846,12 @@ pub fn writeback_comment_body(
             // to nothing. Saying it plainly is the difference between a status
             // note and a false claim that the work has shipped.
             format!(
-                "codeg work task {task} is done — merged locally into `{base_branch}` as \
+                "harness_studio work task {task} is done — merged locally into `{base_branch}` as \
                  `{short}`{numbers}."
             )
         }
         TaskOutcome::Delivered { pr_url } => {
-            format!("codeg work task {task} is done — {pr_url}{numbers}.")
+            format!("harness_studio work task {task} is done — {pr_url}{numbers}.")
         }
         TaskOutcome::Accepted { nothing_to_land } => {
             let noun = provider.change_noun();
@@ -848,7 +865,7 @@ pub fn writeback_comment_body(
                 (ForgeItemKind::Issue, true) => "it made no changes".to_string(),
                 (ForgeItemKind::Issue, false) => format!("its work was not merged{numbers}"),
             };
-            format!("codeg work task {task} is done — {what}.")
+            format!("harness_studio work task {task} is done — {what}.")
         }
     }
 }
@@ -945,11 +962,13 @@ mod tests {
         let echoed = "fatal: unable to access \
              'https://me:s3cret@git.example.com/team/app.git/': The requested URL returned \
              error: 403";
-        let flattened = git_failure_message(
-            AppCommandError::network("git push failed").with_detail(echoed),
-        );
+        let flattened =
+            git_failure_message(AppCommandError::network("git push failed").with_detail(echoed));
         assert!(!flattened.contains("s3cret"), "{flattened}");
-        assert!(flattened.contains("https://***@git.example.com/team/app.git/"), "{flattened}");
+        assert!(
+            flattened.contains("https://***@git.example.com/team/app.git/"),
+            "{flattened}"
+        );
         // The rest of git's sentence has to survive the scrub intact.
         assert!(flattened.contains("returned error: 403"), "{flattened}");
     }
@@ -1009,13 +1028,7 @@ mod tests {
     fn same_head_against_another_base_is_not_adopted() {
         let wrong_base = pr(1, "abc123", "task/7", "release/1.x", "acme/app");
         assert_eq!(
-            adopt_pull_request(
-                vec![wrong_base],
-                "abc123",
-                "task/7",
-                "main",
-                "acme/app"
-            ),
+            adopt_pull_request(vec![wrong_base], "abc123", "task/7", "main", "acme/app"),
             PrAdoption::NoMatch
         );
     }
@@ -1039,13 +1052,33 @@ mod tests {
     fn near_misses_are_never_adopted_and_a_blocked_pair_is_named() {
         let expected = ("abc123", "task/7", "main", "acme/app");
         let cases = vec![
-            ("another branch", pr(4, "abc123", "task/8", "main", "acme/app"), false),
-            ("a fork's branch", pr(5, "abc123", "task/7", "main", "someone/app"), false),
-            ("head repo missing", pr(6, "abc123", "task/7", "main", ""), false),
-            ("another base", pr(7, "abc123", "task/7", "release/1.x", "acme/app"), false),
+            (
+                "another branch",
+                pr(4, "abc123", "task/8", "main", "acme/app"),
+                false,
+            ),
+            (
+                "a fork's branch",
+                pr(5, "abc123", "task/7", "main", "someone/app"),
+                false,
+            ),
+            (
+                "head repo missing",
+                pr(6, "abc123", "task/7", "main", ""),
+                false,
+            ),
+            (
+                "another base",
+                pr(7, "abc123", "task/7", "release/1.x", "acme/app"),
+                false,
+            ),
             // Same branch, same base, different commit: the head/base pair is
             // taken, so creating would earn a 422 rather than a pull request.
-            ("head OID moved", pr(3, "def456", "task/7", "main", "acme/app"), true),
+            (
+                "head OID moved",
+                pr(3, "def456", "task/7", "main", "acme/app"),
+                true,
+            ),
         ];
         for (label, candidate, blocked) in cases {
             let verdict = adopt_pull_request(
@@ -1103,7 +1136,10 @@ mod tests {
     #[test]
     fn branch_names_that_could_forge_a_refspec_are_rejected() {
         for bad in ["--force", "a:b", "with space", "-x", ""] {
-            assert!(ensure_pushable_branch(bad).is_err(), "{bad} must be rejected");
+            assert!(
+                ensure_pushable_branch(bad).is_err(),
+                "{bad} must be rejected"
+            );
         }
         assert!(ensure_pushable_branch("task/12").is_ok());
     }
@@ -1170,7 +1206,9 @@ mod tests {
                 post(|| async {
                     (
                         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                        Json(serde_json::json!({ "message": "No commits between main and task/7" })),
+                        Json(
+                            serde_json::json!({ "message": "No commits between main and task/7" }),
+                        ),
                     )
                 }),
             )
@@ -1211,7 +1249,10 @@ mod tests {
         let merged = find_pulls(&auth, "acme/app", "merged").await.unwrap();
         assert!(merged[0].merged, "merged_at must set the merged flag");
 
-        assert!(find_pulls(&auth, "acme/app", "nothing").await.unwrap().is_empty());
+        assert!(find_pulls(&auth, "acme/app", "nothing")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1335,9 +1376,11 @@ mod tests {
 
         // A GitLab user is told about a MERGE request — being told they have a
         // pull request reads like the wrong tool answered.
-        let err = pull_is_workable(ForgeProvider::GitLab, &merged, "acme/app")
-            .expect_err("merged");
-        assert!(err.contains("merge request #7") && !err.contains("pull"), "{err}");
+        let err = pull_is_workable(ForgeProvider::GitLab, &merged, "acme/app").expect_err("merged");
+        assert!(
+            err.contains("merge request #7") && !err.contains("pull"),
+            "{err}"
+        );
     }
 
     /// A pull request by number is what turns "PR #7" into something
@@ -1347,7 +1390,10 @@ mod tests {
         let (api_base, _, _, _) = mock_api().await;
         let auth = auth_for(api_base);
         let pr = get_pull(&auth, "Acme/App", 7).await.expect("pull");
-        assert_eq!((pr.number, pr.head_ref.as_str(), pr.base_ref.as_str()), (7, "task/7", "main"));
+        assert_eq!(
+            (pr.number, pr.head_ref.as_str(), pr.base_ref.as_str()),
+            (7, "task/7", "main")
+        );
         assert_eq!(pr.head_repo, "Acme/App");
         assert!(!pr.merged && pr.state == "open");
 
@@ -1370,8 +1416,12 @@ mod tests {
         assert_eq!(sent["body"], "done");
 
         // A path that cannot be a repository never reaches the network.
-        assert!(create_issue_comment(&auth, "not-a-repo", 7, "x").await.is_err());
-        assert!(create_issue_comment(&auth, "acme/app", 0, "x").await.is_err());
+        assert!(create_issue_comment(&auth, "not-a-repo", 7, "x")
+            .await
+            .is_err());
+        assert!(create_issue_comment(&auth, "acme/app", 0, "x")
+            .await
+            .is_err());
     }
 
     /// The comment says what happened, in numbers and links. Nothing an agent
@@ -1389,13 +1439,16 @@ mod tests {
             },
             Some((3, 42, 7)),
         );
-        // A code-spanned id, never `#12`: the number is codeg's, and both
+        // A code-spanned id, never `#12`: the number is harness_studio's, and both
         // forges would turn the bare form into a link to their own issue 12.
         assert!(merged.contains("work task `12`"), "{merged}");
         assert!(!merged.contains("#12"), "autolinkable task id: {merged}");
         assert!(merged.contains("`abc1234`"), "short sha: {merged}");
         assert!(!merged.contains("def5678"), "full sha leaked: {merged}");
-        assert!(merged.contains("`main`") && merged.contains("(3 files, +42/-7)"), "{merged}");
+        assert!(
+            merged.contains("`main`") && merged.contains("(3 files, +42/-7)"),
+            "{merged}"
+        );
         // A local merge must not read as "this shipped" to the thread.
         assert!(merged.contains("merged locally into"), "{merged}");
 
@@ -1408,8 +1461,14 @@ mod tests {
             },
             Some((1, 1, 0)),
         );
-        assert!(delivered.contains("https://github.com/acme/app/pull/42"), "{delivered}");
-        assert!(delivered.contains("(1 file, +1/-0)"), "singular: {delivered}");
+        assert!(
+            delivered.contains("https://github.com/acme/app/pull/42"),
+            "{delivered}"
+        );
+        assert!(
+            delivered.contains("(1 file, +1/-0)"),
+            "singular: {delivered}"
+        );
 
         // No recorded diff → the sentence still stands on its own.
         let bare =
@@ -1422,25 +1481,35 @@ mod tests {
             12,
             gh,
             issue,
-            &TaskOutcome::Accepted { nothing_to_land: true },
+            &TaskOutcome::Accepted {
+                nothing_to_land: true,
+            },
             None,
         );
-        assert!(empty.contains("work task `12`") && empty.contains("it made no changes"), "{empty}");
+        assert!(
+            empty.contains("work task `12`") && empty.contains("it made no changes"),
+            "{empty}"
+        );
         // …and an acceptance whose worktree was gone must NOT claim the task
         // made no changes while printing the counters that say otherwise.
         let gone = writeback_comment_body(
             12,
             gh,
             issue,
-            &TaskOutcome::Accepted { nothing_to_land: false },
+            &TaskOutcome::Accepted {
+                nothing_to_land: false,
+            },
             Some((3, 42, 7)),
         );
-        assert!(gone.contains("its work was not merged (3 files, +42/-7)"), "{gone}");
+        assert!(
+            gone.contains("its work was not merged (3 files, +42/-7)"),
+            "{gone}"
+        );
         assert!(!gone.contains("no changes"), "{gone}");
     }
 
     /// A task finished with nothing landed must not read as a verdict on the
-    /// item its thread is about. "Accepted" is codeg's word for signing off on
+    /// item its thread is about. "Accepted" is harness_studio's word for signing off on
     /// the TASK, and a thread reads it as its own: a pull request approved, an
     /// issue accepted. On a pull request whose review stopped at an unsound
     /// approach — or whose review-only task only ever delivered a report —
@@ -1451,7 +1520,11 @@ mod tests {
     /// beside counters that say otherwise.
     #[test]
     fn a_finish_that_landed_nothing_is_never_a_verdict_on_the_item() {
-        for provider in [ForgeProvider::GitHub, ForgeProvider::GitLab, ForgeProvider::Gitea] {
+        for provider in [
+            ForgeProvider::GitHub,
+            ForgeProvider::GitLab,
+            ForgeProvider::Gitea,
+        ] {
             let noun = provider.change_noun();
             for item in [ForgeItemKind::Issue, ForgeItemKind::Change] {
                 for nothing_to_land in [true, false] {
@@ -1463,7 +1536,10 @@ mod tests {
                         Some((3, 42, 7)),
                     );
                     let at = format!("{provider:?} {item:?} nothing_to_land={nothing_to_land}");
-                    assert!(body.starts_with("codeg work task `12` is done — "), "{at}: {body}");
+                    assert!(
+                        body.starts_with("harness_studio work task `12` is done — "),
+                        "{at}: {body}"
+                    );
                     let lower = body.to_lowercase();
                     for verdict in ["accept", "approv", "reject", "closed", "lgtm"] {
                         assert!(!lower.contains(verdict), "{at} reads as a verdict: {body}");

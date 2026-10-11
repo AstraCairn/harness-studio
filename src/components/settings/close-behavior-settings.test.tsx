@@ -62,7 +62,9 @@ describe("CloseBehaviorSettingsSection", () => {
     renderSection()
 
     await user.click(await screen.findByRole("combobox"))
-    await user.click(await screen.findByRole("option", { name: "Exit codeg" }))
+    await user.click(
+      await screen.findByRole("option", { name: "Exit harness studio" })
+    )
 
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith("exit"))
   })
@@ -73,7 +75,9 @@ describe("CloseBehaviorSettingsSection", () => {
     renderSection()
 
     await user.click(await screen.findByRole("combobox"))
-    await user.click(await screen.findByRole("option", { name: "Exit codeg" }))
+    await user.click(
+      await screen.findByRole("option", { name: "Exit harness studio" })
+    )
 
     await waitFor(() => expect(toastError).toHaveBeenCalled())
     // A picker left showing "exit" would claim a preference the next launch
@@ -87,7 +91,7 @@ describe("CloseBehaviorSettingsSection", () => {
 
     expect(
       await screen.findByText(
-        "This system has no usable tray, so the close button always exits codeg."
+        "This system has no usable tray, so the close button always exits harness studio."
       )
     ).toBeInTheDocument()
     expect(screen.getByRole("combobox")).toBeDisabled()

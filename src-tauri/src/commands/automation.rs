@@ -9,10 +9,8 @@ use chrono::{DateTime, Utc};
 use crate::db::error::DbError;
 use crate::db::service::automation_service;
 use crate::db::AppDatabase;
+use crate::events::{emit_event, AutomationChange, EventEmitter, AUTOMATION_CHANGED_EVENT};
 use crate::models::{AutomationDraft, AutomationInfo, AutomationRunInfo};
-use crate::web::event_bridge::{
-    emit_event, AutomationChange, EventEmitter, AUTOMATION_CHANGED_EVENT,
-};
 
 // ── shared business logic (both modes) ──────────────────────────────────────
 
@@ -176,9 +174,7 @@ pub async fn automation_delete(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn automation_mark_seen(
-    db: tauri::State<'_, AppDatabase>,
-) -> Result<(), DbError> {
+pub async fn automation_mark_seen(db: tauri::State<'_, AppDatabase>) -> Result<(), DbError> {
     automation_mark_seen_core(&db).await
 }
 

@@ -1,4 +1,4 @@
-//! Main-process side of the `codeg-mcp` round-trip: accept UDS / named-pipe
+//! Main-process side of the `harness-studio-mcp` round-trip: accept UDS / named-pipe
 //! connections from companion processes, validate the per-launch token,
 //! resolve the parent's current conversation, and hand off to the broker.
 //!
@@ -15,28 +15,28 @@ use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
-use crate::acp::delegation::broker::{DelegationBroker, StatusWait};
 use crate::acp::browser_tools::{
     BrowserActOutcome, BrowserCaptureOutcome, BrowserConsoleOutcome, BrowserEvalOutcome,
     BrowserSnapshotOutcome, BrowserTabOutcome, BrowserTabsOutcome, BrowserToolAccess,
     ERROR_NO_SUCH_TAB,
 };
+use crate::acp::chat_authoring::{AuthoringContext, AuthoringOutcome, ChatAuthoringAccess};
 use crate::acp::computer_tools::{
     ComputerActOutcome, ComputerAppsOutcome, ComputerCaptureOutcome, ComputerSnapshotOutcome,
     ComputerToolAccess, ComputerVerifyOutcome, ComputerWindowsOutcome, ERROR_NO_SUCH_TARGET,
 };
+use crate::acp::delegation::broker::{DelegationBroker, StatusWait};
 use crate::acp::delegation::transport::{
     read_frame, write_frame, BrokerAskRequest, BrokerBrowserActRequest,
     BrokerBrowserCaptureRequest, BrokerBrowserConsoleRequest, BrokerBrowserEvalRequest,
     BrokerBrowserSnapshotRequest, BrokerBrowserTabOpRequest, BrokerBrowserTabsRequest,
-    BrokerCancelRequest, BrokerCancelTaskRequest, BrokerComputerActRequest,
-    BrokerComputerAppsRequest, BrokerComputerCaptureRequest, BrokerComputerLaunchRequest,
-    BrokerComputerSnapshotRequest,
-    BrokerComputerVerifyRequest, BrokerComputerWindowsRequest, BrokerCommitFeedbackRequest,
-    BrokerFeedbackRequest, BrokerMessage, BrokerRequest,
-    BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest, BrokerResponse,
-    BrokerResumeTaskRequest, BrokerSessionRequest, BrokerStatusRequest,
-    BrokerTaskCompleteRequest, BrokerTaskProgressRequest,
+    BrokerCancelRequest, BrokerCancelTaskRequest, BrokerCommitFeedbackRequest,
+    BrokerComputerActRequest, BrokerComputerAppsRequest, BrokerComputerCaptureRequest,
+    BrokerComputerLaunchRequest, BrokerComputerSnapshotRequest, BrokerComputerVerifyRequest,
+    BrokerComputerWindowsRequest, BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest,
+    BrokerFeedbackRequest, BrokerMessage, BrokerRequest, BrokerResponse, BrokerResumeTaskRequest,
+    BrokerSessionRequest, BrokerStatusRequest, BrokerTaskCompleteRequest,
+    BrokerTaskProgressRequest,
 };
 use crate::acp::delegation::types::{
     DelegationRequest, DelegationTaskReport, ResumeDelegationRequest, TaskStatus,
@@ -45,7 +45,6 @@ use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 #[cfg(unix)]
 use crate::acp::scratch_dir::SUN_PATH_CAP;
-use crate::acp::chat_authoring::{AuthoringContext, AuthoringOutcome, ChatAuthoringAccess};
 use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
 use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use crate::models::AgentType;
@@ -56,7 +55,6 @@ use serde_json::Value;
 /// keeps running past this; the LLM simply re-issues the wait. An explicit
 /// `wait_ms = 0` opts out of the ceiling and blocks until the task is terminal.
 const STATUS_WAIT_MAX_MS: u64 = 60_000;
-
 
 /// The bound-but-not-yet-served socket handed from [`DelegationListener::bind`]
 /// to [`DelegationListener::accept_loop`]. A UDS listener on unix; on Windows,
@@ -113,7 +111,7 @@ impl TokenRegistry {
 
     /// How many companions are currently reachable, and across how many
     /// distinct parent ACP connections. One token is minted per companion
-    /// launch, so `companions` counts injected `codeg-mcp` processes; the two
+    /// launch, so `companions` counts injected `harness-studio-mcp` processes; the two
     /// numbers differ when a connection was re-injected without its old token
     /// having been revoked yet. Read-only — used by the service-status
     /// indicator, never by the wire path.
@@ -150,7 +148,7 @@ pub struct DelegationListener {
     pub questions: Arc<dyn SessionQuestionAccess>,
     /// Resolves a referenced session for the `get_session_info` tool. Unlike the
     /// other arms this is NOT parent-scoped — it looks any non-deleted session up
-    /// by its codeg conversation id (still token-gated against an invalid caller).
+    /// by its harness_studio conversation id (still token-gated against an invalid caller).
     pub session_info: Arc<dyn SessionInfoAccess>,
     /// Records work-task reports (`task_progress` / `task_complete`) against the
     /// task the parent connection is executing. Same token → parent-connection
@@ -253,7 +251,7 @@ impl DelegationListener {
     /// disturbing an incumbent socket that is still serving this path.
     ///
     /// The staged path is measured too rather than assumed shorter. It usually
-    /// is — `.stg-<pid>-<8 hex>` is 8 bytes under `codeg-delegation-<pid>.sock`
+    /// is — `.stg-<pid>-<8 hex>` is 8 bytes under `harness-studio-delegation-<pid>.sock`
     /// — but that holds only for names at least as long as the staged one, and
     /// a caller passing a SHORT name in a deep directory would otherwise clear
     /// this check and then fail the real `bind` on the staged path instead.
@@ -325,7 +323,7 @@ impl DelegationListener {
     /// Sibling path for [`Self::bind`]'s staged socket.
     ///
     /// PID-scoped like the socket itself, then salted. The PID is what makes it
-    /// safe: the staging directory is `$TMPDIR`, shared with every other codeg
+    /// safe: the staging directory is `$TMPDIR`, shared with every other harness_studio
     /// process, and two binds that picked the same staged name could interleave
     /// into real corruption — one process's `remove_file` clearing the other's
     /// staged entry, then its own bind recreating it under that name, so the
@@ -335,7 +333,7 @@ impl DelegationListener {
     /// already serialized by `DelegationService`'s state lock.
     ///
     /// The whole name is deliberately SHORTER than a real socket name
-    /// (`codeg-delegation-<pid>.sock`): `sun_path` caps a unix socket address
+    /// (`harness-studio-delegation-<pid>.sock`): `sun_path` caps a unix socket address
     /// at 104 bytes on macOS, and a staged path longer than the real one could
     /// fail to bind where the real path would have succeeded — turning a safety
     /// measure into a startup failure. Replacing the file name rather than
@@ -343,11 +341,7 @@ impl DelegationListener {
     #[cfg(unix)]
     fn staging_socket_path(socket_path: &Path) -> PathBuf {
         let salt = uuid::Uuid::new_v4().simple().to_string();
-        socket_path.with_file_name(format!(
-            ".stg-{}-{}",
-            std::process::id(),
-            &salt[..8]
-        ))
+        socket_path.with_file_name(format!(".stg-{}-{}", std::process::id(), &salt[..8]))
     }
 
     #[cfg(windows)]
@@ -474,10 +468,7 @@ impl DelegationListener {
                         write_frame(conn, &feedback_response(&[])?).await?;
                     }
                     Some(parent_conn_id) => {
-                        let pending = self
-                            .feedback
-                            .read_pending_feedback(&parent_conn_id)
-                            .await;
+                        let pending = self.feedback.read_pending_feedback(&parent_conn_id).await;
                         // Read-only: the response carries the note ids
                         // (`_commit_ids`); delivery is committed LATER, by the
                         // companion's `CommitFeedback` once it actually returns
@@ -605,7 +596,7 @@ impl DelegationListener {
             BrokerMessage::BrowserCapture(req) => {
                 // Bounded by the capture's own engine timeout, as the read
                 // is; the line it leaves on the strip is written on the
-                // codeg side whether or not the caller waits.
+                // harness_studio side whether or not the caller waits.
                 browser_capture_response(self.process_browser_capture(req).await)?
             }
             BrokerMessage::BrowserEval(req) => {
@@ -618,7 +609,7 @@ impl DelegationListener {
                 browser_eval_response(self.process_browser_eval(req).await)?
             }
             BrokerMessage::BrowserTabOp(req) => {
-                // Bounded by the settle timeout on the codeg side. No
+                // Bounded by the settle timeout on the harness_studio side. No
                 // peer-close race for the same reason the snapshot arm has
                 // none: dropping the future mid-flight would leave a tab open
                 // (or a page navigated) with nothing on the strip to say so.
@@ -635,7 +626,7 @@ impl DelegationListener {
             }
             BrokerMessage::ComputerCapture(req) => {
                 // Like the browser capture: the read runs to its own end, so
-                // the activity line it writes on the codeg side is never
+                // the activity line it writes on the harness_studio side is never
                 // skipped because the caller walked away.
                 computer_capture_response(self.process_computer_capture(req).await)?
             }
@@ -866,12 +857,12 @@ impl DelegationListener {
     /// token yields a `found:false` outcome (the LLM can't usefully distinguish it
     /// from a deleted session, and we don't leak which).
     ///
-    /// SCOPE (deliberate, user-confirmed): the lookup is by codeg conversation id
+    /// SCOPE (deliberate, user-confirmed): the lookup is by harness_studio conversation id
     /// and is intentionally NOT scoped to the caller's parent connection or to the
     /// session ids actually referenced in the prompt — any non-deleted session
-    /// resolves. This is sound in codeg's single-tenant trust model: there is no
+    /// resolves. This is sound in harness_studio's single-tenant trust model: there is no
     /// per-user isolation anywhere (desktop is one local user; server mode shares
-    /// one `CODEG_TOKEN` + one data dir across an operator's devices), the user can
+    /// one `HARNESS_STUDIO_TOKEN` + one data dir across an operator's devices), the user can
     /// already open every session in the UI, and the agent already has full
     /// filesystem access to every agent's raw session files via its own tools — so
     /// reading session metadata by id is strictly less capability than the agent
@@ -1046,7 +1037,9 @@ impl DelegationListener {
                 crate::acp::computer_tools::no_such_target_note(&req.target_id),
             );
         }
-        self.computer.capture(&req.target_id, req.max_dimension).await
+        self.computer
+            .capture(&req.target_id, req.max_dimension)
+            .await
     }
 
     async fn process_computer_snapshot(
@@ -1328,9 +1321,7 @@ fn browser_tabs_response(outcome: BrowserTabsOutcome) -> std::io::Result<BrokerR
 /// Serialize a [`BrowserSnapshotOutcome`] into a [`BrokerResponse`] for the
 /// `BrowserSnapshot` arm — the companion renders it into the `browser_snapshot`
 /// tool result.
-fn browser_snapshot_response(
-    outcome: BrowserSnapshotOutcome,
-) -> std::io::Result<BrokerResponse> {
+fn browser_snapshot_response(outcome: BrowserSnapshotOutcome) -> std::io::Result<BrokerResponse> {
     Ok(BrokerResponse {
         outcome: serde_json::to_value(&outcome).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
@@ -1415,7 +1406,7 @@ const CAPTURE_RESPONSE_MAX_BYTES: usize = super::transport::MAX_FRAME_BYTES - 64
 
 /// Serialize any computer-use outcome for its arm. Nothing but the capture
 /// can come near the frame cap: a snapshot's tree is cut to `maxChars` on the
-/// codeg side, and the listings and verdicts are small.
+/// harness_studio side, and the listings and verdicts are small.
 fn computer_response(outcome: &impl serde::Serialize) -> std::io::Result<BrokerResponse> {
     Ok(BrokerResponse {
         outcome: serde_json::to_value(outcome).map_err(|e| {
@@ -1553,7 +1544,7 @@ fn parse_agent_type(raw: &str) -> Option<AgentType> {
 /// STRICTLY less than the cap: the array has to hold the terminating NUL too,
 /// so its last byte is never available to the path. Same rule, and the same
 /// constant, as [`crate::acp::scratch_dir`] applies to the temp directory it
-/// hands a child — this is codeg's own end of the identical budget.
+/// hands a child — this is harness_studio's own end of the identical budget.
 #[cfg(unix)]
 fn fits_sun_path(path: &Path) -> bool {
     path.as_os_str().len() < SUN_PATH_CAP
@@ -1565,7 +1556,7 @@ fn fits_sun_path(path: &Path) -> bool {
 /// `/tmp` because it is the shortest directory POSIX guarantees exists, and
 /// euid-scoped for the reason [`crate::acp::scratch_dir`] gives for its own
 /// twin: `/tmp` is shared with every other account on the machine, so an
-/// unscoped name would be owned by whichever user ran codeg first and
+/// unscoped name would be owned by whichever user ran harness_studio first and
 /// uncreatable by all the rest. [`DelegationListener::bind`] creates it `0700`,
 /// keeping the socket as private as it was in the per-user `$TMPDIR` this
 /// stands in for.
@@ -1577,42 +1568,42 @@ fn fits_sun_path(path: &Path) -> bool {
 /// The cost of staying out of it: nothing reclaims this directory either, so a
 /// process that dies without unlinking leaves one dead `.sock` inode behind
 /// until the OS temp reaper gets to it. That is not a regression — the primary
-/// `$TMPDIR/codeg-delegation-<pid>.sock` has always had exactly the same
+/// `$TMPDIR/harness-studio-delegation-<pid>.sock` has always had exactly the same
 /// property, and a stale entry is inert (pid-scoped, never consulted, replaced
 /// by `rename` if the pid is ever recycled). Worth knowing before anyone adds a
 /// sweep: it would need to cover BOTH locations or it would just move the leak.
 #[cfg(unix)]
 fn short_socket_dir() -> PathBuf {
     PathBuf::from(format!(
-        "/tmp/codeg-{}",
+        "/tmp/harness-studio-{}",
         // Always succeeds; `geteuid` has no failure mode.
         unsafe { libc::geteuid() }
     ))
 }
 
 /// Default socket path for the running process, scoped to PID so multiple
-/// codeg instances on the same machine don't collide.
+/// harness_studio instances on the same machine don't collide.
 ///
 /// Unix: a `.sock` file inside `temp_dir`, or — when that would not fit in
 /// `sun_path` — inside [`short_socket_dir`]. The fallback is not hypothetical
-/// housekeeping: codeg exports a ~72-byte per-session `TMPDIR` to the agents it
-/// launches, so a codeg started from inside one is already within a few bytes
+/// housekeeping: harness_studio exports a ~72-byte per-session `TMPDIR` to the agents it
+/// launches, so a harness_studio started from inside one is already within a few bytes
 /// of the macOS cap, and a container or a hand-set `TMPDIR` clears it outright.
 /// Without the fallback that produced a socket nobody could dial and no error
 /// anywhere — see [`DelegationListener::bind`].
 ///
-/// Windows: a named pipe address `\\.\pipe\codeg-delegation-<pid>`. Windows
+/// Windows: a named pipe address `\\.\pipe\harness-studio-delegation-<pid>`. Windows
 /// named pipes live in their own kernel namespace and ignore `temp_dir`; the
 /// argument is kept for signature parity across platforms.
 #[cfg(unix)]
 pub fn default_socket_path(temp_dir: &Path) -> PathBuf {
-    let name = format!("codeg-delegation-{}.sock", std::process::id());
+    let name = format!("harness-studio-delegation-{}.sock", std::process::id());
     let preferred = temp_dir.join(&name);
     if fits_sun_path(&preferred) {
         return preferred;
     }
     // No third candidate, because there is no third case to handle: this is
-    // `/tmp/codeg-` + at most 10 digits of euid + `/codeg-delegation-` + at
+    // `/tmp/harness-studio-` + at most 10 digits of euid + `/harness-studio-delegation-` + at
     // most 10 digits of pid + `.sock` — 54 bytes at its absolute widest, or
     // half the smallest `sun_path` any of these platforms has.
     let short = short_socket_dir().join(&name);
@@ -1629,18 +1620,21 @@ pub fn default_socket_path(temp_dir: &Path) -> PathBuf {
 
 #[cfg(windows)]
 pub fn default_socket_path(_temp_dir: &Path) -> PathBuf {
-    PathBuf::from(format!(r"\\.\pipe\codeg-delegation-{}", std::process::id()))
+    PathBuf::from(format!(
+        r"\\.\pipe\harness-studio-delegation-{}",
+        std::process::id()
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::browser_tools::{NoBrowserTabs, ERROR_GRANT_REQUIRED};
+    use crate::acp::computer_tools::NoComputerDesktop;
     use crate::acp::delegation::broker::{ConversationDepthLookup, DelegationConfig};
     use crate::acp::delegation::spawner::{
         mock::MockSpawner, ConnectionSpawner, ResumedSpawn, SpawnerError,
     };
-    use crate::acp::browser_tools::{NoBrowserTabs, ERROR_GRANT_REQUIRED};
-    use crate::acp::computer_tools::NoComputerDesktop;
     use crate::acp::delegation::types::{DelegationError, DelegationOutcome, DelegationSuccess};
     use serde_json::json;
     use std::time::Duration;
@@ -1675,10 +1669,7 @@ mod tests {
     }
     #[async_trait]
     impl SessionFeedbackAccess for StubFeedback {
-        async fn read_pending_feedback(
-            &self,
-            parent_connection_id: &str,
-        ) -> Vec<PendingFeedback> {
+        async fn read_pending_feedback(&self, parent_connection_id: &str) -> Vec<PendingFeedback> {
             *self.read_conn.lock().await = Some(parent_connection_id.to_string());
             self.items.lock().await.clone()
         }
@@ -1698,9 +1689,7 @@ mod tests {
     #[derive(Default)]
     struct StubQuestion {
         pending: tokio::sync::Mutex<HashMap<String, oneshot::Sender<QuestionOutcome>>>,
-        registered: tokio::sync::Mutex<
-            Vec<(String, Vec<crate::acp::question::QuestionSpec>)>,
-        >,
+        registered: tokio::sync::Mutex<Vec<(String, Vec<crate::acp::question::QuestionSpec>)>>,
         canceled: tokio::sync::Mutex<Vec<String>>,
     }
     #[async_trait]
@@ -1785,11 +1774,7 @@ mod tests {
                 note: None,
             }
         }
-        async fn snapshot(
-            &self,
-            tab_id: &str,
-            max_chars: Option<usize>,
-        ) -> BrowserSnapshotOutcome {
+        async fn snapshot(&self, tab_id: &str, max_chars: Option<usize>) -> BrowserSnapshotOutcome {
             self.calls
                 .lock()
                 .await
@@ -1843,10 +1828,7 @@ mod tests {
             ));
             BrowserActOutcome::control_required(tab_id)
         }
-        async fn tab_op(
-            &self,
-            op: crate::acp::browser_tools::BrowserTabOp,
-        ) -> BrowserTabOutcome {
+        async fn tab_op(&self, op: crate::acp::browser_tools::BrowserTabOp) -> BrowserTabOutcome {
             self.calls
                 .lock()
                 .await
@@ -2664,7 +2646,8 @@ mod tests {
         }
 
         let mock = Arc::new(MockSpawner::new());
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
         let broker = Arc::new(
             DelegationBroker::new(
@@ -2913,7 +2896,10 @@ mod tests {
         let commit_ids = resp.outcome["_commit_ids"].as_array().unwrap();
         assert_eq!(commit_ids, &vec!["f1", "f2"]);
         // Read was scoped to the token's parent connection id.
-        assert_eq!(feedback.read_conn.lock().await.as_deref(), Some("parent-conn"));
+        assert_eq!(
+            feedback.read_conn.lock().await.as_deref(),
+            Some("parent-conn")
+        );
         // The Feedback arm is READ-ONLY — it does NOT commit (delivery is
         // committed later, by the companion's CommitFeedback).
         assert!(feedback.committed.lock().await.is_empty());
@@ -3357,7 +3343,10 @@ mod tests {
             .await
             .expect("serve_one must return after peer close");
         result.unwrap().unwrap();
-        assert_eq!(questions.canceled.lock().await.as_slice(), &["q-1".to_string()]);
+        assert_eq!(
+            questions.canceled.lock().await.as_slice(),
+            &["q-1".to_string()]
+        );
     }
 
     /// An invalid token never registers a question and returns a `declined`
@@ -3365,7 +3354,8 @@ mod tests {
     #[tokio::test]
     async fn ask_invalid_token_declined() {
         let questions = Arc::new(StubQuestion::default());
-        let listener = make_question_listener(Arc::new(TokenRegistry::default()), questions.clone());
+        let listener =
+            make_question_listener(Arc::new(TokenRegistry::default()), questions.clone());
         let (mut client, mut server) = duplex(8 * 1024);
         let server_task = tokio::spawn(async move {
             listener.serve_one(&mut server).await.unwrap();
@@ -3416,7 +3406,9 @@ mod tests {
 
         let listed = browser_round_trip(
             listener.clone(),
-            BrokerMessage::BrowserTabs(BrokerBrowserTabsRequest { token: "tok".into() }),
+            BrokerMessage::BrowserTabs(BrokerBrowserTabsRequest {
+                token: "tok".into(),
+            }),
         )
         .await;
         assert_eq!(listed.outcome["tabs"][0]["tabId"], "t1");
@@ -3571,7 +3563,10 @@ mod tests {
             },
         );
         let response = browser_capture_response(huge).unwrap();
-        assert_eq!(response.outcome["error"], crate::acp::browser_tools::ERROR_READ_FAILED);
+        assert_eq!(
+            response.outcome["error"],
+            crate::acp::browser_tools::ERROR_READ_FAILED
+        );
         assert_eq!(response.outcome["tabId"], "t1");
         assert!(response.outcome.get("capture").is_none());
         assert!(serde_json::to_vec(&response.outcome).unwrap().len() < 4096);
@@ -3593,7 +3588,10 @@ mod tests {
                 clipped: false,
             },
         );
-        assert_eq!(browser_capture_response(small).unwrap().outcome["capture"]["data"], "AAAA");
+        assert_eq!(
+            browser_capture_response(small).unwrap().outcome["capture"]["data"],
+            "AAAA"
+        );
     }
 
     /// A caller who cannot prove it is a companion is told the same thing a
@@ -3663,14 +3661,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_over_long_temp_dir_falls_back_to_the_short_socket_dir() {
-        let name = format!("codeg-delegation-{}.sock", std::process::id());
-        // A macOS `/var/folders/…/T` with codeg's own per-session nesting under
+        let name = format!("harness-studio-delegation-{}.sock", std::process::id());
+        // A macOS `/var/folders/…/T` with harness_studio's own per-session nesting under
         // it — the shape that actually produces this — padded so the composed
         // path lands exactly ONE byte past what `sun_path` can hold. Sized from
         // the cap rather than hard-coded, so it keeps straddling the boundary
         // if either side of it moves.
         let prefix = "/var/folders/hl/";
-        let suffix = "/T/codeg-acp/12345-deadbeef";
+        let suffix = "/T/harness-studio-acp/12345-deadbeef";
         let pad = SUN_PATH_CAP - 1 - name.len() - prefix.len() - suffix.len();
         let ambient = PathBuf::from(format!("{prefix}{}{suffix}", "z".repeat(pad)));
         assert_eq!(ambient.as_os_str().len() + 1 + name.len(), SUN_PATH_CAP);
@@ -3689,7 +3687,7 @@ mod tests {
 
     /// The STAGED path is measured too, not assumed shorter than the real one.
     ///
-    /// `.stg-<pid>-<8 hex>` is shorter than `codeg-delegation-<pid>.sock`, which
+    /// `.stg-<pid>-<8 hex>` is shorter than `harness-studio-delegation-<pid>.sock`, which
     /// is why production never noticed, but it is longer than a short name — so
     /// a short name in a deep directory fits `sun_path` while the path `bind`
     /// actually hands the kernel does not. Refusing both together is what makes
@@ -3714,7 +3712,9 @@ mod tests {
             fits_sun_path(&socket),
             "the real path must fit, or this tests the wrong check"
         );
-        assert!(!fits_sun_path(&DelegationListener::staging_socket_path(&socket)));
+        assert!(!fits_sun_path(&DelegationListener::staging_socket_path(
+            &socket
+        )));
 
         let err = DelegationListener::bind(&socket).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
@@ -3740,7 +3740,7 @@ mod tests {
     #[tokio::test]
     async fn the_chosen_socket_path_can_actually_be_bound_and_dialed() {
         let ambient = PathBuf::from(format!(
-            "/var/folders/hl/{}/T/codeg-acp/12345-deadbeef",
+            "/var/folders/hl/{}/T/harness-studio-acp/12345-deadbeef",
             "z".repeat(60)
         ));
         let path = default_socket_path(&ambient);

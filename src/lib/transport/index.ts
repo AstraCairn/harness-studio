@@ -16,21 +16,9 @@ function createTauriTransport(): Transport {
   return new TauriTransport()
 }
 
-function createWebTransport(baseUrl: string): Transport {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { WebTransport } = require("./web-transport") as {
-    WebTransport: new (baseUrl: string) => Transport
-  }
-  return new WebTransport(baseUrl)
-}
-
 export function getShellTransport(): Transport {
   if (!_shellTransport) {
-    const env = detectEnvironment()
-    _shellTransport =
-      env === "tauri"
-        ? createTauriTransport()
-        : createWebTransport(window.location.origin)
+    _shellTransport = createTauriTransport()
   }
   return _shellTransport
 }
@@ -66,7 +54,7 @@ export function isDesktop(): boolean {
 }
 
 /// True when the current window is a Tauri client bound to a remote
-/// codeg-server (a remote-desktop window). Distinct from `isDesktop()`,
+/// harness-studio-server (a remote-desktop window). Distinct from `isDesktop()`,
 /// which is purely a runtime check — a remote-desktop window IS a Tauri
 /// runtime but its API calls and file ops must target the remote host,
 /// not the local filesystem.
@@ -74,7 +62,7 @@ export function isRemoteDesktopMode(): boolean {
   return _remoteTransport !== null
 }
 
-/// Base URL of the codeg server backing the current transport, for building
+/// Base URL of the harness_studio server backing the current transport, for building
 /// raw resource URLs that bypass the JSON transport (iframes, downloads).
 /// Remote-desktop → the remote host; web → this page's origin. In pure-desktop
 /// mode there's no server (callers use loopback / `invoke`), so this returns

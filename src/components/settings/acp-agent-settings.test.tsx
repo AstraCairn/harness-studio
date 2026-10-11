@@ -612,7 +612,7 @@ describe("buildAcpAdapterCheck", () => {
       native_label: "Claude Code CLI",
       native_path: "/opt/homebrew/bin/claude",
       shared_config_dir: "~/.claude",
-      docs_url: "https://docs.codeg.app/guide/supported-agents#acp-adapters",
+      docs_url: "https://agentclientprotocol.com/get-started/agents",
       ...overrides,
     }
   }
@@ -663,7 +663,9 @@ describe("buildAcpAdapterCheck", () => {
     const check = buildAcpAdapterCheck(makeAdapter())
     expect(check?.fixes).toHaveLength(1)
     expect(check?.fixes[0].kind).toBe("open_url")
-    expect(check?.fixes[0].payload).toContain("#acp-adapters")
+    expect(check?.fixes[0].payload).toBe(
+      "https://agentclientprotocol.com/get-started/agents"
+    )
   })
 })
 
@@ -701,8 +703,7 @@ describe("getAgentChecks adapter ordering", () => {
             native_label: "Claude Code CLI",
             native_path: "/usr/local/bin/claude",
             shared_config_dir: "~/.claude",
-            docs_url:
-              "https://docs.codeg.app/guide/supported-agents#acp-adapters",
+            docs_url: "https://agentclientprotocol.com/get-started/agents",
           },
         },
       }
@@ -1139,7 +1140,7 @@ describe("unreviewed latest release in Version Status", () => {
   // CLI that printed a diagnostic instead of its version lands in the
   // compare-to-pin branches. Pinned so a change there is a deliberate one:
   // the numbers read out of it put it past the pin but below the release,
-  // which offers an install over a version codeg cannot read anyway.
+  // which offers an install over a version harness_studio cannot read anyway.
   it("treats a diagnostic-looking local version as below the release", () => {
     const check = buildVersionCheck(
       gemini({ installed_version: "error: 1.2 failed" }),
@@ -1575,13 +1576,13 @@ describe("materializeClaudeHardeningFlags — save-time toggle defaults", () => 
   })
 })
 
-describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", () => {
-  /** Read `model_providers.codeg.requires_openai_auth` back out of a result. */
+describe("patchCodexConfigTomlText — harness_studio's requires_openai_auth default", () => {
+  /** Read `model_providers.harness_studio.requires_openai_auth` back out of a result. */
   function authFlagOf(configTomlText: string): boolean | undefined {
     const parsed = parseTomlDocument(configTomlText) as {
       model_providers?: Record<string, { requires_openai_auth?: unknown }>
     }
-    const value = parsed.model_providers?.codeg?.requires_openai_auth
+    const value = parsed.model_providers?.harness_studio?.requires_openai_auth
     return typeof value === "boolean" ? value : undefined
   }
 
@@ -1593,15 +1594,15 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
   }> = [
     { label: "API base URL", patch: { apiBaseUrl: "https://new.example/v1" } },
     { label: "WebSocket toggle", patch: { supportsWebsockets: true } },
-    { label: "model provider", patch: { modelProvider: "codeg" } },
+    { label: "model provider", patch: { modelProvider: "harness_studio" } },
   ]
 
   const BOUND_PROVIDER = [
-    'model_provider = "codeg"',
+    'model_provider = "harness_studio"',
     "",
-    "[model_providers.codeg]",
+    "[model_providers.harness_studio]",
     'base_url = "https://old.example/v1"',
-    'name = "codeg"',
+    'name = "harness_studio"',
     'wire_api = "responses"',
   ].join("\n")
 
@@ -1631,7 +1632,7 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
         const toml = [
           BOUND_PROVIDER,
           "",
-          "[model_providers.codeg.http_headers]",
+          "[model_providers.harness_studio.http_headers]",
           'x-openai-actor-authorization = "local-image-extension"',
         ].join("\n")
         expect(
@@ -1646,9 +1647,9 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
   it("preserves user comments around the managed provider", () => {
     const toml = [
       "# my hand-written codex config",
-      'model_provider = "codeg"',
+      'model_provider = "harness_studio"',
       "",
-      "[model_providers.codeg]",
+      "[model_providers.harness_studio]",
       'base_url = "https://old.example/v1"',
       "# keep the actor-authorization arrangement intact",
       "requires_openai_auth = false",
@@ -1665,7 +1666,7 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
     const toml = [
       BOUND_PROVIDER,
       "",
-      "[model_providers.codeg.http_headers]",
+      "[model_providers.harness_studio.http_headers]",
       'X-OpenAI-Actor-Authorization = "local-image-extension"',
     ].join("\n")
     expect(authFlagOf(patchCodexConfigTomlText(toml, ENTRY))).toBeUndefined()
@@ -1673,9 +1674,9 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
 
   it("reads the header out of an inline table too", () => {
     const toml = [
-      'model_provider = "codeg"',
+      'model_provider = "harness_studio"',
       "",
-      "[model_providers.codeg]",
+      "[model_providers.harness_studio]",
       'base_url = "https://old.example/v1"',
       'http_headers = { "x-openai-actor-authorization" = "local-image-extension" }',
     ].join("\n")
@@ -1684,14 +1685,14 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
 
   // Asserted on the text, not the parse: the text writers predate this change
   // and cannot patch a provider spelled with root-level dotted keys — they
-  // append a `[model_providers.codeg]` section that redefines the same table.
+  // append a `[model_providers.harness_studio]` section that redefines the same table.
   // That limitation is pre-existing and out of scope here; what matters is
   // that the header is still recognized, so no auth default is added.
   it("reads the header out of a root-level dotted key too", () => {
     const toml = [
-      'model_provider = "codeg"',
-      'model_providers.codeg.base_url = "https://old.example/v1"',
-      'model_providers.codeg.http_headers."x-openai-actor-authorization" = "local-image-extension"',
+      'model_provider = "harness_studio"',
+      'model_providers.harness_studio.base_url = "https://old.example/v1"',
+      'model_providers.harness_studio.http_headers."x-openai-actor-authorization" = "local-image-extension"',
     ].join("\n")
     expect(patchCodexConfigTomlText(toml, ENTRY)).not.toContain(
       "requires_openai_auth"
@@ -1704,7 +1705,7 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
     const toml = [
       BOUND_PROVIDER,
       "",
-      "[model_providers.codeg.http_headers]",
+      "[model_providers.harness_studio.http_headers]",
       'x-openai-actor-authorization = "   "',
     ].join("\n")
     expect(authFlagOf(patchCodexConfigTomlText(toml, ENTRY))).toBe(true)
@@ -1715,7 +1716,7 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
       BOUND_PROVIDER,
       "requires_openai_auth = true",
       "",
-      "[model_providers.codeg.http_headers]",
+      "[model_providers.harness_studio.http_headers]",
       'x-openai-actor-authorization = "local-image-extension"',
     ].join("\n")
     expect(authFlagOf(patchCodexConfigTomlText(toml, ENTRY))).toBe(true)
@@ -1733,7 +1734,7 @@ describe("patchCodexConfigTomlText — codeg's requires_openai_auth default", ()
 
   // Regression (review round 1): `"http_headers.x-..." = "v"` is ONE literal
   // key, not an http_headers sub-table. Mistaking it for the nested path would
-  // suppress the default and break codeg's own auth.json-based auth.
+  // suppress the default and break harness_studio's own auth.json-based auth.
   it("does not mistake a quoted dotted key for the header table", () => {
     const toml = [
       BOUND_PROVIDER,
@@ -1846,13 +1847,13 @@ describe("codex [features].default_mode_request_user_input toggle", () => {
       expect(readsBackAs(on)).toBe(true)
     })
 
-    // `features.x` under `[model_providers.codeg]` is
-    // `model_providers.codeg.features.x` — a key codex ignores. Reading it
+    // `features.x` under `[model_providers.harness_studio]` is
+    // `model_providers.harness_studio.features.x` — a key codex ignores. Reading it
     // would show a value no save could ever clear.
     it("ignores the same text nested inside another section", () => {
       expect(
         readsBackAs(
-          `model_provider = "codeg"\n\n[model_providers.codeg]\nfeatures.${KEY} = true\n`
+          `model_provider = "harness_studio"\n\n[model_providers.harness_studio]\nfeatures.${KEY} = true\n`
         )
       ).toBe(false)
     })
@@ -1905,7 +1906,7 @@ describe("codex [features].default_mode_request_user_input toggle", () => {
     })
 
     it("does not reach past one into another table's keys", () => {
-      const src = `model = "gpt-5"\n\n[model_providers.codeg] # my gateway\nfeatures.${KEY} = true\n`
+      const src = `model = "gpt-5"\n\n[model_providers.harness_studio] # my gateway\nfeatures.${KEY} = true\n`
       // Nested, so the switch reads off — and switching it off must not go
       // delete the provider-local key it never owned.
       expect(readsBackAs(src)).toBe(false)
@@ -1957,9 +1958,9 @@ describe("codex [features].default_mode_request_user_input toggle", () => {
   // questions must not lose their WebSocket setting as a side effect.
   it("survives — and preserves — the websocket feature key", () => {
     const toml = [
-      'model_provider = "codeg"',
+      'model_provider = "harness_studio"',
       "",
-      "[model_providers.codeg]",
+      "[model_providers.harness_studio]",
       'base_url = "https://example.test/v1"',
       "supports_websockets = true",
     ].join("\n")
@@ -1988,7 +1989,7 @@ describe("codex WebSocket feature key survives unrelated toggles", () => {
   }
 
   // A config that declares WebSockets ONLY through the feature key: the reader
-  // falls back to it for the codeg provider, so the panel shows the switch on.
+  // falls back to it for the harness_studio provider, so the panel shows the switch on.
   const FEATURE_ONLY = [
     'model = "gpt-5"',
     "",
@@ -2013,14 +2014,14 @@ describe("codex WebSocket feature key survives unrelated toggles", () => {
   }
 
   // The fallback reads the feature key, so a nested `features.…` line — which
-  // is really `model_providers.codeg.features.…` and means nothing to codex —
+  // is really `model_providers.harness_studio.features.…` and means nothing to codex —
   // must not reach it. Otherwise any unrelated toggle would quietly promote a
   // provider-local key into a global WebSocket flag.
   it("is not conjured out of a nested dotted key", () => {
     const nested = [
-      'model_provider = "codeg"',
+      'model_provider = "harness_studio"',
       "",
-      "[model_providers.codeg]",
+      "[model_providers.harness_studio]",
       'base_url = "https://example.test/v1"',
       "features.responses_websockets_v2 = true",
     ].join("\n")
@@ -2038,9 +2039,9 @@ describe("codex WebSocket feature key survives unrelated toggles", () => {
   // WebSocket switch itself could never be turned off.
   it("still lets the WebSocket switch turn itself off", () => {
     const bound = [
-      'model_provider = "codeg"',
+      'model_provider = "harness_studio"',
       "",
-      "[model_providers.codeg]",
+      "[model_providers.harness_studio]",
       'base_url = "https://example.test/v1"',
       "supports_websockets = true",
       "",
@@ -2054,7 +2055,7 @@ describe("codex WebSocket feature key survives unrelated toggles", () => {
 })
 
 describe("host-tools toggle — hand the fs/terminal channels back to the agent", () => {
-  const KEY = "CODEG_ACP_HOST_TOOLS"
+  const KEY = "HARNESS_STUDIO_ACP_HOST_TOOLS"
 
   it("is off for an agent that has never touched the knob", () => {
     expect(hostToolsAgentModeEnabled("")).toBe(false)
@@ -2067,7 +2068,7 @@ describe("host-tools toggle — hand the fs/terminal channels back to the agent"
     expect(hostToolsAgentModeEnabled(on)).toBe(true)
 
     // Off writes an EXPLICIT `default` rather than deleting the key. Deleting
-    // would let a process-wide `CODEG_ACP_HOST_TOOLS=agent` keep winning, so
+    // would let a process-wide `HARNESS_STUDIO_ACP_HOST_TOOLS=agent` keep winning, so
     // the switch could not turn the mode off at all — it would read false
     // while the next connection still withheld the channels.
     const off = setHostToolsAgentMode(on, false)
@@ -2103,7 +2104,7 @@ describe("host-tools toggle — hand the fs/terminal channels back to the agent"
   })
 
   it("overrides an inherited value in both directions", () => {
-    // The backend resolves env_json first, then codeg's process env. Whatever
+    // The backend resolves env_json first, then harness_studio's process env. Whatever
     // the operator exported, one flip of the switch must decide the outcome —
     // so both states write an explicit value and neither leaves the key absent.
     const off = setHostToolsAgentMode("", false)
@@ -2334,8 +2335,8 @@ describe("codex ACP preset disclosures", () => {
     expect(codexSandboxSeedsAcpPreset(true)).toBe(false)
   })
 
-  it("only notes the 1.7–1.13 read-only gap when codeg really seeds read-only", () => {
-    // Unshadowed read-only: codeg injects the `read-only` preset, which on
+  it("only notes the 1.7–1.13 read-only gap when harness_studio really seeds read-only", () => {
+    // Unshadowed read-only: harness_studio injects the `read-only` preset, which on
     // codex-acp 1.7.0–1.13.x is workspace-write with `approvalsReviewer:
     // "user"` (2.0.0 made it read-only again). Both halves of the note hold.
     expect(showsCodexReadOnlyAcpWarning("read-only", false)).toBe(true)

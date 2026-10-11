@@ -16,8 +16,8 @@
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::app_error::AppCommandError;
+use crate::events::EventEmitter;
 use crate::update::state::{self as update_state, AppUpdateState, AppUpdateStateHandle};
-use crate::web::event_bridge::EventEmitter;
 
 /// Current update snapshot, for the renderer to re-sync on mount.
 #[tauri::command]
@@ -35,7 +35,7 @@ pub async fn perform_app_update(
 ) -> Result<AppUpdateState, AppCommandError> {
     if crate::update::version::UPDATE_MANIFEST_URL.is_empty() {
         return Err(AppCommandError::configuration_invalid(
-            "HarnessStudio update channel is not configured",
+            "harness studio update channel is not configured",
         ));
     }
     let handle = state.inner().clone();

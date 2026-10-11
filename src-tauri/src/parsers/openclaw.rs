@@ -615,7 +615,7 @@ impl OpenClawParser {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 "assistant" => {
@@ -639,7 +639,7 @@ impl OpenClawParser {
                         duration_ms: None,
                         model: msg_model,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 "toolResult" => {
@@ -653,7 +653,7 @@ impl OpenClawParser {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 _ => {}
@@ -1116,7 +1116,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else if matches!(msg.role, MessageRole::System) {
@@ -1129,7 +1129,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else {
@@ -1164,7 +1164,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms,
                 model: turn_model,
                 completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
         }
     }
@@ -1288,7 +1288,7 @@ mod tests {
     #[test]
     fn parses_openclaw_conversation_detail_with_tree() {
         let path = std::env::temp_dir().join(format!(
-            "codeg-openclaw-tree-{}.jsonl",
+            "harness-studio-openclaw-tree-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -1349,7 +1349,7 @@ mod tests {
         //   u1 → a1 → u2 → a2  (branch 1: "Hello" conversation)
         //              ↘ u3 → a3  (branch 2: "Bye" conversation, forked from a1)
         let path = std::env::temp_dir().join(format!(
-            "codeg-openclaw-branches-{}.jsonl",
+            "harness-studio-openclaw-branches-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");

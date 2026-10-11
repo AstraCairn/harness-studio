@@ -67,7 +67,7 @@ impl ContextReadings {
 
 /// Whether a codex-acp tool call's `rawInput` is a hosted web search. Through
 /// 1.13.x codex-acp passed the app-server item's own `type` through
-/// (`createWebSearchRawInput`); 2.0.0 sends codeg (an AIR client) only
+/// (`createWebSearchRawInput`); 2.0.0 sends harness_studio (an AIR client) only
 /// `{query, action}` — see `air_contract::is_codex_web_search_input`, which
 /// reads both.
 pub(crate) fn is_web_search_input(raw_input: Option<&Value>) -> bool {
@@ -124,7 +124,9 @@ mod tests {
         assert!(is_web_search_input(Some(&search)));
         // codex-acp's other `kind: "search"` calls carry no such type: a fuzzy
         // file search sends `{query}`, an `rg` it ran sends no `rawInput`.
-        assert!(!is_web_search_input(Some(&serde_json::json!({"query": "q"}))));
+        assert!(!is_web_search_input(Some(
+            &serde_json::json!({"query": "q"})
+        )));
         assert!(!is_web_search_input(None));
     }
 }

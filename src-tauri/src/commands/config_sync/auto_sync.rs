@@ -5,7 +5,7 @@
 //!
 //! The obvious design is to flag "config changed" at each write site and
 //! debounce. That works when writes funnel through a handful of save
-//! functions; codeg's configuration writes are spread across `model_provider`,
+//! functions; harness_studio's configuration writes are spread across `model_provider`,
 //! `custom_agents`, `quick_messages`, `work_task`, and a dozen settings
 //! commands, so instrumenting them is both a wide change and one that every
 //! new feature can silently forget to make — and a forgotten write site means
@@ -30,7 +30,7 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use super::webdav_sync::{load_settings, load_state, upload_snapshot_core};
-use crate::web::event_bridge::{emit_event, EventEmitter};
+use crate::events::{emit_event, EventEmitter};
 
 /// Emitted ONLY by this loop. A frontend receiving it knows the sync was
 /// automatic; manual sync results come back as command return values, so the
@@ -157,11 +157,7 @@ pub async fn run_auto_sync_loop(
     }
 }
 
-fn emit_status(
-    emitter: &EventEmitter,
-    last_sync_at: &Option<String>,
-    last_error: &Option<String>,
-) {
+fn emit_status(emitter: &EventEmitter, last_sync_at: &Option<String>, last_error: &Option<String>) {
     emit_event(
         emitter,
         CONFIG_SYNC_STATUS_EVENT,

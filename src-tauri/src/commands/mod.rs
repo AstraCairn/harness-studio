@@ -7,7 +7,7 @@ pub mod backup;
 #[cfg(feature = "tauri-runtime")]
 pub mod browser;
 /// The browser tool group's on/off switch. Unlike `browser` itself this is not
-/// desktop-only: the shared codeg-mcp plumbing reads it in both runtimes.
+/// desktop-only: the shared harness-studio-mcp plumbing reads it in both runtimes.
 pub mod browser_tools;
 pub mod canvas;
 pub mod chat_authoring;
@@ -17,10 +17,10 @@ pub mod chat_channel;
 /// run without the tauri stack.
 pub mod clipboard;
 /// Computer use: sharing windows, the helper, the agent reads — the desktop
-/// app's, and codeg-server's where it is let share the screen it runs on.
+/// app's, and harness-studio-server's where it is let share the screen it runs on.
 pub mod computer;
 /// The computer-use switches. Like `browser_tools`, compiled in both runtimes:
-/// the shared codeg-mcp plumbing reads them.
+/// the shared harness-studio-mcp plumbing reads them.
 pub mod computer_tools;
 pub mod config_sync;
 pub mod conversation_tags;
@@ -42,11 +42,13 @@ pub mod forge;
 pub mod logging;
 pub mod mcp;
 pub mod mcp_service;
+#[cfg(feature = "tauri-runtime")]
+pub mod model_discovery;
 pub mod model_provider;
-pub mod office_tools;
-pub mod open_in;
 #[cfg(feature = "tauri-runtime")]
 pub mod notification;
+pub mod office_tools;
+pub mod open_in;
 pub mod pet;
 pub mod project_boot;
 pub mod question;

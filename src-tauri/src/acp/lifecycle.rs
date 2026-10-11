@@ -4,7 +4,7 @@
 //! fires). Decoupled from `emit_with_state` so the emit hot path stays
 //! lock-tight.
 //!
-//! Phase 5: migrated from `WebEventBroadcaster` (JSON-shape) to
+//! Phase 5: migrated from `EventBroadcaster` (JSON-shape) to
 //! `InternalEventBus` (typed `Arc<EventEnvelope>`). Eliminates the
 //! per-event `serde_json::from_value` reparse and lets us drop the
 //! `acp://event` channel from the global firehose entirely.
@@ -27,9 +27,9 @@ use crate::acp::types::{AcpEvent, ConnectionStatus, EventEnvelope};
 use crate::db::entities::conversation::ConversationStatus;
 use crate::db::error::DbError;
 use crate::db::service::conversation_service;
+use crate::events::{emit_with_state, EventEmitter};
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::models::AgentType;
-use crate::web::event_bridge::{emit_with_state, EventEmitter};
 use tokio::sync::RwLock;
 
 /// Per-connection worker queue depth. Sized for the **filtered** event set
@@ -218,7 +218,7 @@ pub(crate) async fn handle_event(
                 // conversation under a new session (`continues`), and
                 // destructive otherwise — a session re-minted under a live
                 // binding would otherwise overwrite the id the row's whole
-                // history hangs off. See codeg#500.
+                // history hangs off. See harness_studio#500.
                 let continues = crate::acp::continued_session_ids(agent_type, session_id);
                 let preserved =
                     conversation_service::bind_external_id(db_conn, cid, session_id, &continues)
@@ -376,13 +376,9 @@ pub(crate) async fn handle_event(
                     return Ok(());
                 };
                 let continues: Vec<String> = current.external_id.into_iter().collect();
-                let preserved = conversation_service::bind_external_id(
-                    db_conn,
-                    cid,
-                    transcript_id,
-                    &continues,
-                )
-                .await?;
+                let preserved =
+                    conversation_service::bind_external_id(db_conn, cid, transcript_id, &continues)
+                        .await?;
                 crate::commands::conversations::emit_conversation_upsert(&emitter, db_conn, cid)
                     .await;
                 crate::commands::conversations::emit_preserved_conversation(
@@ -655,7 +651,7 @@ pub(crate) const CURSOR_IDENTITYLESS_MCP_TITLE: &str = "MCP: tool";
 /// agent gets to decide both fields:
 ///
 /// * `title` is a free-form human-readable string the host composes. Some
-///   hosts copy the MCP method verbatim (`mcp__codeg-mcp__delegate_to_agent`),
+///   hosts copy the MCP method verbatim (`mcp__harness-studio-mcp__delegate_to_agent`),
 ///   some prefix it with a verb (`Run mcp__…__delegate_to_agent`), some
 ///   rephrase it (`Delegate to codex`). We match by substring so any
 ///   form containing `delegate_to_agent` is captured.
@@ -843,7 +839,7 @@ async fn register_delegation_tool_call_from_event(
     // exact title: if the call turns out to be `delegate_to_agent`, its MCP
     // round-trip claims the id via the post-budget FIFO last resort and the
     // child binds to the REAL ACP id — which is what the live
-    // `meta["codeg.delegation"]` write and the historical
+    // `meta["harness_studio.delegation"]` write and the historical
     // `inject_delegation_meta` match both key on. A non-delegation MCP call's
     // candidate is harmless: it's tombstoned when the call goes terminal and
     // GC'd by the unkeyed TTL otherwise; the FIFO only pays out when a
@@ -982,11 +978,11 @@ mod delegation_title_tests {
     #[test]
     fn matches_mcp_prefixed_method_in_title() {
         assert!(is_delegation_invocation(
-            "mcp__codeg-mcp__delegate_to_agent",
+            "mcp__harness-studio-mcp__delegate_to_agent",
             None
         ));
         assert!(is_delegation_invocation(
-            "Run mcp__codeg__delegate_to_agent",
+            "Run mcp__harness_studio__delegate_to_agent",
             None
         ));
     }
@@ -1374,7 +1370,7 @@ mod delegation_registration_tests {
         // tc-2 registers unkeyed (tool-name title, no raw_input yet).
         register_delegation_tool_call_from_event(
             &b,
-            &tool_call_event("tc-2", "mcp__codeg-mcp__delegate_to_agent", None),
+            &tool_call_event("tc-2", "mcp__harness-studio-mcp__delegate_to_agent", None),
         )
         .await;
         // A parallel keyed sibling sharing the queue (must not be mixed up).
@@ -1382,7 +1378,7 @@ mod delegation_registration_tests {
             &b,
             &tool_call_event(
                 "tc-sibling",
-                "mcp__codeg-mcp__delegate_to_agent",
+                "mcp__harness-studio-mcp__delegate_to_agent",
                 Some(r#"{"agent_type":"codex","task":"sibling"}"#),
             ),
         )
@@ -1491,9 +1487,9 @@ mod delegation_registration_tests {
             &b,
             &tool_call_event(
                 "tc-keyed",
-                "codeg-mcp: delegate_to_agent",
+                "harness-studio-mcp: delegate_to_agent",
                 Some(
-                    r#"{"providerIdentifier":"codeg-mcp","toolName":"delegate_to_agent","args":{"agent_type":"codex","task":"build it"}}"#,
+                    r#"{"providerIdentifier":"harness-studio-mcp","toolName":"delegate_to_agent","args":{"agent_type":"codex","task":"build it"}}"#,
                 ),
             ),
         )
@@ -1770,8 +1766,8 @@ mod tests {
     use super::*;
     use crate::acp::session_state::SessionState;
     use crate::db::test_helpers;
+    use crate::events::EventEmitter;
     use crate::models::agent::AgentType;
-    use crate::web::event_bridge::EventEmitter;
     use std::sync::Arc;
     use tokio::sync::{mpsc, RwLock};
 
@@ -1884,20 +1880,20 @@ mod tests {
         // SessionStarted persists external_id; it must ALSO re-broadcast the
         // full summary on `conversation://changed` so every client's sidebar
         // converges (the create-time upsert carried external_id: null).
-        use crate::web::event_bridge::{WebEventBroadcaster, CONVERSATION_CHANGED_EVENT};
+        use crate::events::{EventBroadcaster, CONVERSATION_CHANGED_EVENT};
         let db = test_helpers::fresh_in_memory_db().await;
         let folder_id = test_helpers::seed_folder(&db, "/tmp/test-sess-upsert").await;
         let conv =
             conversation_service::create(&db.conn, folder_id, AgentType::ClaudeCode, None, None)
                 .await
                 .unwrap();
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
         let mgr = ConnectionManager::new();
         {
             let mut map = mgr.connections.lock().await;
             let mut conn = fake_connection_with_state("c1", Some(conv.id));
-            conn.emitter = EventEmitter::test_web_only(broadcaster.clone());
+            conn.emitter = EventEmitter::test_local(broadcaster.clone());
             map.insert("c1".to_string(), conn);
         }
         let env = EventEnvelope {
@@ -1928,20 +1924,20 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_native_session_title_writes_and_upserts() {
-        use crate::web::event_bridge::{WebEventBroadcaster, CONVERSATION_CHANGED_EVENT};
+        use crate::events::{EventBroadcaster, CONVERSATION_CHANGED_EVENT};
         let db = test_helpers::fresh_in_memory_db().await;
         let folder_id = test_helpers::seed_folder(&db, "/tmp/test-native-title").await;
         let conv =
             conversation_service::create(&db.conn, folder_id, AgentType::ClaudeCode, None, None)
                 .await
                 .unwrap();
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
         let mgr = ConnectionManager::new();
         {
             let mut map = mgr.connections.lock().await;
             let mut conn = fake_connection_with_state("c1", Some(conv.id));
-            conn.emitter = EventEmitter::test_web_only(broadcaster.clone());
+            conn.emitter = EventEmitter::test_local(broadcaster.clone());
             map.insert("c1".to_string(), conn);
         }
         let env = EventEnvelope {
@@ -2031,7 +2027,7 @@ mod tests {
         // `get_by_id`, itself deleted-filtered) broadcasts nothing. This locks
         // the actual residual path end-to-end, not just the shared helper.
         use crate::db::entities::conversation;
-        use crate::web::event_bridge::WebEventBroadcaster;
+        use crate::events::EventBroadcaster;
         use sea_orm::EntityTrait;
 
         let db = test_helpers::fresh_in_memory_db().await;
@@ -2054,13 +2050,13 @@ mod tests {
             .unwrap()
             .expect("soft-deleted row still exists");
 
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
         let mgr = ConnectionManager::new();
         {
             let mut map = mgr.connections.lock().await;
             let mut conn = fake_connection_with_state("c1", Some(conv.id));
-            conn.emitter = EventEmitter::test_web_only(broadcaster.clone());
+            conn.emitter = EventEmitter::test_local(broadcaster.clone());
             map.insert("c1".to_string(), conn);
         }
         let env = EventEnvelope {
@@ -2546,7 +2542,10 @@ mod tests {
         let env = EventEnvelope {
             seq: 1,
             connection_id: "c1".to_string(),
-            payload: AcpEvent::ContentDelta { text: "hi".into(), parent_tool_use_id: None },
+            payload: AcpEvent::ContentDelta {
+                text: "hi".into(),
+                parent_tool_use_id: None,
+            },
         };
         handle_event(&db.conn, &mgr, &env, None).await.unwrap();
 

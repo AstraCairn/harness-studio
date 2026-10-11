@@ -64,7 +64,7 @@ function status(overrides: Partial<ComputerStatus> = {}): ComputerStatus {
       accessibility: true,
       screenRecording: false,
     },
-    codeg: {
+    harness_studio: {
       accessibility: false,
       screenRecording: false,
       selfResponsible: true,
@@ -225,13 +225,13 @@ describe("StatusBarComputer", () => {
     expect(api.computerOpenPermissionSettings).not.toHaveBeenCalled()
   })
 
-  /** codeg holding a permission itself is said — and nothing is held back
+  /** harness_studio holding a permission itself is said — and nothing is held back
    * over it: agents' shells have that permission whatever computer use
    * does. */
-  it("tells, and only tells, when codeg itself holds a permission", async () => {
+  it("tells, and only tells, when harness_studio itself holds a permission", async () => {
     api.computerStatus.mockResolvedValue(
       status({
-        codeg: {
+        harness_studio: {
           accessibility: true,
           screenRecording: false,
           selfResponsible: true,
@@ -240,7 +240,7 @@ describe("StatusBarComputer", () => {
     )
     mount()
     fireEvent.click(await screen.findByRole("button", { name: "Computer use" }))
-    await screen.findByText(/codeg itself has Accessibility/)
+    await screen.findByText(/harness studio itself has Accessibility/)
     expect(
       screen.getByRole("button", { name: "Share a window…" })
     ).toBeEnabled()
@@ -292,7 +292,7 @@ describe("StatusBarComputer", () => {
     mount()
     fireEvent.click(await screen.findByRole("button", { name: "Computer use" }))
     await screen.findByText(
-      /remove the old codeg-computer-helper from the list/
+      /remove the old harness-studio-computer-helper from the list/
     )
     // Said once, as a tag on the status line.
     expect(screen.getByTitle(/doesn't check/)).toHaveTextContent(

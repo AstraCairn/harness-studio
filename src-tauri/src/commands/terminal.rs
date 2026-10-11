@@ -5,6 +5,8 @@ use tauri::Manager;
 #[cfg(feature = "tauri-runtime")]
 use tauri::State;
 
+#[cfg(feature = "tauri-runtime")]
+use crate::events::EventEmitter;
 use crate::git_credential;
 #[cfg(feature = "tauri-runtime")]
 use crate::terminal::error::TerminalError;
@@ -12,8 +14,6 @@ use crate::terminal::error::TerminalError;
 use crate::terminal::manager::{SpawnOptions, TerminalManager};
 #[cfg(feature = "tauri-runtime")]
 use crate::terminal::types::{TerminalInfo, TerminalSnapshot};
-#[cfg(feature = "tauri-runtime")]
-use crate::web::event_bridge::EventEmitter;
 
 /// Build extra env vars for the terminal session.
 ///
@@ -81,10 +81,10 @@ pub async fn terminal_spawn(
         .path()
         .app_data_dir()
         .map_err(|e| TerminalError::SpawnFailed(e.to_string()))?;
-    // Honor a pre-set `CODEG_DATA_DIR` so the credential helper
+    // Honor a pre-set `HARNESS_STUDIO_DATA_DIR` so the credential helper
     // injected into this terminal points at the same database the
     // desktop process initialized in `lib.rs setup`. Without this,
-    // a custom `CODEG_DATA_DIR` would leave terminals reading an
+    // a custom `HARNESS_STUDIO_DATA_DIR` would leave terminals reading an
     // empty / nonexistent DB at the Tauri default path.
     let effective_data_dir = crate::paths::resolve_effective_data_dir(&app_data_dir);
 

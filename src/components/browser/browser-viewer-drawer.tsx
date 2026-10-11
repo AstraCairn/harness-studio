@@ -69,7 +69,7 @@ export function BrowserViewerDrawer({
   onOpenChange,
 }: {
   url: string
-  /** An address on the remote codeg host (`BrowserTabSeed.remote`). */
+  /** An address on the remote harness_studio host (`BrowserTabSeed.remote`). */
   remote?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void

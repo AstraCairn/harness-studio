@@ -1,4 +1,4 @@
-//! Per-turn wall-clock observations recorded by codeg's own ACP connection
+//! Per-turn wall-clock observations recorded by harness_studio's own ACP connection
 //! layer, for agents whose native session store carries **no per-turn
 //! timestamps**.
 //!
@@ -11,17 +11,17 @@
 //! thinking+text-only turn is natively clockless, and its message footer
 //! rendered nothing.
 //!
-//! Every ACP session of such an agent runs THROUGH codeg, so the connection
+//! Every ACP session of such an agent runs THROUGH harness_studio, so the connection
 //! layer is a first-party witness of each turn's real span: it stamps the
 //! prompt send and observes the turn's completion. This module persists that
 //! observation as one JSONL line per completed turn, keyed by the agent's own
 //! session id, and the history parser merges it back for turns whose native
-//! store yields no clock. The data is honest — codeg's own measurement, not a
+//! store yields no clock. The data is honest — harness_studio's own measurement, not a
 //! fabrication from unrelated fields.
 //!
 //! ## File layout
 //!
-//! `<paths::codeg_turn_timings_root()>/<agent>/<session-id>.jsonl`, one JSON
+//! `<paths::harness_studio_turn_timings_root()>/<agent>/<session-id>.jsonl`, one JSON
 //! object per line:
 //!
 //! ```jsonc
@@ -74,7 +74,7 @@
 //!   Pinned by `parsers::cursor` test
 //!   `accepted_residual_missing_tail_lines_can_misattribute_span`.
 //!
-//! Sessions never run through this codeg install (copied from another
+//! Sessions never run through this harness_studio install (copied from another
 //! machine) simply have no journal file.
 //!
 //! ## Growth
@@ -245,7 +245,9 @@ pub fn append_turn_timing_in(
     timing: &TurnTiming,
 ) {
     let Some(path) = journal_path_in(root, agent, session_id) else {
-        tracing::debug!("[turn-timings] skipping journal append: unsafe id agent={agent} session={session_id}");
+        tracing::debug!(
+            "[turn-timings] skipping journal append: unsafe id agent={agent} session={session_id}"
+        );
         return;
     };
     let Ok(line) = serde_json::to_string(timing) else {
@@ -264,7 +266,10 @@ pub fn append_turn_timing_in(
         f.write_all(format!("{line}\n").as_bytes())
     };
     if let Err(e) = write() {
-        tracing::debug!("[turn-timings] journal append failed for {}: {e}", path.display());
+        tracing::debug!(
+            "[turn-timings] journal append failed for {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -284,7 +289,11 @@ pub fn append_turn_timing_in(
 /// Strict `<` keeps legitimately tied starts; the in-process append lock
 /// (see [`append_turn_timing_in`]) makes disorder rare to begin with.
 pub fn read_turn_timings(agent: &str, session_id: &str) -> Vec<TurnTiming> {
-    read_turn_timings_in(&crate::paths::codeg_turn_timings_root(), agent, session_id)
+    read_turn_timings_in(
+        &crate::paths::harness_studio_turn_timings_root(),
+        agent,
+        session_id,
+    )
 }
 
 /// Root-injectable core of [`read_turn_timings`].

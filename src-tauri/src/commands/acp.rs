@@ -27,13 +27,14 @@ use crate::acp::types::{ConnectionInfo, ForkResultInfo, PromptInputBlock};
 use crate::db::service::agent_setting_service;
 use crate::db::service::model_provider_service;
 use crate::db::AppDatabase;
+use crate::events::EventEmitter;
 use crate::models::agent::AgentType;
-use crate::web::event_bridge::EventEmitter;
 
 const ACP_AGENTS_UPDATED_EVENT: &str = "app://acp-agents-updated";
 const NPM_PREFIX_TIMEOUT: Duration = Duration::from_millis(1500);
 
-static NPM_GLOBAL_PREFIX_CACHE: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
+type NpmPrefixCache = std::sync::Mutex<Option<(PathBuf, std::time::Instant, u64)>>;
+static NPM_GLOBAL_PREFIX_CACHE: NpmPrefixCache = std::sync::Mutex::new(None);
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -47,7 +48,7 @@ pub(crate) fn emit_acp_agents_updated(
     reason: &'static str,
     agent_type: Option<AgentType>,
 ) {
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
         ACP_AGENTS_UPDATED_EVENT,
         AcpAgentsUpdatedEventPayload { reason, agent_type },
@@ -78,7 +79,7 @@ fn emit_agent_install_event(
     kind: AgentInstallEventKind,
     payload: impl Into<String>,
 ) {
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
         AGENT_INSTALL_EVENT,
         AgentInstallEvent {
@@ -235,7 +236,7 @@ pub(crate) fn resolve_system_agent_binary(cmd: &str) -> Option<PathBuf> {
 /// The agent-aware form exists because a vendor installer can target a
 /// directory that is neither on PATH nor `~/.local/bin` — OpenCode's is
 /// `~/.opencode/bin` — and appending it to the shell rc does not help a desktop
-/// app launched from Finder or the Dock. Ordered last, so a codeg-managed copy
+/// app launched from Finder or the Dock. Ordered last, so a harness-studio-managed copy
 /// and anything genuinely on PATH still win.
 pub(crate) fn resolve_system_agent_binary_for(agent_type: AgentType, cmd: &str) -> Option<PathBuf> {
     if let Some(path) = resolve_system_agent_binary(cmd) {
@@ -247,14 +248,16 @@ pub(crate) fn resolve_system_agent_binary_for(agent_type: AgentType, cmd: &str) 
         cmd.to_string()
     };
     let home = home_dir_or_default();
-    registry::binary_system_dirs(agent_type).iter().find_map(|dir| {
-        let cand = home.join(dir).join(&exe);
-        cand.is_file().then_some(cand)
-    })
+    registry::binary_system_dirs(agent_type)
+        .iter()
+        .find_map(|dir| {
+            let cand = home.join(dir).join(&exe);
+            cand.is_file().then_some(cand)
+        })
 }
 
 /// Resolve the VENDOR CLI wrapped by an ACP adapter agent (`claude`, `codex`
-/// — see [`registry::acp_adapter_relation`]). codeg never launches this: it is
+/// — see [`registry::acp_adapter_relation`]). harness_studio never launches this: it is
 /// probed purely so preflight/diagnostics can say "we found your own CLI, but
 /// it doesn't speak ACP" instead of a bare "not installed".
 ///
@@ -280,7 +283,7 @@ pub(crate) async fn resolve_vendor_cli(cmd: &str, extra_dirs: &[&str]) -> Option
 
 /// Resolve the `uvx` (uv tool runner) executable used to launch Python ACP
 /// agents (e.g. Hermes). Checks PATH first (respecting a user's own `uv`),
-/// then codeg's managed uv cache, then the common install locations the
+/// then harness_studio's managed uv cache, then the common install locations the
 /// official `uv` installer / cargo use (`~/.local/bin`, `~/.cargo/bin`).
 pub(crate) fn resolve_uvx_command() -> Option<PathBuf> {
     if let Some(path) = resolve_command_on_path("uvx") {
@@ -291,7 +294,10 @@ pub(crate) fn resolve_uvx_command() -> Option<PathBuf> {
     }
     let exe = if cfg!(windows) { "uvx.exe" } else { "uvx" };
     let home = home_dir_or_default();
-    for dir in [home.join(".local").join("bin"), home.join(".cargo").join("bin")] {
+    for dir in [
+        home.join(".local").join("bin"),
+        home.join(".cargo").join("bin"),
+    ] {
         let cand = dir.join(exe);
         if cand.is_file() {
             return Some(cand);
@@ -301,7 +307,7 @@ pub(crate) fn resolve_uvx_command() -> Option<PathBuf> {
 }
 
 /// Whether a `Uvx` agent can actually be launched on this machine right now:
-/// the `uvx` runner is resolvable (codeg auto-provisions it on install, so this
+/// the `uvx` runner is resolvable (harness_studio auto-provisions it on install, so this
 /// holds post-prepare), or the agent's own CLI is on PATH (system fallback).
 /// The connect gate (`verify_agent_installed`) and the Settings status/list
 /// paths all use this so they agree on readiness. Note: the prepared-version
@@ -326,7 +332,7 @@ pub(crate) fn uvx_python_args(python: Option<&str>) -> Vec<String> {
 }
 
 /// The version to display for a `Uvx` agent, shared by `detect_local_version`
-/// and the status/list paths so they can't disagree: codeg's prepared marker
+/// and the status/list paths so they can't disagree: harness_studio's prepared marker
 /// first, then the package's console script on PATH, then the system-fallback
 /// command a launch would actually use (a pipx / `uv tool install` CLI).
 async fn uvx_displayed_version(
@@ -463,31 +469,31 @@ pub(crate) async fn cached_npm_global_prefix() -> Option<PathBuf> {
 }
 
 async fn cached_npm_global_prefix_with<F, Fut>(
-    cache: &tokio::sync::OnceCell<PathBuf>,
+    cache: &NpmPrefixCache,
     resolve: F,
 ) -> Option<PathBuf>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Option<PathBuf>>,
 {
-    if let Some(prefix) = cache.get() {
-        return Some(prefix.clone());
+    let generation = crate::probe::generation();
+    if let Some((prefix, at, cached_generation)) = cache.lock().ok()?.as_ref() {
+        if at.elapsed() < Duration::from_secs(60) && *cached_generation == generation {
+            return Some(prefix.clone());
+        }
     }
 
     let resolved = resolve().await?;
-    match cache.set(resolved.clone()) {
-        Ok(()) => Some(resolved),
-        Err(_) => cache.get().cloned(),
-    }
+    *cache.lock().ok()? = Some((resolved.clone(), std::time::Instant::now(), generation));
+    Some(resolved)
 }
 
 async fn resolve_current_npm_global_prefix() -> Option<PathBuf> {
     let npm_path = which::which("npm").ok()?;
     let mut cmd = crate::process::tokio_command(npm_path);
-    cmd.arg("prefix").arg("-g").kill_on_drop(true);
-    let output = tokio::time::timeout(NPM_PREFIX_TIMEOUT, cmd.output())
+    cmd.arg("prefix").arg("-g");
+    let output = crate::probe::output_with_timeout(cmd, NPM_PREFIX_TIMEOUT)
         .await
-        .ok()?
         .ok()?;
     if !output.status.success() {
         return None;
@@ -598,7 +604,7 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
             Ok(())
         }
         registry::AgentDistribution::Uvx { system_cmd, .. } => {
-            // Launchable when uvx is resolvable (codeg auto-provisions it on
+            // Launchable when uvx is resolvable (harness_studio auto-provisions it on
             // install, so this holds post-prepare) or the agent's own CLI is on
             // PATH. Kept consistent with the Settings status/list paths via the
             // shared helper, so connect and the UI never disagree on readiness.
@@ -618,7 +624,7 @@ pub(crate) async fn verify_agent_installed(agent_type: AgentType) -> Result<(), 
 /// `npm list -g <package_name> --json` and parsing the JSON output.
 ///
 /// Checks both the system global prefix and the user-local prefix
-/// (`~/.codeg/npm-global/`) so packages installed via the EACCES fallback are
+/// (`~/.harnessstudio/npm-global/`) so packages installed via the EACCES fallback are
 /// found as well.
 ///
 /// `pub(crate)` so env diagnostics can report the installed version it sees
@@ -657,11 +663,8 @@ async fn npm_list_version(
     if let Some(p) = prefix {
         cmd.arg(format!("--prefix={}", p.display()));
     }
-    // `kill_on_drop` so a caller that bounds this with `tokio::time::timeout`
-    // (e.g. env diagnostics) actually terminates a hung `npm list` child rather
-    // than orphaning it. No effect on the normal path, which awaits to completion.
-    cmd.kill_on_drop(true);
-    let output = cmd.output().await.ok()?;
+    // The shared probe executor bounds the command and cleans up its tree.
+    let output = crate::probe::output(cmd).await.ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).ok()?;
     let version = json
@@ -696,7 +699,7 @@ async fn detect_local_version(agent_type: AgentType) -> Option<String> {
             if cached.is_some() {
                 return cached;
             }
-            // A user-installed CLI (no codeg cache) still reports a version
+            // A user-installed CLI (no harness_studio cache) still reports a version
             // via `<cmd> --version` (e.g. cursor-agent → "2026.07.20-8cc9c0b").
             // Mirrors the status/list paths — missing a fallback here would
             // CLEAR the persisted system version below and the next list
@@ -749,9 +752,17 @@ const DIAG_SAFE_ENV_KEYS: &[&str] = &[
 /// `models::model_provider::mask_api_key`) so it never panics on a UTF-8 value.
 fn redact_secret(key: &str, value: &str) -> String {
     let lower = key.to_ascii_lowercase();
-    let secretish = ["key", "token", "secret", "password", "passwd", "auth", "credential"]
-        .iter()
-        .any(|needle| lower.contains(needle));
+    let secretish = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "credential",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
     if !secretish {
         return value.to_string();
     }
@@ -804,7 +815,7 @@ struct AgentDiag {
     resolve_npx: Option<String>,
     /// `<npm prefix -g>/bin/<cmd>` when it exists.
     system_prefix_bin: Option<String>,
-    /// `~/.codeg/npm-global/bin/<cmd>` (EACCES fallback) when it exists.
+    /// `~/.harnessstudio/npm-global/bin/<cmd>` (EACCES fallback) when it exists.
     user_prefix_bin: Option<String>,
     /// Homebrew global bin (`/opt/homebrew/bin/<cmd>` etc.) when it exists (macOS).
     homebrew_bin: Option<String>,
@@ -813,13 +824,13 @@ struct AgentDiag {
     /// `agent_setting.installed_version` recorded in the DB.
     db_version: Option<String>,
     /// Set only for ACP *adapter* agents (Claude Code, Codex): the vendor CLI
-    /// the user probably already installed, which codeg does NOT launch. See
+    /// the user probably already installed, which harness_studio does NOT launch. See
     /// [`registry::acp_adapter_relation`].
     adapter: Option<AdapterProbe>,
 }
 
 /// The vendor CLI behind an adapter agent, probed so the report can say "we
-/// found your own `claude`, but codeg launches `claude-agent-acp`" instead of a
+/// found your own `claude`, but harness_studio launches `claude-agent-acp`" instead of a
 /// bare "not installed" the user reads as plain wrong.
 #[derive(Default, Clone)]
 struct AdapterProbe {
@@ -899,7 +910,12 @@ async fn diag_cmd_probe(cmd: &str, version_args: &[&str]) -> CmdProbe {
 
 /// Major version from `v20.11.1` / `20.11.1`.
 fn parse_node_major(v: &str) -> Option<u64> {
-    v.trim().trim_start_matches('v').split('.').next()?.parse().ok()
+    v.trim()
+        .trim_start_matches('v')
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Compare the user's login-shell PATH against the app PATH. Unix-only; on
@@ -916,8 +932,9 @@ async fn diag_terminal_probe(cmd: &str, app_path: &[String]) -> TerminalProbe {
         }
     };
     // `cmd` is a static registry command name — no shell metacharacters.
-    let script =
-        format!("printf 'CODEG_PATH=%s\\n' \"$PATH\"; command -v {cmd} 2>/dev/null || true");
+    let script = format!(
+        "printf 'HARNESS_STUDIO_PATH=%s\\n' \"$PATH\"; command -v {cmd} 2>/dev/null || true"
+    );
     let mut c = crate::process::tokio_command(&shell);
     c.arg("-lic").arg(&script).kill_on_drop(true);
     let out = match tokio::time::timeout(DIAG_PROBE_TIMEOUT, c.output()).await {
@@ -931,14 +948,15 @@ async fn diag_terminal_probe(cmd: &str, app_path: &[String]) -> TerminalProbe {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut term_path: Option<String> = None;
     for line in stdout.lines() {
-        if let Some(p) = line.strip_prefix("CODEG_PATH=") {
+        if let Some(p) = line.strip_prefix("HARNESS_STUDIO_PATH=") {
             term_path = Some(p.to_string());
         } else if line.starts_with('/') && probe.cmd_resolved.is_none() {
             probe.cmd_resolved = Some(line.trim().to_string());
         }
     }
     if let Some(tp) = term_path {
-        let app_set: std::collections::HashSet<&str> = app_path.iter().map(String::as_str).collect();
+        let app_set: std::collections::HashSet<&str> =
+            app_path.iter().map(String::as_str).collect();
         let mut seen = std::collections::HashSet::new();
         probe.extra_dirs = tp
             .split(':')
@@ -1007,10 +1025,12 @@ async fn collect_agent_diag(
                 cand.is_file().then(|| cand.to_string_lossy().to_string())
             });
             diag.homebrew_bin = if cfg!(target_os = "macos") {
-                ["/opt/homebrew/bin", "/usr/local/bin"].iter().find_map(|d| {
-                    let cand = Path::new(d).join(diag_exe_name(cmd));
-                    cand.is_file().then(|| cand.to_string_lossy().to_string())
-                })
+                ["/opt/homebrew/bin", "/usr/local/bin"]
+                    .iter()
+                    .find_map(|d| {
+                        let cand = Path::new(d).join(diag_exe_name(cmd));
+                        cand.is_file().then(|| cand.to_string_lossy().to_string())
+                    })
             } else {
                 None
             };
@@ -1029,7 +1049,8 @@ async fn collect_agent_diag(
             // open) this report is on demand, so it can afford `--version` —
             // naming the exact build is what makes "we DID see your CLI" land.
             if let Some(relation) = registry::acp_adapter_relation(agent_type) {
-                let native_path = resolve_vendor_cli(relation.native_cmd, relation.extra_dirs).await;
+                let native_path =
+                    resolve_vendor_cli(relation.native_cmd, relation.extra_dirs).await;
                 let native_version = match &native_path {
                     Some(p) => diag_run(p, &["--version"]).await,
                     None => None,
@@ -1135,7 +1156,8 @@ async fn collect_diag_inputs(db: &AppDatabase, agent_type: Option<AgentType>) ->
     for &key in DIAG_SAFE_ENV_KEYS {
         if let Ok(val) = std::env::var(key) {
             if !val.trim().is_empty() {
-                inp.safe_env.push((key.to_string(), redact_secret(key, &val)));
+                inp.safe_env
+                    .push((key.to_string(), redact_secret(key, &val)));
             }
         }
     }
@@ -1259,7 +1281,7 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
         }
         // An ACP adapter agent that was never installed is the single most
         // reported "bug": the user has the vendor CLI and reads "not installed"
-        // as codeg failing to see it. Answer the question they're actually
+        // as harness_studio failing to see it. Answer the question they're actually
         // asking, before the generic not-installed verdict. Node problems above
         // still win — those block the adapter install itself.
         if let Some(adapter) = &agent.adapter {
@@ -1268,13 +1290,13 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
                     diag_verdict(
                         DiagLevel::Info,
                         "adapter_missing_native_present",
-                        "Your own vendor CLI is installed, but codeg launches a separate ACP adapter, which is not.",
+                        "Your own vendor CLI is installed, but harness_studio launches a separate ACP adapter, which is not.",
                     )
                 } else {
                     diag_verdict(
                         DiagLevel::Info,
                         "adapter_missing",
-                        "codeg launches a separate ACP adapter for this agent, which is not installed.",
+                        "harness_studio launches a separate ACP adapter for this agent, which is not installed.",
                     )
                 };
             }
@@ -1284,7 +1306,7 @@ fn compute_verdict(inp: &DiagInputs) -> DiagnosticsVerdict {
                 return diag_verdict(
                     DiagLevel::Fail,
                     "user_prefix_not_on_path",
-                    "Installed into the EACCES fallback prefix (~/.codeg/npm-global), which is not on the app's PATH.",
+                    "Installed into the EACCES fallback prefix (~/.harnessstudio/npm-global), which is not on the app's PATH.",
                 );
             }
             if agent.homebrew_bin.is_some() {
@@ -1340,14 +1362,30 @@ fn build_report(
 
     // 1. Runtime
     let mut runtime = vec![
-        diag_check("os / arch", &format!("{} / {}", inp.os, inp.arch), DiagLevel::Info, None),
+        diag_check(
+            "os / arch",
+            &format!("{} / {}", inp.os, inp.arch),
+            DiagLevel::Info,
+            None,
+        ),
         diag_check("app version", &inp.app_version, DiagLevel::Info, None),
     ];
-    let fix_failed = inp.path_logs.iter().any(|l| l.contains("fix_path_env failed"));
+    let fix_failed = inp
+        .path_logs
+        .iter()
+        .any(|l| l.contains("fix_path_env failed"));
     runtime.push(diag_check(
         "fix_path_env",
-        if fix_failed { "failed at startup" } else { "no failure logged" },
-        if fix_failed { DiagLevel::Warn } else { DiagLevel::Info },
+        if fix_failed {
+            "failed at startup"
+        } else {
+            "no failure logged"
+        },
+        if fix_failed {
+            DiagLevel::Warn
+        } else {
+            DiagLevel::Info
+        },
         Some("app imports the login-shell PATH at startup; a failure leaves a narrow GUI PATH"),
     ));
     for (k, v) in &inp.safe_env {
@@ -1359,10 +1397,19 @@ fn build_report(
         DiagLevel::Info,
         None,
     ));
-    sections.push(DiagSection { title: "Runtime".to_string(), checks: runtime });
+    sections.push(DiagSection {
+        title: "Runtime".to_string(),
+        checks: runtime,
+    });
 
     // 2. Node / npm / npx
-    let node_status = |p: &CmdProbe| if p.path.is_some() { DiagLevel::Ok } else { DiagLevel::Fail };
+    let node_status = |p: &CmdProbe| {
+        if p.path.is_some() {
+            DiagLevel::Ok
+        } else {
+            DiagLevel::Fail
+        }
+    };
     let cmd_value = |p: &CmdProbe| match (&p.path, &p.version) {
         (Some(path), Some(ver)) => format!("{ver}  ({path})"),
         (Some(path), None) => path.clone(),
@@ -1389,17 +1436,31 @@ fn build_report(
                     inp.npm_prefix_g.as_deref().unwrap_or("N/A"),
                     inp.npm_prefix_g_ms
                 ),
-                if prefix_slow { DiagLevel::Warn } else { DiagLevel::Info },
+                if prefix_slow {
+                    DiagLevel::Warn
+                } else {
+                    DiagLevel::Info
+                },
                 prefix_slow.then_some("exceeds the 1.5s gate used at detection time"),
             ),
-            diag_check("npm root -g", inp.npm_root_g.as_deref().unwrap_or("N/A"), DiagLevel::Info, None),
+            diag_check(
+                "npm root -g",
+                inp.npm_root_g.as_deref().unwrap_or("N/A"),
+                DiagLevel::Info,
+                None,
+            ),
             diag_check(
                 "npm config get prefix",
                 inp.npm_config_prefix.as_deref().unwrap_or("N/A"),
                 DiagLevel::Info,
                 None,
             ),
-            diag_check("cached prefix", inp.cached_prefix.as_deref().unwrap_or("N/A"), DiagLevel::Info, None),
+            diag_check(
+                "cached prefix",
+                inp.cached_prefix.as_deref().unwrap_or("N/A"),
+                DiagLevel::Info,
+                None,
+            ),
         ],
     });
 
@@ -1413,7 +1474,11 @@ fn build_report(
         let mut checks = vec![diag_check(
             &launch_label,
             a.launchable.as_deref().unwrap_or("NOT RESOLVED"),
-            if a.launchable.is_some() { DiagLevel::Ok } else { DiagLevel::Fail },
+            if a.launchable.is_some() {
+                DiagLevel::Ok
+            } else {
+                DiagLevel::Fail
+            },
             (a.distribution == "npx").then_some("this is exactly what the new-session page checks"),
         )];
         if let Some(p) = &a.package {
@@ -1424,20 +1489,34 @@ fn build_report(
             checks.push(diag_check(
                 "<npm prefix -g>/bin/<cmd>",
                 a.system_prefix_bin.as_deref().unwrap_or("absent"),
-                if a.system_prefix_bin.is_some() { DiagLevel::Ok } else { DiagLevel::Info },
+                if a.system_prefix_bin.is_some() {
+                    DiagLevel::Ok
+                } else {
+                    DiagLevel::Info
+                },
                 None,
             ));
             checks.push(diag_check(
-                "~/.codeg/npm-global/bin/<cmd>",
+                "~/.harnessstudio/npm-global/bin/<cmd>",
                 a.user_prefix_bin.as_deref().unwrap_or("absent"),
-                if a.user_prefix_bin.is_some() { DiagLevel::Warn } else { DiagLevel::Info },
-                a.user_prefix_bin.as_ref().map(|_| "EACCES fallback dir — reached by the connect gate only if it's on PATH"),
+                if a.user_prefix_bin.is_some() {
+                    DiagLevel::Warn
+                } else {
+                    DiagLevel::Info
+                },
+                a.user_prefix_bin.as_ref().map(|_| {
+                    "EACCES fallback dir — reached by the connect gate only if it's on PATH"
+                }),
             ));
             if cfg!(target_os = "macos") {
                 checks.push(diag_check(
                     "homebrew bin/<cmd>",
                     a.homebrew_bin.as_deref().unwrap_or("absent"),
-                    if a.homebrew_bin.is_some() { DiagLevel::Warn } else { DiagLevel::Info },
+                    if a.homebrew_bin.is_some() {
+                        DiagLevel::Warn
+                    } else {
+                        DiagLevel::Info
+                    },
                     None,
                 ));
             }
@@ -1461,7 +1540,7 @@ fn build_report(
                 },
                 DiagLevel::Info,
                 Some(
-                    "codeg never launches this — it launches the ACP adapter above, \
+                    "harness_studio never launches this — it launches the ACP adapter above, \
                      a separate package that shares the same config dir",
                 ),
             ));
@@ -1537,7 +1616,11 @@ fn build_report(
                 } else {
                     format!("{} (see copied text)", inp.terminal.extra_dirs.len())
                 },
-                if inp.terminal.extra_dirs.is_empty() { DiagLevel::Ok } else { DiagLevel::Warn },
+                if inp.terminal.extra_dirs.is_empty() {
+                    DiagLevel::Ok
+                } else {
+                    DiagLevel::Warn
+                },
                 (!inp.terminal.extra_dirs.is_empty())
                     .then_some("the app can't see these dirs — the likely GUI PATH gap"),
             ),
@@ -1550,7 +1633,10 @@ fn build_report(
             None,
         )]
     };
-    sections.push(DiagSection { title: "Terminal comparison".to_string(), checks: term_checks });
+    sections.push(DiagSection {
+        title: "Terminal comparison".to_string(),
+        checks: term_checks,
+    });
 
     let plain_text = render_plain_text(inp, &verdict, &sections, &generated_at, agent_type);
 
@@ -1579,16 +1665,24 @@ fn render_plain_text(
         DiagLevel::Info => "--  ",
     };
     let mut out = String::new();
-    out.push_str("===== Codeg environment diagnostics =====\n");
+    out.push_str("===== harness studio environment diagnostics =====\n");
     out.push_str(&format!("generated: {generated_at}\n"));
     if let Some(at) = agent_type {
         out.push_str(&format!("agent: {at:?}\n"));
     }
-    out.push_str(&format!("verdict [{}]: {}\n", verdict.code, verdict.summary));
+    out.push_str(&format!(
+        "verdict [{}]: {}\n",
+        verdict.code, verdict.summary
+    ));
     for sec in sections {
         out.push_str(&format!("\n## {}\n", sec.title));
         for c in &sec.checks {
-            out.push_str(&format!("  [{}] {}: {}\n", glyph(c.status), c.label, c.value));
+            out.push_str(&format!(
+                "  [{}] {}: {}\n",
+                glyph(c.status),
+                c.label,
+                c.value
+            ));
             if let Some(h) = &c.hint {
                 out.push_str(&format!("        ↳ {h}\n"));
             }
@@ -1622,7 +1716,9 @@ pub(crate) async fn acp_env_diagnostics_core(
     agent_type: Option<AgentType>,
 ) -> Result<AgentDiagnosticsReport, AcpError> {
     let inputs = collect_diag_inputs(db, agent_type).await;
-    let generated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
+    let generated_at = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string();
     Ok(build_report(&inputs, generated_at, agent_type))
 }
 
@@ -1689,7 +1785,7 @@ mod diagnostics_tests {
     fn verdict_user_prefix_not_on_path() {
         let mut inp = base_inputs();
         let mut a = agent_installed_unresolved();
-        a.user_prefix_bin = Some("/home/u/.codeg/npm-global/bin/codex-acp".to_string());
+        a.user_prefix_bin = Some("/home/u/.harnessstudio/npm-global/bin/codex-acp".to_string());
         inp.agent = Some(a);
         let v = compute_verdict(&inp);
         assert_eq!(v.code, "user_prefix_not_on_path");
@@ -1711,7 +1807,8 @@ mod diagnostics_tests {
         let mut a = agent_installed_unresolved();
         a.detected_version = Some("1.1.2".to_string());
         inp.agent = Some(a);
-        inp.terminal.cmd_resolved = Some("/Users/u/.nvm/versions/node/v20/bin/codex-acp".to_string());
+        inp.terminal.cmd_resolved =
+            Some("/Users/u/.nvm/versions/node/v20/bin/codex-acp".to_string());
         assert_eq!(compute_verdict(&inp).code, "terminal_only_path");
     }
 
@@ -1864,12 +1961,14 @@ mod diagnostics_tests {
     }
 
     // The canonical support ticket: `codex` is on the machine, the adapter is
-    // not. The generic "not installed" verdict reads as codeg being wrong, so
+    // not. The generic "not installed" verdict reads as harness_studio being wrong, so
     // this case gets its own code.
     #[test]
     fn verdict_adapter_missing_while_vendor_cli_present() {
         let mut inp = base_inputs();
-        inp.agent = Some(adapter_agent_never_installed(Some("/opt/homebrew/bin/codex")));
+        inp.agent = Some(adapter_agent_never_installed(Some(
+            "/opt/homebrew/bin/codex",
+        )));
         let v = compute_verdict(&inp);
         assert_eq!(v.code, "adapter_missing_native_present");
         assert_eq!(v.level, DiagLevel::Info);
@@ -1921,12 +2020,16 @@ mod diagnostics_tests {
     #[test]
     fn report_names_the_vendor_cli_and_shared_config_dir() {
         let mut inp = base_inputs();
-        inp.agent = Some(adapter_agent_never_installed(Some("/opt/homebrew/bin/codex")));
+        inp.agent = Some(adapter_agent_never_installed(Some(
+            "/opt/homebrew/bin/codex",
+        )));
         let r = build_report(&inp, "FIXED-TS".to_string(), Some(AgentType::Codex));
         assert!(r.plain_text.contains("codex (your own CLI)"));
         assert!(r.plain_text.contains("/opt/homebrew/bin/codex"));
         assert!(r.plain_text.contains("~/.codex"));
-        assert!(r.plain_text.contains("verdict [adapter_missing_native_present]"));
+        assert!(r
+            .plain_text
+            .contains("verdict [adapter_missing_native_present]"));
     }
 
     // Non-adapter agents keep the old shape exactly — no stray rows.
@@ -1950,7 +2053,9 @@ mod diagnostics_tests {
         let inp = base_inputs();
         let r = build_report(&inp, "FIXED-TS".to_string(), None);
         assert_eq!(r.generated_at, "FIXED-TS");
-        assert!(r.plain_text.contains("Codeg environment diagnostics"));
+        assert!(r
+            .plain_text
+            .contains("harness studio environment diagnostics"));
         assert!(r.plain_text.contains("verdict [ok]"));
         assert!(!r.sections.is_empty());
     }
@@ -1959,9 +2064,15 @@ mod diagnostics_tests {
 /// Process-local cache for dir-tree agents' system-binary `--version` probes,
 /// keyed by (path, mtime) so an upgrade re-probes but the status/list paths
 /// don't spawn a subprocess on every call.
-static SYSTEM_BINARY_VERSION_CACHE: std::sync::Mutex<
-    Option<(PathBuf, std::time::SystemTime, String)>,
-> = std::sync::Mutex::new(None);
+type BinaryVersionCacheEntry = (
+    PathBuf,
+    std::time::SystemTime,
+    String,
+    std::time::Instant,
+    u64,
+);
+static SYSTEM_BINARY_VERSION_CACHE: std::sync::Mutex<Option<BinaryVersionCacheEntry>> =
+    std::sync::Mutex::new(None);
 
 /// Version of a dir-tree agent's user-installed CLI (PATH / ~/.local/bin),
 /// via a cached `--version` probe. `None` when no system install exists or
@@ -1969,16 +2080,27 @@ static SYSTEM_BINARY_VERSION_CACHE: std::sync::Mutex<
 pub(crate) async fn system_dir_agent_version(cmd: &str) -> Option<String> {
     let bin = resolve_system_agent_binary(cmd)?;
     let mtime = std::fs::metadata(&bin).ok()?.modified().ok()?;
-    if let Some((cached_bin, cached_mtime, version)) =
+    if let Some((cached_bin, cached_mtime, version, at, generation)) =
         SYSTEM_BINARY_VERSION_CACHE.lock().ok()?.as_ref()
     {
-        if *cached_bin == bin && *cached_mtime == mtime {
+        if *cached_bin == bin
+            && *cached_mtime == mtime
+            && at.elapsed() < Duration::from_secs(60)
+            && *generation == crate::probe::generation()
+        {
             return Some(version.clone());
         }
     }
+    let generation = crate::probe::generation();
     let version = probe_binary_version(&bin).await?;
     if let Ok(mut cache) = SYSTEM_BINARY_VERSION_CACHE.lock() {
-        *cache = Some((bin, mtime, version.clone()));
+        *cache = Some((
+            bin,
+            mtime,
+            version.clone(),
+            std::time::Instant::now(),
+            generation,
+        ));
     }
     Some(version)
 }
@@ -1989,9 +2111,13 @@ pub(crate) async fn system_dir_agent_version(cmd: &str) -> Option<String> {
 /// every settings refresh — and unlike the single-slot dir-tree cache above,
 /// this one holds an entry per agent so several agents don't evict each other.
 /// One probe result: the binary's mtime when probed, and the version it
-/// reported (`None` = the probe failed, cached so it isn't retried until the
-/// binary changes).
-type ProbeCacheEntry = (std::time::SystemTime, Option<String>);
+/// reported (successes live for 60 seconds, failures for 5 seconds).
+type ProbeCacheEntry = (
+    std::time::SystemTime,
+    Option<String>,
+    std::time::Instant,
+    u64,
+);
 
 /// Cache key for a system version probe. The binary path alone is NOT
 /// enough: the declared probe command is editable, so an edit must be a cache
@@ -2038,10 +2164,7 @@ fn extract_version_token(text: &str) -> Option<String> {
             .strip_prefix('v')
             .or_else(|| piece.strip_prefix('V'))
             .unwrap_or(piece);
-        let starts_digit = candidate
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit());
+        let starts_digit = candidate.chars().next().is_some_and(|c| c.is_ascii_digit());
         (starts_digit
             && candidate.contains('.')
             && candidate
@@ -2067,11 +2190,8 @@ fn extract_version_token(text: &str) -> Option<String> {
 /// status-path probe.
 async fn probe_cli_version_token(bin: &std::path::Path, args: &[String]) -> Option<String> {
     let mut cmd = crate::process::tokio_command(bin);
-    cmd.args(args).kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    cmd.args(args);
+    let output = crate::probe::output(cmd).await.ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2080,7 +2200,7 @@ async fn probe_cli_version_token(bin: &std::path::Path, args: &[String]) -> Opti
 }
 
 /// Version of an agent's SYSTEM install (the user's own `npm -g`, bun, brew,
-/// installer script, …), for the status/list paths when codeg has no managed
+/// installer script, …), for the status/list paths when harness_studio has no managed
 /// install record. Works for built-ins and custom agents alike — a declared
 /// `version_probe` only exists on custom definitions, so built-ins always
 /// take the convention path. Cached per (binary, probe, package) (see
@@ -2108,9 +2228,15 @@ async fn system_probed_version_with(
 ) -> Option<String> {
     let mtime = std::fs::metadata(resolved_bin).ok()?.modified().ok()?;
     let key = probe_cache_key(resolved_bin, declared_probe, npm_package);
+    let generation = crate::probe::generation();
     if let Ok(cache) = SYSTEM_PROBE_CACHE.lock() {
-        if let Some((cached_mtime, version)) = cache.as_ref().and_then(|map| map.get(&key)) {
-            if *cached_mtime == mtime {
+        if let Some((cached_mtime, version, at, cached_generation)) =
+            cache.as_ref().and_then(|map| map.get(&key))
+        {
+            if *cached_mtime == mtime
+                && *cached_generation == generation
+                && at.elapsed() < Duration::from_secs(if version.is_some() { 60 } else { 5 })
+            {
                 return version.clone();
             }
         }
@@ -2138,10 +2264,19 @@ async fn system_probed_version_with(
         version = probe_cli_version_token(resolved_bin, &["--version".to_string()]).await;
     }
 
+    if crate::probe::timed_out() {
+        return version;
+    }
     if let Ok(mut cache) = SYSTEM_PROBE_CACHE.lock() {
-        cache
-            .get_or_insert_with(HashMap::new)
-            .insert(key, (mtime, version.clone()));
+        cache.get_or_insert_with(HashMap::new).insert(
+            key,
+            (
+                mtime,
+                version.clone(),
+                std::time::Instant::now(),
+                generation,
+            ),
+        );
     }
     version
 }
@@ -2151,10 +2286,7 @@ async fn system_probed_version_with(
 async fn probe_binary_version(bin: &std::path::Path) -> Option<String> {
     let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("--version");
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let output = crate::probe::output(cmd).await.ok()?;
     if !output.status.success() {
         return None;
     }
@@ -2184,7 +2316,7 @@ const NPM_INCLUDE_OPTIONAL: &str = "--include=optional";
 /// npm ≥7 hides lifecycle-script output by default. hermes-agent's postinstall
 /// runs a multi-minute runtime bootstrap (pinned upstream checkout + isolated
 /// venv sync); without this flag the install log goes silent for the whole
-/// bootstrap, which reads as a hang (codeg imposes no timeout on npm). Other
+/// bootstrap, which reads as a hang (harness_studio imposes no timeout on npm). Other
 /// agents' packages have no meaningful install scripts, so this only adds
 /// their (empty) script output.
 const NPM_FOREGROUND_SCRIPTS: &str = "--foreground-scripts";
@@ -2222,7 +2354,7 @@ fn npm_package_requires_scripts(package: &str) -> bool {
 
 /// Name the proxy when a bootstrap package's install died inside the wrapper's
 /// own downloads. `NODE_ENV_PROXY_VAR` covers Node ≥24; what remains is a
-/// proxied machine on an older Node, where nothing codeg can pass makes that
+/// proxied machine on an older Node, where nothing harness_studio can pass makes that
 /// `fetch` go through — worth spelling out, because npm reports it as a bare
 /// `fetch failed` that says nothing about a proxy.
 fn annotate_npm_bootstrap_failure(package: &str, err: AcpError) -> AcpError {
@@ -2241,7 +2373,7 @@ fn annotate_npm_bootstrap_failure(package: &str, err: AcpError) -> AcpError {
     AcpError::Protocol(format!(
         "{message}\n\nThe bootstrap downloads its runtime from github.com with Node's own \
          fetch, which reads HTTP(S)_PROXY only on Node 24+. Behind a proxy on an older \
-         Node, upgrade Node or run the official installer — codeg picks up a `hermes` \
+         Node, upgrade Node or run the official installer — harness_studio picks up a `hermes` \
          on PATH."
     ))
 }
@@ -2251,7 +2383,7 @@ fn annotate_npm_bootstrap_failure(package: &str, err: AcpError) -> AcpError {
 /// npm resolves `HTTP(S)_PROXY` with WHATWG `new URL()`, where a scheme may not
 /// start with a digit, so a bare `127.0.0.1:7890` aborts the install with a
 /// context-free `ERR_INVALID_URL` before any network I/O — no mention of a
-/// proxy, no mention of which variable. codeg normalizes the address it exports
+/// proxy, no mention of which variable. harness_studio normalizes the address it exports
 /// from Settings, so what reaches here is an externally-provided value (docker
 /// `-e`, a shell export) that the startup contract leaves untouched.
 fn annotate_npm_proxy_url_failure(err: AcpError) -> AcpError {
@@ -2267,7 +2399,7 @@ fn annotate_npm_proxy_url_failure(err: AcpError) -> AcpError {
     }
     AcpError::Protocol(format!(
         "{message}\n\nnpm could not parse the proxy address in {} — it has no scheme. \
-         npm requires one (codeg's own HTTP client does not, which is why updates still \
+         npm requires one (harness_studio's own HTTP client does not, which is why updates still \
          work). Set it to a full URL, e.g. `http://127.0.0.1:7890`.",
         offenders.join(", ")
     ))
@@ -2382,7 +2514,12 @@ async fn install_npm_global_package_streaming_inner(
         format!("$ npm install -g {NPM_INCLUDE_OPTIONAL} {package}"),
     );
 
-    let mut args = vec!["install", "-g", NPM_INCLUDE_OPTIONAL, NPM_FOREGROUND_SCRIPTS];
+    let mut args = vec![
+        "install",
+        "-g",
+        NPM_INCLUDE_OPTIONAL,
+        NPM_FOREGROUND_SCRIPTS,
+    ];
     if run_scripts {
         args.push(NPM_RUN_SCRIPTS_OVERRIDE);
     }
@@ -2465,7 +2602,7 @@ async fn install_npm_global_package_streaming_inner(
     Ok(())
 }
 
-/// Fallback: install an npm package into a user-local prefix (`~/.codeg/npm-global/`)
+/// Fallback: install an npm package into a user-local prefix (`~/.harnessstudio/npm-global/`)
 /// when the system global prefix is not writable (EACCES).
 async fn install_npm_to_user_prefix_streaming(
     package: &str,
@@ -2501,7 +2638,12 @@ async fn install_npm_to_user_prefix_streaming(
         ),
     );
 
-    let mut args = vec!["install", "-g", NPM_INCLUDE_OPTIONAL, NPM_FOREGROUND_SCRIPTS];
+    let mut args = vec![
+        "install",
+        "-g",
+        NPM_INCLUDE_OPTIONAL,
+        NPM_FOREGROUND_SCRIPTS,
+    ];
     if run_scripts {
         args.push(NPM_RUN_SCRIPTS_OVERRIDE);
     }
@@ -2611,7 +2753,7 @@ async fn uninstall_npm_global_package(package: &str) -> Result<(), AcpError> {
     Ok(())
 }
 
-/// Uninstall an npm package from the user-local prefix (`~/.codeg/npm-global/`).
+/// Uninstall an npm package from the user-local prefix (`~/.harnessstudio/npm-global/`).
 async fn uninstall_npm_from_user_prefix(package_name: &str) -> Result<(), AcpError> {
     let prefix = match crate::process::user_npm_prefix() {
         Some(p) if p.exists() => p,
@@ -2748,10 +2890,10 @@ fn codex_provider_uses_actor_authorization(
         })
 }
 
-/// Supply codeg's `requires_openai_auth` default without clobbering the user.
+/// Supply harness_studio's `requires_openai_auth` default without clobbering the user.
 ///
 /// Codex defaults the field to `false` and only reads credentials from
-/// `auth.json` when it is `true`, so `true` is correct for a provider codeg
+/// `auth.json` when it is `true`, so `true` is correct for a provider harness_studio
 /// provisioned itself (key in auth.json, no `env_key`) — and wrong for one the
 /// user configured. Worse, codex's `uses_openai_actor_authorization()` requires
 /// `!requires_openai_auth`, so forcing `true` silently disables that auth path.
@@ -2771,11 +2913,11 @@ fn ensure_codex_provider_auth_default(provider_table: &mut toml::map::Map<String
 
 /// OpenCode reads config from `$XDG_CONFIG_HOME/opencode` (falling back to
 /// `~/.config/opencode`) and credentials from `$XDG_DATA_HOME/opencode`
-/// (falling back to `~/.local/share/opencode`) on every platform. codeg must
+/// (falling back to `~/.local/share/opencode`) on every platform. harness_studio must
 /// write where OpenCode reads, so these reuse the same XDG resolution as
 /// `opencode_plugins` (config) and `parsers::opencode` (data) — otherwise a
 /// user with XDG dirs set would get credentials written where OpenCode never
-/// looks, and codeg's own plugin/connect paths would diverge.
+/// looks, and harness_studio's own plugin/connect paths would diverge.
 fn opencode_config_dir() -> PathBuf {
     crate::acp::opencode_plugins::xdg_config_home()
         .unwrap_or_else(|| home_dir_or_default().join(".config"))
@@ -2826,7 +2968,7 @@ fn load_opencode_auth_json_raw() -> Option<String> {
 //     legacy pair into `providers.json` on startup — but that migration is
 //     PER-PROVIDER AND ONE-SHOT (`if (H.providers[R]) continue;`). Once a
 //     provider has an entry, later edits to `globalState.json`/`secrets.json`
-//     are read by nobody. codeg used to write only the legacy pair, so the
+//     are read by nobody. harness_studio used to write only the legacy pair, so the
 //     Cline settings panel silently stopped taking effect after the first
 //     launch — hence [`persist_cline_provider_settings_at`] writing the native
 //     store directly. The legacy pair is still READ as a fallback so a user
@@ -2842,7 +2984,7 @@ fn load_opencode_auth_json_raw() -> Option<String> {
 //     a non-`Z` timestamp or a malformed base URL does not degrade — it wipes
 //     the whole file's effect. [`persist_cline_provider_settings_at`],
 //     [`cline_timestamp_now`] and [`validate_cline_base_url`] exist to keep
-//     codeg on the valid side of that cliff.
+//     harness_studio on the valid side of that cliff.
 //
 // (c) `models.json` is what makes a CUSTOM model id selectable. Without it the
 //     agent falls back to the provider's built-in default (`gpt-4o` for
@@ -2908,7 +3050,7 @@ const CLINE_CUSTOM_MODEL_PROVIDER: &str = "openai-compatible";
 /// the legacy config carried no `openAiModelInfo` (`pc0` in the 3.0.62 bundle).
 const CLINE_CUSTOM_MODEL_CONTEXT_WINDOW: u64 = 128_000;
 
-/// Map the ids codeg (and the VSCode extension before it) used onto the ids the
+/// Map the ids harness_studio (and the VSCode extension before it) used onto the ids the
 /// CLI's provider registry actually keys on.
 ///
 /// Only `openai` is genuinely renamed — but it matters: `cline auth` silently
@@ -2937,7 +3079,7 @@ fn cline_provider_is_keyless(provider: &str) -> bool {
 /// Their credential is an OAuth token cline obtains through a device-code flow
 /// (`cline auth <id>`, or the ACP `authenticate` request, which prints a code
 /// and a `authkit.cline.bot/device` URL and blocks until the browser half
-/// finishes) and stores itself. codeg neither holds nor refreshes it, which has
+/// finishes) and stores itself. harness_studio neither holds nor refreshes it, which has
 /// two consequences it must respect: never write over these entries' secrets,
 /// and never export `CLINE_PROVIDER`/`CLINE_API_KEY` for them — the env would
 /// shadow the very credential `tryRestoreAuth` is meant to find, and would
@@ -2999,7 +3141,7 @@ fn cline_model_id_keys_for_provider(provider: &str) -> (&'static str, &'static s
     }
 }
 
-/// Project cline's native `providers.json` into codeg's unified config shape
+/// Project cline's native `providers.json` into harness_studio's unified config shape
 /// (`apiProvider` / `model` / `apiKey` / `apiBaseUrl`).
 ///
 /// Picks `lastUsedProvider` when it names a present entry — that is the provider
@@ -3007,7 +3149,9 @@ fn cline_model_id_keys_for_provider(provider: &str) -> (&'static str, &'static s
 /// written by `cline auth` reads back correctly. With several entries and no
 /// usable `lastUsedProvider` there is no defensible "current" provider, so this
 /// reports none rather than guessing one and overwriting it on the next save.
-fn load_cline_provider_settings_at(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn load_cline_provider_settings_at(
+    path: &Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     let root = fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())?;
@@ -3030,14 +3174,21 @@ fn load_cline_provider_settings_at(path: &Path) -> Option<serde_json::Map<String
         "apiProvider".to_string(),
         serde_json::Value::String(normalize_cline_provider_id(&selected)),
     );
-    for (source, target) in [("apiKey", "apiKey"), ("model", "model"), ("baseUrl", "apiBaseUrl")] {
+    for (source, target) in [
+        ("apiKey", "apiKey"),
+        ("model", "model"),
+        ("baseUrl", "apiBaseUrl"),
+    ] {
         if let Some(value) = settings
             .get(source)
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            merged.insert(target.to_string(), serde_json::Value::String(value.to_string()));
+            merged.insert(
+                target.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
     }
     Some(merged)
@@ -3048,7 +3199,7 @@ fn load_cline_provider_settings_at(path: &Path) -> Option<serde_json::Map<String
 ///
 /// Reads cline's native `providers.json` first and only falls back to the legacy
 /// `globalState.json` + `secrets.json` pair when that store holds nothing usable
-/// — the legacy pair is what a pre-3.x install (or an older codeg) left behind,
+/// — the legacy pair is what a pre-3.x install (or an older harness_studio) left behind,
 /// and surfacing it keeps those users' settings visible until their first save
 /// promotes them into the native store.
 fn load_cline_local_config_json() -> Option<String> {
@@ -3184,7 +3335,7 @@ fn persist_cline_local_config(config_patch_json: Option<&str>) -> Result<(), Acp
 /// be tested without a `$HOME`.
 ///
 /// Merge-preserving on both files: other providers keep their entries, and the
-/// edited provider keeps every `settings` field codeg does not own (`reasoning`,
+/// edited provider keeps every `settings` field harness_studio does not own (`reasoning`,
 /// `aws`, `headers`, an OAuth `auth` block, …) so a `cline auth` login survives
 /// a save from the panel.
 fn persist_cline_provider_settings_at(
@@ -3205,7 +3356,10 @@ fn persist_cline_provider_settings_at(
         .ok_or_else(|| AcpError::protocol("cline providers.json root must be an object"))?;
     // `version` is a zod literal — anything else and cline reads the file as empty.
     root_obj.insert("version".to_string(), serde_json::json!(1));
-    if !root_obj.get("modes").is_some_and(serde_json::Value::is_object) {
+    if !root_obj
+        .get("modes")
+        .is_some_and(serde_json::Value::is_object)
+    {
         root_obj.insert("modes".to_string(), serde_json::json!({}));
     }
     root_obj.insert(
@@ -3243,25 +3397,24 @@ fn persist_cline_provider_settings_at(
         "provider".to_string(),
         serde_json::Value::String(provider.to_string()),
     );
-    // Credentials for a sign-in provider belong to `cline auth`, not to codeg:
+    // Credentials for a sign-in provider belong to `cline auth`, not to harness_studio:
     // the panel offers no key or endpoint field for them, so there is no user
     // intent to write — and clearing what is not shown would log the user out.
-    // `tokenSource: "oauth"` is the same statement made by an entry codeg does
+    // `tokenSource: "oauth"` is the same statement made by an entry harness_studio does
     // not otherwise recognize, and is honoured for the same reason.
     let agent_managed_credential =
         cline_provider_is_agent_managed(provider) || token_source == "oauth";
-    for (key, value) in [
-        ("apiKey", api_key),
-        ("model", model),
-        ("baseUrl", base_url),
-    ] {
+    for (key, value) in [("apiKey", api_key), ("model", model), ("baseUrl", base_url)] {
         let credential = key != "model";
         match value {
             Some(value) => {
                 if credential && agent_managed_credential {
                     continue;
                 }
-                settings.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+                settings.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
             }
             None => {
                 if credential && agent_managed_credential {
@@ -3325,7 +3478,7 @@ fn persist_cline_models_catalog_at(
         .ok_or_else(|| AcpError::protocol("cline models.json `providers` must be an object"))?;
 
     // Keep any extra models the user registered through `cline auth`, but retire
-    // a previously-written entry for the model codeg is replacing.
+    // a previously-written entry for the model harness_studio is replacing.
     let mut models = providers
         .get(provider)
         .and_then(|entry| entry.get("models"))
@@ -3395,12 +3548,12 @@ fn load_codex_config_toml_raw() -> Option<String> {
 /// api-key mode, where no DB provider owns it.
 fn load_codex_model_catalog_source_raw() -> Option<String> {
     let home = codex_home_dir();
-    // 1. codeg's own source sidecar → an exact, byte-stable round-trip.
+    // 1. harness_studio's own source sidecar → an exact, byte-stable round-trip.
     if let Ok(raw) = fs::read_to_string(home.join(crate::acp::codex_model_catalog::SOURCE_REL)) {
         return Some(raw);
     }
     // 2. No sidecar: adopt a pre-existing `model_catalog_json` the user (or an
-    //    older codeg) wrote by hand, so the editor shows those models instead of
+    //    older harness_studio) wrote by hand, so the editor shows those models instead of
     //    appearing empty — and the next save reproduces them rather than dropping
     //    the reference.
     import_existing_codex_catalog_source(&home)
@@ -3425,7 +3578,7 @@ fn resolve_codex_home_relative(value: &str, codex_home: &Path) -> PathBuf {
 }
 
 /// Read a pre-existing `model_catalog_json` catalog referenced by
-/// `~/.codex/config.toml` and project it into codeg's compact source shape.
+/// `~/.codex/config.toml` and project it into harness_studio's compact source shape.
 /// Returns `None` when there is no reference, the file is missing/oversized/not
 /// valid JSON, or it yields no usable models.
 fn import_existing_codex_catalog_source(codex_home: &Path) -> Option<String> {
@@ -3556,7 +3709,7 @@ fn codex_config_projection_from_toml(raw_toml: &str) -> serde_json::Map<String, 
     }
 
     // `[features].default_mode_request_user_input` — the flag that lets codex
-    // call `request_user_input` outside Plan mode, i.e. whether codeg's
+    // call `request_user_input` outside Plan mode, i.e. whether harness_studio's
     // question cards can appear in an ordinary turn at all
     // (openai/codex#24750). Feature flags are resolved when the thread is
     // created, so flipping this only reaches a session that starts afterwards;
@@ -3685,7 +3838,7 @@ fn persist_codex_local_config(config_patch_json: Option<&str>) -> Result<(), Acp
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| "codeg".to_string());
+        .unwrap_or_else(|| "harness_studio".to_string());
     table.insert(
         "model_provider".to_string(),
         toml::Value::String(provider_name.clone()),
@@ -3717,8 +3870,11 @@ fn persist_codex_local_config(config_patch_json: Option<&str>) -> Result<(), Acp
             provider_table.remove("base_url");
         }
     }
-    if provider_name == "codeg" {
-        provider_table.insert("name".to_string(), toml::Value::String("codeg".to_string()));
+    if provider_name == "harness_studio" {
+        provider_table.insert(
+            "name".to_string(),
+            toml::Value::String("harness_studio".to_string()),
+        );
         provider_table.insert(
             "wire_api".to_string(),
             toml::Value::String("responses".to_string()),
@@ -3959,13 +4115,13 @@ fn is_absolute_config_path(value: &str) -> bool {
     }
 }
 
-/// Whether a `model_catalog_json` value points at the file codeg generates.
+/// Whether a `model_catalog_json` value points at the file harness_studio generates.
 /// Anything else is the user's OWN catalog — hand-written, or authored in the
-/// advanced config.toml editor — and codeg must never delete it. Resolved the
-/// way codex resolves the key, so an absolute path to codeg's own file counts
-/// as codeg-owned too. Unresolvable/foreign values answer `false`, which is the
+/// advanced config.toml editor — and harness_studio must never delete it. Resolved the
+/// way codex resolves the key, so an absolute path to harness_studio's own file counts
+/// as harness-studio-owned too. Unresolvable/foreign values answer `false`, which is the
 /// safe direction (leave the key alone).
-fn is_codeg_owned_catalog_ref(value: &str, codex_home: &Path) -> bool {
+fn is_harness_studio_owned_catalog_ref(value: &str, codex_home: &Path) -> bool {
     let value = value.trim();
     if value.is_empty() {
         return false;
@@ -3976,11 +4132,11 @@ fn is_codeg_owned_catalog_ref(value: &str, codex_home: &Path) -> bool {
 
 /// Remove the root `model_catalog_json` key from codex's config.toml, keeping
 /// comments and every other key byte-identical. Returns `None` (no write) when
-/// the key is absent **or** points at a catalog codeg does not own, so this is
+/// the key is absent **or** points at a catalog harness_studio does not own, so this is
 /// safe to call on every save.
 ///
 /// Pairs with [`crate::acp::codex_model_catalog::write_catalog_files`] returning
-/// `None`: codeg's generated files and the reference to them must appear and
+/// `None`: harness_studio's generated files and the reference to them must appear and
 /// vanish together — codex refuses to start on a dangling `model_catalog_json`.
 fn remove_codex_catalog_key(
     base_toml: &str,
@@ -3992,7 +4148,7 @@ fn remove_codex_catalog_key(
     let owned = doc
         .get("model_catalog_json")
         .and_then(|v| v.as_str())
-        .map(|v| is_codeg_owned_catalog_ref(v, codex_home))
+        .map(|v| is_harness_studio_owned_catalog_ref(v, codex_home))
         .unwrap_or(false);
     if !owned {
         return Ok(None);
@@ -4001,9 +4157,9 @@ fn remove_codex_catalog_key(
     Ok(Some(doc.to_string()))
 }
 
-/// Drop codeg's own `model_catalog_json` reference from the config.toml on disk,
+/// Drop harness_studio's own `model_catalog_json` reference from the config.toml on disk,
 /// if it carries one. Reads fresh so it also cleans up a key written by an
-/// earlier codeg version or by another window since the panel opened.
+/// earlier harness_studio version or by another window since the panel opened.
 fn drop_codex_catalog_reference() -> Result<(), AcpError> {
     let base = read_codex_config_or_empty()?;
     if let Some(next) = remove_codex_catalog_key(&base, &codex_home_dir())? {
@@ -4015,8 +4171,8 @@ fn drop_codex_catalog_reference() -> Result<(), AcpError> {
 /// What [`resync_codex_generated_catalog_at`] did.
 #[derive(Debug, PartialEq)]
 enum CodexCatalogResync {
-    /// No catalog codeg can regenerate: config.toml references none, references
-    /// the user's own, or codeg's intent sidecar is missing.
+    /// No catalog harness_studio can regenerate: config.toml references none, references
+    /// the user's own, or harness_studio's intent sidecar is missing.
     NotOwned,
     /// The generated catalog was re-expanded against the new official list.
     Rewritten,
@@ -4025,17 +4181,17 @@ enum CodexCatalogResync {
     Released,
 }
 
-/// Re-expand codeg's generated codex catalog (`model_catalog_json`) against
+/// Re-expand harness_studio's generated codex catalog (`model_catalog_json`) against
 /// `snapshot`, the official catalog of the codex that is now installed.
 ///
-/// The key is a whole-table replace that codeg only rewrites when the model
+/// The key is a whole-table replace that harness_studio only rewrites when the model
 /// settings are saved, so a codex upgrade that ships new official models left
 /// every user with custom models or removed officials on the OLD table: codex
 /// 0.159.1 (codex-acp 2.0.1) made GPT-6.1 Sol its default and they would not
 /// see it until they happened to re-save. Expanding the stored intent (the
 /// source sidecar) against the new catalog is exactly what that re-save writes.
 ///
-/// Only a catalog codeg owns is touched — config.toml must reference codeg's
+/// Only a catalog harness_studio owns is touched — config.toml must reference harness_studio's
 /// own file, and the sidecar must exist. A catalog without a sidecar is NOT
 /// re-imported: read against the new list, every newly shipped official would
 /// look like one the user removed. The root `model` is left alone; the user's
@@ -4062,7 +4218,7 @@ fn resync_codex_generated_catalog_at(
         .as_ref()
         .and_then(|doc| doc.get("model_catalog_json"))
         .and_then(toml::Value::as_str)
-        .is_some_and(|value| is_codeg_owned_catalog_ref(value, codex_home));
+        .is_some_and(|value| is_harness_studio_owned_catalog_ref(value, codex_home));
     if !owned {
         return Ok(CodexCatalogResync::NotOwned);
     }
@@ -4099,7 +4255,7 @@ fn resync_codex_generated_catalog_at(
 }
 
 /// After codex-acp is (re)installed: refresh the cached official catalog from
-/// the codex it now drives, then bring codeg's generated catalog in line (see
+/// the codex it now drives, then bring harness_studio's generated catalog in line (see
 /// [`resync_codex_generated_catalog_at`]). Only a LIVE catalog is used — the
 /// stale cache or the compiled-in snapshot would just rewrite the old table.
 /// Best-effort: an install never fails over this.
@@ -4362,7 +4518,7 @@ fn parse_grok_settings(raw_toml: &str) -> GrokSettings {
             .as_integer()
     };
 
-    // The codeg-managed custom model = `[models].default`, but only when a
+    // The harness-studio-managed custom model = `[models].default`, but only when a
     // matching `[model.<default>]` table exists — a hand-set stock default that
     // has no `[model.*]` block is left untracked (the panel shows it empty).
     let custom_model_id = get("models", "default").filter(|id| {
@@ -4407,7 +4563,7 @@ fn parse_grok_settings(raw_toml: &str) -> GrokSettings {
 }
 
 /// grok's real `--permission-mode` enum (docs.x.ai / verified against the
-/// 0.2.99 binary). codeg historically wrote a codeg-invented
+/// 0.2.99 binary). harness_studio historically wrote a harness-studio-invented
 /// `permission_mode = "always-approve"` / `"ask"` into `~/.grok/config.toml`,
 /// neither of which grok accepts — `grok --permission-mode always-approve`
 /// errors out. `migrate_grok_permission_mode` maps those legacy markers onto the
@@ -4435,8 +4591,8 @@ fn migrate_grok_permission_mode(value: &str) -> &str {
 
 /// Pure helper: the `--permission-mode` value this Grok `config.toml` should hand
 /// the ACP launch, or `None` to pass no flag. `default` (grok's own default —
-/// ACP permission requests flow to codeg's UI) and unset/unrecognized values map
-/// to `None`, preserving the historical "ask" behaviour where codeg prompts.
+/// ACP permission requests flow to harness_studio's UI) and unset/unrecognized values map
+/// to `None`, preserving the historical "ask" behaviour where harness_studio prompts.
 fn grok_config_permission_mode(config_toml: &str) -> Option<String> {
     parse_grok_settings(config_toml)
         .permission_mode
@@ -4446,7 +4602,7 @@ fn grok_config_permission_mode(config_toml: &str) -> Option<String> {
 /// The `--permission-mode <value>` Grok's ACP launch should carry, read from the
 /// global `~/.grok/config.toml` `[ui].permission_mode` (legacy-migrated by
 /// `parse_grok_settings`). Best-effort: a missing/unreadable/`default` config
-/// yields `None`, so the default preserves codeg's ability to prompt for approvals.
+/// yields `None`, so the default preserves harness_studio's ability to prompt for approvals.
 pub(crate) fn grok_launch_permission_mode() -> Option<String> {
     load_grok_config_toml_raw().and_then(|raw| grok_config_permission_mode(&raw))
 }
@@ -4461,7 +4617,7 @@ pub(crate) fn grok_launch_permission_mode() -> Option<String> {
 /// `runTurn`, taken from an `AgentMode` seeded once per session from
 /// `INITIAL_AGENT_MODE` (default `agent` = `on-request` + `workspace-write`).
 /// So `approval_policy` / `sandbox_mode` in `config.toml` are **dead** for any
-/// codeg session — chat and work task alike — even though codeg's Codex panel
+/// harness_studio session — chat and work task alike — even though harness_studio's Codex panel
 /// reads, writes and fingerprints them (#442). This env var is the only
 /// launch-time channel that makes the user's own config mean anything, exactly
 /// like [`grok_launch_permission_mode`] above.
@@ -4529,7 +4685,7 @@ pub(crate) fn grok_launch_permission_mode() -> Option<String> {
 ///   trade.
 ///
 /// So the reviewer change is treated as what it is: an upstream default that
-/// every ACP client now inherits. codeg DISCLOSES it in the Codex panel, and the
+/// every ACP client now inherits. harness_studio DISCLOSES it in the Codex panel, and the
 /// composer's approval-preset selector remains the first-class, per-session
 /// control for a user who wants to adjudicate directly.
 ///
@@ -4573,10 +4729,10 @@ fn codex_initial_agent_mode(settings: &CodexSandboxSettings) -> Option<&'static 
     // codex runs that read-only, but the root keys alone say "full access, no
     // approvals" — and because codex-acp re-sends the preset's policy on every
     // turn, injecting `agent-full-access` here would actually GRANT it. Decline
-    // instead. codeg cannot resolve the profile, so it must not guess: this
+    // instead. harness_studio cannot resolve the profile, so it must not guess: this
     // leaves codex-acp's own default preset, i.e. exactly the behavior that
     // existed before this mapping (the residual gap between that default and a
-    // stricter profile is pre-existing and not something codeg can close without
+    // stricter profile is pre-existing and not something harness_studio can close without
     // implementing codex's whole `[permissions]` resolution).
     if settings.shadowed_by_default_permissions {
         return None;
@@ -4660,7 +4816,7 @@ fn apply_grok_structured_config(
     Ok(doc.to_string())
 }
 
-/// Write / rename / remove the codeg-managed custom Grok model. The managed block
+/// Write / rename / remove the harness-studio-managed custom Grok model. The managed block
 /// is anchored as "the `[model.<id>]` whose id equals `[models].default`":
 ///  - a non-empty `custom_model_id` writes (or renames the previous managed block
 ///    to) `[model.<id>]` and points `[models].default` at it;
@@ -4676,7 +4832,7 @@ fn apply_grok_custom_model(
 ) -> Result<(), AcpError> {
     // Previously-managed id = current `[models].default`, but only when a matching
     // `[model.<default>]` table exists (so a hand-set stock default is never
-    // mistaken for a codeg block and removed).
+    // mistaken for a harness_studio block and removed).
     let prev_id = doc
         .get("models")
         .and_then(|m| m.as_table_like())
@@ -4703,8 +4859,16 @@ fn apply_grok_custom_model(
                 let tbl = grok_model_table_mut(doc, id)?;
                 // `model` is the id sent to the API; always kept in sync with <id>.
                 grok_tbl_set_str(tbl, "model", Some(id));
-                grok_tbl_set_str(tbl, "base_url", trimmed_opt(settings.custom_base_url.as_deref()));
-                grok_tbl_set_str(tbl, "api_key", trimmed_opt(settings.custom_api_key.as_deref()));
+                grok_tbl_set_str(
+                    tbl,
+                    "base_url",
+                    trimmed_opt(settings.custom_base_url.as_deref()),
+                );
+                grok_tbl_set_str(
+                    tbl,
+                    "api_key",
+                    trimmed_opt(settings.custom_api_key.as_deref()),
+                );
                 grok_tbl_set_str(
                     tbl,
                     "api_backend",
@@ -4847,7 +5011,9 @@ fn set_or_remove_grok_key(
             }
         }
         None => {
-            if let Some(table) = doc.get_mut(section).and_then(|item| item.as_table_like_mut())
+            if let Some(table) = doc
+                .get_mut(section)
+                .and_then(|item| item.as_table_like_mut())
             {
                 table.remove(key);
             }
@@ -4881,7 +5047,9 @@ fn set_or_remove_grok_number(
             }
         }
         None => {
-            if let Some(table) = doc.get_mut(section).and_then(|item| item.as_table_like_mut())
+            if let Some(table) = doc
+                .get_mut(section)
+                .and_then(|item| item.as_table_like_mut())
             {
                 table.remove(key);
             }
@@ -4925,41 +5093,41 @@ fn persist_opencode_auth_json(raw_auth: &str) -> Result<(), AcpError> {
 // required`. The only advertised ACP auth method is a terminal device-code login
 // (`kimi acp --login`), which requires a Kimi *subscription* account.
 //
-// To support plain API-key users, codeg therefore manages BOTH halves:
-//   1. `config.toml` — a codeg-managed `[providers."codeg"]` + `[models."codeg-managed"]`
+// To support plain API-key users, harness_studio therefore manages BOTH halves:
+//   1. `config.toml` — a harness-studio-managed `[providers."harness_studio"]` + `[models."harness-studio-managed"]`
 //      + `default_model` block that ROUTES INFERENCE to the user's API key
 //      (any of the six native interface types: kimi / openai / openai_responses /
 //      anthropic / google-genai / vertexai).
-//   2. `credentials/kimi-code.json` — a synthetic gate token codeg seeds so the
+//   2. `credentials/kimi-code.json` — a synthetic gate token harness_studio seeds so the
 //      ACP session opens. It is purely local: because `default_model` points at
 //      the API-key provider, the managed/OAuth endpoint is never called and this
-//      token is never transmitted. It carries a `_codeg_synthetic` marker so we
+//      token is never transmitted. It carries a `_harness_studio_synthetic` marker so we
 //      only ever remove OUR token, never a real login the user performed.
 //
-// The codeg-managed block is keyed by the fixed names `codeg` / `codeg-managed`
+// The harness-studio-managed block is keyed by the fixed names `harness_studio` / `harness-studio-managed`
 // so it is recognizable and removable without disturbing any provider/model the
 // user added by hand. The raw config.toml editor is the comment/format escape
 // hatch. A stale `KIMI_MODEL_*` env override would silently win over config.toml,
 // so every save also clears it.
 // ---------------------------------------------------------------------------
 
-const KIMI_MANAGED_PROVIDER: &str = "codeg";
-const KIMI_MANAGED_MODEL_ALIAS: &str = "codeg-managed";
+const KIMI_MANAGED_PROVIDER: &str = "harness_studio";
+const KIMI_MANAGED_MODEL_ALIAS: &str = "harness-studio-managed";
 const KIMI_MODEL_API_KEY_ENV: &str = "KIMI_MODEL_API_KEY";
 const KIMI_MODEL_BASE_URL_ENV: &str = "KIMI_MODEL_BASE_URL";
 const KIMI_MODEL_NAME_ENV: &str = "KIMI_MODEL_NAME";
-/// Sentinel `access_token` value (and `_codeg_synthetic` marker) identifying the
-/// gate token codeg seeds, so we never clobber a real OAuth login.
-const KIMI_SYNTHETIC_TOKEN_ACCESS: &str = "codeg-local-gate";
+/// Sentinel `access_token` value (and `_harness_studio_synthetic` marker) identifying the
+/// gate token harness_studio seeds, so we never clobber a real OAuth login.
+const KIMI_SYNTHETIC_TOKEN_ACCESS: &str = "harness-studio-local-gate";
 /// Fallback context window for the managed model. Kimi's config schema **requires**
 /// `[models.<alias>].max_context_size` to be a positive integer — omitting it makes
-/// kimi discard the whole model block ("Ignored invalid config … models.codeg-managed"),
+/// kimi discard the whole model block ("Ignored invalid config … models.harness-studio-managed"),
 /// which leaves `default_model` dangling and every prompt ends with no reply. So we
 /// always write one, defaulting to the kimi-k2 256K window when the user leaves it blank.
 ///
 /// This deliberately does NOT track `parsers::infer_context_window_max_tokens`, which
 /// puts `kimi-k3` on a 1M lane. The two answer different questions: that one reads a
-/// past session's model id to draw a gauge, while this one is the budget codeg DECLARES
+/// past session's model id to draw a gauge, while this one is the budget harness_studio DECLARES
 /// for a bring-your-own provider whose model is unknown — the managed block routes to
 /// any of the six interface types, so the model behind it may be GPT or Claude, not a
 /// Kimi model at all. Kimi spends the declared number rather than checking it (a live
@@ -5002,13 +5170,13 @@ fn kimi_provider_key_env_var(interface_type: &str) -> Option<&'static str> {
     }
 }
 
-/// The resolved codeg-managed provider/model block to write into config.toml.
+/// The resolved harness-studio-managed provider/model block to write into config.toml.
 struct KimiManagedSpec {
     interface_type: String,
     base_url: Option<String>,
     /// Direct `api_key` field (when the user picks "direct key" auth).
     api_key: Option<String>,
-    /// `[providers.codeg.env]` sub-table entries — the env-sub-table API key, or
+    /// `[providers.harness_studio.env]` sub-table entries — the env-sub-table API key, or
     /// Vertex's `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`.
     env: BTreeMap<String, String>,
     model: String,
@@ -5040,8 +5208,8 @@ const KIMI_CAPABILITY_THINKING: &str = "thinking";
 /// Same, but kimi drops the `Off` row: the model cannot stop reasoning.
 const KIMI_CAPABILITY_ALWAYS_THINKING: &str = "always_thinking";
 
-/// Upsert (`Some`) or remove (`None`) the codeg-managed `[providers.codeg]` +
-/// `[models.codeg-managed]` block in a parsed config.toml document, preserving
+/// Upsert (`Some`) or remove (`None`) the harness-studio-managed `[providers.harness_studio]` +
+/// `[models.harness-studio-managed]` block in a parsed config.toml document, preserving
 /// every other section the user authored. Removal also resets `default_model`
 /// only when it points at our managed alias.
 fn apply_kimi_managed_block(
@@ -5065,10 +5233,20 @@ fn apply_kimi_managed_block(
                 "type".to_string(),
                 toml::Value::String(spec.interface_type.clone()),
             );
-            if let Some(url) = spec.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(url) = spec
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 provider_table.insert("base_url".to_string(), toml::Value::String(url.to_string()));
             }
-            if let Some(key) = spec.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(key) = spec
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 provider_table.insert("api_key".to_string(), toml::Value::String(key.to_string()));
             }
             if !spec.env.is_empty() {
@@ -5153,8 +5331,9 @@ fn apply_kimi_managed_block(
             );
         }
         None => {
-            let providers_empty = if let Some(providers) =
-                table.get_mut("providers").and_then(toml::Value::as_table_mut)
+            let providers_empty = if let Some(providers) = table
+                .get_mut("providers")
+                .and_then(toml::Value::as_table_mut)
             {
                 providers.remove(KIMI_MANAGED_PROVIDER);
                 providers.is_empty()
@@ -5164,18 +5343,18 @@ fn apply_kimi_managed_block(
             if providers_empty {
                 table.remove("providers");
             }
-            let models_empty = if let Some(models) =
-                table.get_mut("models").and_then(toml::Value::as_table_mut)
-            {
-                models.remove(KIMI_MANAGED_MODEL_ALIAS);
-                models.is_empty()
-            } else {
-                false
-            };
+            let models_empty =
+                if let Some(models) = table.get_mut("models").and_then(toml::Value::as_table_mut) {
+                    models.remove(KIMI_MANAGED_MODEL_ALIAS);
+                    models.is_empty()
+                } else {
+                    false
+                };
             if models_empty {
                 table.remove("models");
             }
-            if table.get("default_model").and_then(toml::Value::as_str) == Some(KIMI_MANAGED_MODEL_ALIAS)
+            if table.get("default_model").and_then(toml::Value::as_str)
+                == Some(KIMI_MANAGED_MODEL_ALIAS)
             {
                 table.remove("default_model");
             }
@@ -5185,7 +5364,7 @@ fn apply_kimi_managed_block(
 }
 
 /// Read-modify-write `config.toml`, upserting (`Some`) or clearing (`None`) the
-/// codeg-managed block. A clear on a non-existent file is a no-op (never creates
+/// harness-studio-managed block. A clear on a non-existent file is a no-op (never creates
 /// an empty file). Reuses the existing `toml` crate: data in other sections is
 /// preserved; comments/formatting are not (the raw editor covers that).
 fn mutate_kimi_config_toml(spec: Option<&KimiManagedSpec>) -> Result<(), AcpError> {
@@ -5225,15 +5404,17 @@ fn read_kimi_token() -> Option<serde_json::Value> {
     read_kimi_token_at(&kimi_code_credentials_token_path())
 }
 
-/// Whether a token document is codeg's synthetic gate token (vs a real OAuth
+/// Whether a token document is harness_studio's synthetic gate token (vs a real OAuth
 /// login the user performed via `kimi login`). Matches either the sentinel
-/// `access_token` or the explicit `_codeg_synthetic` marker.
+/// `access_token` or the explicit `_harness_studio_synthetic` marker.
 fn kimi_token_is_synthetic(token: &serde_json::Value) -> bool {
     token
-        .get("_codeg_synthetic")
+        .get("_harness_studio_synthetic")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
-        || token.get("access_token").and_then(serde_json::Value::as_str)
+        || token
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
             == Some(KIMI_SYNTHETIC_TOKEN_ACCESS)
 }
 
@@ -5249,17 +5430,19 @@ fn kimi_token_has_access(token: &serde_json::Value) -> bool {
 
 /// Whether any usable credential (real or synthetic) is present.
 fn kimi_credential_present() -> bool {
-    read_kimi_token().map(|t| kimi_token_has_access(&t)).unwrap_or(false)
+    read_kimi_token()
+        .map(|t| kimi_token_has_access(&t))
+        .unwrap_or(false)
 }
 
-/// Whether the present credential is codeg's synthetic gate token.
+/// Whether the present credential is harness_studio's synthetic gate token.
 fn kimi_credential_is_synthetic() -> bool {
     read_kimi_token()
         .map(|t| kimi_token_is_synthetic(&t))
         .unwrap_or(false)
 }
 
-/// Seed codeg's synthetic gate token at `path` so `kimi acp` treats the session
+/// Seed harness_studio's synthetic gate token at `path` so `kimi acp` treats the session
 /// as authenticated. No-op (preserves) when a REAL OAuth login token is already
 /// present — that already satisfies the gate and must never be clobbered.
 fn seed_kimi_synthetic_credential_at(path: &Path) -> Result<(), AcpError> {
@@ -5275,7 +5458,7 @@ fn seed_kimi_synthetic_credential_at(path: &Path) -> Result<(), AcpError> {
         "expires_in": 9_999_999i64,
         "scope": "",
         "token_type": "Bearer",
-        "_codeg_synthetic": true,
+        "_harness_studio_synthetic": true,
     });
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -5293,7 +5476,7 @@ fn seed_kimi_synthetic_credential() -> Result<(), AcpError> {
     seed_kimi_synthetic_credential_at(&kimi_code_credentials_token_path())
 }
 
-/// Remove the gate token at `path` ONLY when it is codeg's synthetic one —
+/// Remove the gate token at `path` ONLY when it is harness_studio's synthetic one —
 /// leaving any real OAuth login the user performed untouched.
 fn remove_kimi_synthetic_credential_if_ours_at(path: &Path) -> Result<(), AcpError> {
     match read_kimi_token_at(path) {
@@ -5307,7 +5490,7 @@ fn remove_kimi_synthetic_credential_if_ours() -> Result<(), AcpError> {
     remove_kimi_synthetic_credential_if_ours_at(&kimi_code_credentials_token_path())
 }
 
-/// Project the codeg-managed config.toml block into a flat JSON object for the
+/// Project the harness-studio-managed config.toml block into a flat JSON object for the
 /// settings panel, plus the raw file text for the advanced editor. Uses keys
 /// (`baseUrl` / `key` / `modelId`, never `apiBaseUrl` / `apiKey` / `model` /
 /// `env`) that do NOT match `AgentRuntimeConfig`, so `build_runtime_env_from_setting`
@@ -5347,33 +5530,48 @@ fn project_kimi_managed_config(value: &toml::Value) -> serde_json::Map<String, s
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            merged.insert("key".to_string(), serde_json::Value::String(key.to_string()));
+            merged.insert(
+                "key".to_string(),
+                serde_json::Value::String(key.to_string()),
+            );
             merged.insert(
                 "authType".to_string(),
                 serde_json::Value::String("api_key".to_string()),
             );
         }
         if let Some(env) = provider.get("env").and_then(toml::Value::as_table) {
-            if let Some(project) = env.get("GOOGLE_CLOUD_PROJECT").and_then(toml::Value::as_str) {
+            if let Some(project) = env
+                .get("GOOGLE_CLOUD_PROJECT")
+                .and_then(toml::Value::as_str)
+            {
                 merged.insert(
                     "vertexProject".to_string(),
                     serde_json::Value::String(project.to_string()),
                 );
             }
-            if let Some(location) = env.get("GOOGLE_CLOUD_LOCATION").and_then(toml::Value::as_str) {
+            if let Some(location) = env
+                .get("GOOGLE_CLOUD_LOCATION")
+                .and_then(toml::Value::as_str)
+            {
                 merged.insert(
                     "vertexLocation".to_string(),
                     serde_json::Value::String(location.to_string()),
                 );
             }
-            if let Some(var) = interface_type.as_deref().and_then(kimi_provider_key_env_var) {
+            if let Some(var) = interface_type
+                .as_deref()
+                .and_then(kimi_provider_key_env_var)
+            {
                 if let Some(key) = env
                     .get(var)
                     .and_then(toml::Value::as_str)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    merged.insert("key".to_string(), serde_json::Value::String(key.to_string()));
+                    merged.insert(
+                        "key".to_string(),
+                        serde_json::Value::String(key.to_string()),
+                    );
                     merged.insert(
                         "authType".to_string(),
                         serde_json::Value::String("env".to_string()),
@@ -5398,7 +5596,10 @@ fn project_kimi_managed_config(value: &toml::Value) -> serde_json::Map<String, s
                 serde_json::Value::String(model_id.to_string()),
             );
         }
-        if let Some(ctx) = model.get("max_context_size").and_then(toml::Value::as_integer) {
+        if let Some(ctx) = model
+            .get("max_context_size")
+            .and_then(toml::Value::as_integer)
+        {
             merged.insert(
                 "maxContextSize".to_string(),
                 serde_json::Value::Number(ctx.into()),
@@ -5443,22 +5644,31 @@ fn project_kimi_managed_config(value: &toml::Value) -> serde_json::Map<String, s
     }
 
     let has_managed = merged.contains_key("interfaceType");
-    merged.insert("hasManagedBlock".to_string(), serde_json::Value::Bool(has_managed));
+    merged.insert(
+        "hasManagedBlock".to_string(),
+        serde_json::Value::Bool(has_managed),
+    );
     merged
 }
 
 fn load_kimi_code_config_json() -> Option<String> {
     let raw = fs::read_to_string(kimi_code_config_toml_path()).ok();
-    let mut merged = match raw.as_deref().and_then(|text| text.parse::<toml::Value>().ok()) {
+    let mut merged = match raw
+        .as_deref()
+        .and_then(|text| text.parse::<toml::Value>().ok())
+    {
         Some(value) => project_kimi_managed_config(&value),
         None => {
             let mut m = serde_json::Map::new();
-            m.insert("hasManagedBlock".to_string(), serde_json::Value::Bool(false));
+            m.insert(
+                "hasManagedBlock".to_string(),
+                serde_json::Value::Bool(false),
+            );
             m
         }
     };
     // Surface the gate-credential state so the panel can show whether `kimi acp`
-    // is currently authenticated and whether that came from codeg's synthetic
+    // is currently authenticated and whether that came from harness_studio's synthetic
     // token or a real OAuth login.
     merged.insert(
         "credentialPresent".to_string(),
@@ -5475,7 +5685,7 @@ fn load_kimi_code_config_json() -> Option<String> {
 }
 
 /// Structured Kimi Code config update from the settings UI. `mode` is one of:
-/// `apikey` — write the codeg-managed `config.toml` provider/model block AND seed
+/// `apikey` — write the harness-studio-managed `config.toml` provider/model block AND seed
 /// the synthetic gate token, so the API key actually authenticates `kimi acp`;
 /// `login` — clear the managed block + remove our synthetic token so a real OAuth
 /// login governs; `raw` — write a verbatim config.toml then seed the gate token.
@@ -5508,7 +5718,11 @@ pub(crate) struct KimiCodeConfigUpdate {
 
 /// Validate + resolve a `native`-mode update into the managed block to write.
 fn build_kimi_managed_spec(update: &KimiCodeConfigUpdate) -> Result<KimiManagedSpec, AcpError> {
-    let interface_type = update.interface_type.as_deref().map(str::trim).unwrap_or("");
+    let interface_type = update
+        .interface_type
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
     if !KIMI_INTERFACE_TYPES.contains(&interface_type) {
         return Err(AcpError::protocol(format!(
             "unknown kimi interface type: '{interface_type}'"
@@ -5529,7 +5743,9 @@ fn build_kimi_managed_spec(update: &KimiCodeConfigUpdate) -> Result<KimiManagedS
         .map(str::to_string);
     if let Some(url) = &base_url {
         if url.contains(['\n', '\r']) {
-            return Err(AcpError::protocol("kimi base url must not contain newlines"));
+            return Err(AcpError::protocol(
+                "kimi base url must not contain newlines",
+            ));
         }
     }
 
@@ -5643,7 +5859,7 @@ fn build_kimi_managed_spec(update: &KimiCodeConfigUpdate) -> Result<KimiManagedS
 /// Clear any `KIMI_MODEL_*` env override from the DB `env_json`, preserving every
 /// other env key and the agent's enabled/provider state. `kimi acp` reads that
 /// env family BEFORE config.toml, so a stale entry would silently override the
-/// codeg-managed provider; every save clears it to keep config.toml authoritative.
+/// harness-studio-managed provider; every save clears it to keep config.toml authoritative.
 /// Ensures the settings row exists first. No-op fast path when nothing to clear.
 async fn clear_kimi_model_env(db: &AppDatabase) -> Result<(), AcpError> {
     let default = agent_setting_service::AgentDefaultInput {
@@ -5720,7 +5936,9 @@ pub(crate) async fn acp_update_kimi_code_config_core(
             (FileAction::Raw(raw.to_string()), CredentialAction::Seed)
         }
         other => {
-            return Err(AcpError::protocol(format!("unknown kimi config mode: '{other}'")));
+            return Err(AcpError::protocol(format!(
+                "unknown kimi config mode: '{other}'"
+            )));
         }
     };
 
@@ -5832,12 +6050,12 @@ pub(crate) async fn acp_fetch_kimi_models_core(
 // model selection from `~/.pi/agent/settings.json` (`defaultProvider`,
 // `defaultModel`, `defaultThinkingLevel` — plain strings) and its API keys from
 // `~/.pi/agent/auth.json` (`{ "<provider>": { "type": "api_key", "key": ... } }`).
-// codeg manages both NATIVE files directly (merge-writes that preserve every
+// harness_studio manages both NATIVE files directly (merge-writes that preserve every
 // other key), mirroring how it manages Codex's `auth.json`/`config.toml`. The
 // agent dir honors `PI_CODING_AGENT_DIR` so a custom pi install can be targeted.
 // ---------------------------------------------------------------------------
 
-/// Resolve pi's coding-agent dir from codeg's own environment:
+/// Resolve pi's coding-agent dir from harness_studio's own environment:
 /// `PI_CODING_AGENT_DIR` through pi's tilde rule, else `~/.pi/agent`. The same
 /// resolver the history parser uses, so the two cannot drift.
 pub(crate) fn pi_agent_dir() -> PathBuf {
@@ -5871,13 +6089,13 @@ fn pi_child_home(runtime_env: &BTreeMap<String, String>) -> PathBuf {
     pi_child_home_from(runtime_env, std::env::var_os(CHILD_HOME_KEY))
 }
 
-/// [`pi_child_home`] with codeg's own home variable (what the child inherits
+/// [`pi_child_home`] with harness_studio's own home variable (what the child inherits
 /// when the launch leaves it alone) handed in.
 ///
 /// Node takes `HOME` (`USERPROFILE` on Windows) verbatim whenever the child HAS
 /// the variable — relative or even empty, which pi then resolves against its
 /// cwd, the workspace — and asks the OS for the account's home only when it has
-/// none: the launch removed it (a blank launch value) or codeg never had one.
+/// none: the launch removed it (a blank launch value) or harness_studio never had one.
 fn pi_child_home_from(
     runtime_env: &BTreeMap<String, String>,
     inherited: Option<std::ffi::OsString>,
@@ -5938,16 +6156,16 @@ fn account_home_dir() -> Option<PathBuf> {
 /// before a relative value is anchored (see [`pi_agent_dir_in_workspace`]).
 ///
 /// Follows the spawn chain rather than one map: a non-empty `runtime_env` value
-/// replaces codeg's, an exactly-empty one is `env_remove`d (pi then falls back
-/// to its default instead of inheriting codeg's value), and an absent key
-/// inherits codeg's own. `~` and the default expand against the child's home
+/// replaces harness_studio's, an exactly-empty one is `env_remove`d (pi then falls back
+/// to its default instead of inheriting harness_studio's value), and an absent key
+/// inherits harness_studio's own. `~` and the default expand against the child's home
 /// ([`pi_child_home`]). Never trimmed: pi reads the raw value (`normalizePath`
 /// expands `~` and nothing else).
 fn pi_agent_dir_for_env(runtime_env: &BTreeMap<String, String>) -> PathBuf {
     pi_agent_dir_for_child(runtime_env, std::env::var_os("PI_CODING_AGENT_DIR"))
 }
 
-/// [`pi_agent_dir_for_env`] with codeg's own `PI_CODING_AGENT_DIR` (what the
+/// [`pi_agent_dir_for_env`] with harness_studio's own `PI_CODING_AGENT_DIR` (what the
 /// child inherits when the launch leaves the key alone) handed in.
 fn pi_agent_dir_for_child(
     runtime_env: &BTreeMap<String, String>,
@@ -5964,7 +6182,7 @@ fn pi_agent_dir_for_child(
 /// [`pi_agent_dir_for_env`] anchored where pi anchors it: pi-acp starts pi with
 /// the session's workspace as its cwd, so a relative `PI_CODING_AGENT_DIR` names
 /// a directory inside THAT workspace — and the `trust.json` pi consults there
-/// is one the repository itself can ship. Reading it relative to codeg's own cwd
+/// is one the repository itself can ship. Reading it relative to harness_studio's own cwd
 /// instead would let such a grant slip past the launch gate unseen.
 fn pi_agent_dir_in_workspace(runtime_env: &BTreeMap<String, String>, workspace: &Path) -> PathBuf {
     let dir = pi_agent_dir_for_env(runtime_env);
@@ -5976,7 +6194,7 @@ fn pi_agent_dir_in_workspace(runtime_env: &BTreeMap<String, String>, workspace: 
 }
 
 // NOTE: the per-agent `env_json` key `PI_ACP_TRUST_WORKSPACE` used to gate
-// launch-time workspace-trust seeding here. codeg no longer seeds trust at all —
+// launch-time workspace-trust seeding here. harness_studio no longer seeds trust at all —
 // project trust is an explicit per-workspace decision now — so nothing on the
 // Rust side reads that key. The frontend still lists it as a reserved pi env key
 // so a `"0"` persisted by an older build stays out of the raw env editor instead
@@ -5988,7 +6206,7 @@ fn pi_agent_dir_in_workspace(runtime_env: &BTreeMap<String, String>, workspace: 
 ///
 /// This list is a mirror of another project's constant, so it can drift if pi
 /// adds a resource kind. It fails safe in both directions: under-detecting only
-/// means codeg stays quiet about resources pi would ignore anyway (pi's own
+/// means harness_studio stays quiet about resources pi would ignore anyway (pi's own
 /// non-interactive default is "don't load"), and over-detecting only costs one
 /// extra prompt. Neither direction can load a resource without the user's word.
 const PI_TRUST_REQUIRING_CONFIG_RESOURCES: [&str; 7] = [
@@ -6125,20 +6343,20 @@ pub struct PiProjectTrustState {
     pub decided_at: Option<String>,
     /// Absolute path of pi's `trust.json`, so the UI can point at the real file.
     pub trust_file: String,
-    /// Whether the user has been shown, in this codeg, that this folder is
+    /// Whether the user has been shown, in this harness_studio, that this folder is
     /// trusted. A grant with `acknowledged == false` is one nobody here has
     /// confirmed — most likely written by the build that auto-trusted every
     /// opened folder — and blocks the launch until it is answered.
     pub acknowledged: bool,
 }
 
-/// codeg's own record of which trusted workspaces the user has confirmed.
+/// harness_studio's own record of which trusted workspaces the user has confirmed.
 ///
 /// Deliberately NOT stored in pi's `trust.json`: that file is pi's, has no field
 /// for this, and its entries carry no provenance — which is the whole problem.
-/// A flat `{ "<canonical dir>": true }` map in codeg's own home.
+/// A flat `{ "<canonical dir>": true }` map in harness_studio's own home.
 fn pi_trust_ack_path() -> PathBuf {
-    crate::paths::codeg_home_dir().join("pi-project-trust-ack.json")
+    crate::paths::harness_studio_home_dir().join("pi-project-trust-ack.json")
 }
 
 fn pi_trust_is_acknowledged_at(ack_file: &Path, workspace: &str) -> bool {
@@ -6176,7 +6394,7 @@ pub struct PiTrustEntry {
 
 /// The per-agent env the launch path hands pi — where a BYO
 /// `PI_CODING_AGENT_DIR` lives. The override only ever lands in the per-agent
-/// env, never codeg's own process env, so reading `std::env` alone would
+/// env, never harness_studio's own process env, so reading `std::env` alone would
 /// silently target the wrong agent dir for BYO-pi users.
 ///
 /// Fails closed: when the setting cannot be read, guessing "no override" would
@@ -6187,7 +6405,7 @@ async fn pi_runtime_env_from_db(db: &AppDatabase) -> Result<BTreeMap<String, Str
         .await
         .map_err(|error| {
             AcpError::protocol(format!(
-                "Cannot read Pi agent settings from the Codeg database: {error}. Check database access and retry; Pi profile files were not changed."
+                "Cannot read Pi agent settings from the harness studio database: {error}. Check database access and retry; Pi profile files were not changed."
             ))
         })?;
     let local_config_json = load_agent_local_config_json(AgentType::Pi);
@@ -6201,7 +6419,7 @@ async fn pi_runtime_env_from_db(db: &AppDatabase) -> Result<BTreeMap<String, Str
 /// Settings have no workspace, and a relative agent dir names a different
 /// directory in every workspace pi runs in (see [`pi_agent_dir_in_workspace`]),
 /// so there is no single profile they could read or write. Refuse rather than
-/// resolve it against codeg's own cwd, which no pi process ever uses.
+/// resolve it against harness_studio's own cwd, which no pi process ever uses.
 fn pi_settings_dir_checked(pi_dir: PathBuf) -> Result<PathBuf, AcpError> {
     if pi_dir.is_absolute() {
         Ok(pi_dir)
@@ -6275,7 +6493,7 @@ pub(crate) fn pi_project_trust_launch_block(
     };
     Some(format!(
         "pi is allowed to load this project's own files from {}, which lets the repository run its .pi/extensions at startup.{via} \
-         An earlier version of codeg granted this automatically when a folder was opened, so you may never have been asked. \
+         An earlier version of harness_studio granted this automatically when a folder was opened, so you may never have been asked. \
          Review it in the project-trust notice above, or under Settings → Agents → Pi, then connect again.",
         state.workspace
     ))
@@ -6328,7 +6546,7 @@ async fn antigravity_runtime_env(db: &AppDatabase) -> Result<BTreeMap<String, St
 
 /// Start a browser-free Antigravity sign-in and hand back the link to open.
 ///
-/// For headless deployments (codeg on a Linux server, no desktop), where the
+/// For headless deployments (harness_studio on a Linux server, no desktop), where the
 /// agent's own loopback browser flow cannot complete: it opens a browser that
 /// does not exist and then blocks for five minutes inside `session/new`. See
 /// [`crate::acp::antigravity_login`].
@@ -6364,19 +6582,19 @@ pub(crate) async fn acp_antigravity_login_cancel_core(handle: String) -> Result<
 /// Three steps around the `logout`, each closing a way for the sign-out to look
 /// like it worked when it did not.
 ///
-/// 1. **Refuse unless codeg knows the agent will clear something.** `logout`
+/// 1. **Refuse unless harness_studio knows the agent will clear something.** `logout`
 ///    clears ONE flavor — the one `settings.json` names — and for a
 ///    `gemini-api-key` or `agent-platform` connection that set is empty, since
 ///    those read their key per request rather than storing anything. It answers
 ///    `{}` regardless. Verified against 1.1.1: with `auth.type=gemini-api-key`
 ///    and a `GEMINI_API_KEY` present, `logout` returns `{}`, deletes no token
-///    file, and still strips `auth.type` — so without this check codeg would
+///    file, and still strips `auth.type` — so without this check harness_studio would
 ///    report a sign-out that left the account exactly where it was.
 ///
 ///    The FILE is consulted rather than the stored row because it is the only
-///    thing the server infers from. And a file codeg cannot parse is refused
-///    rather than assumed harmless: the server reads Hjson and codeg does not,
-///    so "codeg sees no method" and "there is no method" are different facts,
+///    thing the server infers from. And a file harness_studio cannot parse is refused
+///    rather than assumed harmless: the server reads Hjson and harness_studio does not,
+///    so "harness_studio sees no method" and "there is no method" are different facts,
 ///    and only the second is safe to act on.
 /// 2. **Quiesce this agent first, and keep it quiesced.** Antigravity processes
 ///    cache the OAuth credentials in memory behind a per-PROCESS lock and write
@@ -6409,10 +6627,10 @@ pub(crate) async fn acp_antigravity_sign_out_core(
         }
         AntigravityAuthType::Unreadable => {
             return Err(AcpError::protocol(
-                "codeg cannot read the authentication method out of Antigravity's settings.json, \
+                "harness_studio cannot read the authentication method out of Antigravity's settings.json, \
                  so it cannot tell which account would be signed out — or whether anything would \
                  be. Make that file strict JSON (the server also accepts comments and trailing \
-                 commas; codeg does not), or move it aside, then try again.",
+                 commas; harness_studio does not), or move it aside, then try again.",
             ));
         }
         // Declared OAuth clears that flavor; `Absent` leaves the server nothing
@@ -6466,9 +6684,11 @@ pub(crate) async fn acp_pi_project_trust_state_core(
 }
 
 /// Record that the user has seen and kept an existing trust grant, so the launch
-/// gate stops blocking this folder. Writes only codeg's own record — pi's
+/// gate stops blocking this folder. Writes only harness_studio's own record — pi's
 /// `trust.json` is untouched, because the grant itself is not changing.
-pub(crate) async fn acp_pi_acknowledge_project_trust_core(workspace: String) -> Result<(), AcpError> {
+pub(crate) async fn acp_pi_acknowledge_project_trust_core(
+    workspace: String,
+) -> Result<(), AcpError> {
     tokio::task::spawn_blocking(move || {
         pi_set_trust_acknowledged_at(&pi_trust_ack_path(), Path::new(&workspace), true)
     })
@@ -6478,18 +6698,18 @@ pub(crate) async fn acp_pi_acknowledge_project_trust_core(workspace: String) -> 
 
 /// Record an explicit project-trust decision for `workspace` in pi's `trust.json`.
 ///
-/// This is the ONLY place codeg writes into pi's trust store, and it runs solely
-/// from a user action in the approval UI. codeg used to write `true` here on every
+/// This is the ONLY place harness_studio writes into pi's trust store, and it runs solely
+/// from a user action in the approval UI. harness_studio used to write `true` here on every
 /// pi launch, which auto-approved repo-shipped `.pi/extensions` (arbitrary code at
 /// pi startup) and — because entries are inherited by every subdirectory and are
 /// read by the user's standalone `pi` CLI too — silently widened far past the
 /// session that triggered it.
 ///
 /// `trusted`: `Some(true)`/`Some(false)` write that verdict for the exact
-/// canonical dir; `None` removes codeg's entry so the folder falls back to any
+/// canonical dir; `None` removes harness_studio's entry so the folder falls back to any
 /// ancestor decision, then to pi's own default (the revoke path).
 ///
-/// Scoped to the one directory, and never clobbers a `trust.json` codeg can't
+/// Scoped to the one directory, and never clobbers a `trust.json` harness_studio can't
 /// parse — that file holds decisions the user made inside pi.
 pub(crate) async fn acp_pi_set_project_trust_core(
     db: &AppDatabase,
@@ -6517,7 +6737,7 @@ pub(crate) async fn acp_pi_set_project_trust_core(
     .map_err(|e| AcpError::protocol(format!("trust write task failed: {e}")))?
 }
 
-/// Serializes codeg's own trust writes. Two surfaces can issue them at once —
+/// Serializes harness_studio's own trust writes. Two surfaces can issue them at once —
 /// the approval banner and the settings list's revoke buttons — and the write is
 /// a read-modify-write, so without this one call could drop the entry another
 /// just added. The cross-process lock below does not cover this: both callers
@@ -6525,7 +6745,7 @@ pub(crate) async fn acp_pi_set_project_trust_core(
 static PI_TRUST_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// How long a lock may sit untouched before it counts as abandoned by a crashed
-/// process. Mirrors `proper-lockfile`'s default `stale` window so codeg and pi
+/// process. Mirrors `proper-lockfile`'s default `stale` window so harness_studio and pi
 /// agree on when a leftover lock stops holding everyone up.
 const PI_TRUST_LOCK_STALE: Duration = Duration::from_secs(10);
 
@@ -6650,8 +6870,8 @@ fn pi_write_trust_decision_at(
 }
 
 /// Every decision recorded in pi's `trust.json`, for the settings-page review
-/// list. Entries codeg auto-seeded before this became a user decision are
-/// indistinguishable from ones the user made inside pi (codeg never recorded
+/// list. Entries harness_studio auto-seeded before this became a user decision are
+/// indistinguishable from ones the user made inside pi (harness_studio never recorded
 /// provenance), so they are listed for review rather than pruned automatically —
 /// pruning would silently revoke the user's own approvals.
 pub(crate) async fn acp_pi_list_trust_entries_core(
@@ -6726,7 +6946,7 @@ const PI_THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high"
 
 /// Read a JSON file into an owned object map, returning an empty map when the
 /// file is absent, unreadable, or does not parse to a JSON object. Pi's native
-/// files are small and codeg-owned; corruption shouldn't abort a save (we
+/// files are small and harness-studio-owned; corruption shouldn't abort a save (we
 /// re-author the managed keys and preserve whatever else parses).
 fn read_json_object_or_empty(path: &Path) -> serde_json::Map<String, serde_json::Value> {
     fs::read_to_string(path)
@@ -6762,7 +6982,7 @@ fn write_json_object_pretty(
 ///
 /// Merge-preserving by design: a model the user hand-tuned in `models.json` keeps its
 /// `cost` / `contextWindow` / `headers` / `compat` / renamed `name`, because those are
-/// fields codeg's form has no opinion about. Only the reasoning keys are re-authored.
+/// fields harness_studio's form has no opinion about. Only the reasoning keys are re-authored.
 ///
 /// The upsert also fixes the older skip-if-present behaviour, under which re-saving an
 /// already-listed model wrote nothing at all — the reason a reasoning declaration could
@@ -6882,7 +7102,7 @@ impl PiModelCatalog {
 /// an answer that refuses or cannot be read, `Some(Ok(models))` otherwise.
 fn parse_pi_model_capabilities(line: &str) -> Option<Result<Vec<PiModelCapability>, ()>> {
     let response: serde_json::Value = serde_json::from_str(line).ok()?;
-    if response.get("id")?.as_str()? != "codeg-models"
+    if response.get("id")?.as_str()? != "harness-studio-models"
         || response.get("type")?.as_str()? != "response"
         || response.get("command")?.as_str()? != "get_available_models"
     {
@@ -6926,12 +7146,12 @@ fn pi_command_looks_like_path(command: &str) -> bool {
 
 /// Resolve the command pi-acp will spawn the way that spawn resolves it: a path
 /// against `cwd` (the child's working directory), a bare name on the child's
-/// `PATH` — `env`'s when the launch sets one, else codeg's own, which the child
+/// `PATH` — `env`'s when the launch sets one, else harness_studio's own, which the child
 /// inherits.
 ///
 /// A relative `PATH` entry (an empty one means "the cwd") is anchored in `cwd`
 /// here, because that is where the child looks. `which` alone would test it
-/// against codeg's OWN cwd — a directory the child never searches, and on a
+/// against harness_studio's OWN cwd — a directory the child never searches, and on a
 /// server possibly one other users can write to.
 pub(crate) fn resolve_pi_command_in(
     command: &str,
@@ -6960,7 +7180,7 @@ pub(crate) fn resolve_pi_command_in(
 }
 
 /// One `PATH` entry as the child searches it with `cwd` as its working
-/// directory. `which` alone would test a relative entry against codeg's OWN
+/// directory. `which` alone would test a relative entry against harness_studio's OWN
 /// cwd. A Windows drive-relative entry (`C:tools`) is dropped instead: it
 /// follows that drive's current directory in the child, which nothing here can
 /// name, so no guess at it is safe. A rooted one (`\tools`) keeps `cwd`'s drive,
@@ -7005,7 +7225,7 @@ async fn query_pi_model_catalog(
     // cwd) cannot reach a `pi` someone planted in the shared temp dir. Kept
     // alive until the child is reaped below.
     let Ok(query_dir) = tempfile::Builder::new()
-        .prefix("codeg-pi-catalog-")
+        .prefix("harness-studio-pi-catalog-")
         .tempdir()
     else {
         return PiModelCatalog::unavailable(PiCatalogStatus::Failed);
@@ -7054,7 +7274,7 @@ async fn query_pi_model_catalog(
     let query = async {
         let mut stdin = child.stdin.take()?;
         stdin
-            .write_all(b"{\"id\":\"codeg-models\",\"type\":\"get_available_models\"}\n")
+            .write_all(b"{\"id\":\"harness-studio-models\",\"type\":\"get_available_models\"}\n")
             .await
             .ok()?;
         stdin.flush().await.ok()?;
@@ -7369,7 +7589,9 @@ pub(crate) fn load_pi_config_core() -> PiConfigProjection {
     load_pi_config_at(&pi_agent_dir())
 }
 
-pub(crate) async fn load_pi_config_for_db(db: &AppDatabase) -> Result<PiConfigProjection, AcpError> {
+pub(crate) async fn load_pi_config_for_db(
+    db: &AppDatabase,
+) -> Result<PiConfigProjection, AcpError> {
     Ok(load_pi_config_at(&pi_settings_dir_from_db(db).await?))
 }
 
@@ -7477,7 +7699,7 @@ fn probe_pi_version(resolved: &Path) -> Option<String> {
 //
 // Hermes self-manages credentials in `~/.hermes/.env` (secrets) and general
 // settings in `~/.hermes/config.yaml` (the `model:` section), reading them with
-// its own runtime resolver. codeg manages those two files directly — mirroring
+// its own runtime resolver. harness_studio manages those two files directly — mirroring
 // how it manages Codex's `auth.json` + `config.toml` — rather than injecting
 // process env. The provider choice drives the linkage: it selects which `.env`
 // var holds the API key and which `model.provider` / `model.base_url` go into
@@ -7505,14 +7727,14 @@ struct HermesProvider {
     key_env_var: &'static str,
     needs_base_url: bool,
     /// The `.env` variable Hermes reads for a user-supplied endpoint URL. When
-    /// set (only `openai-api` today), codeg mirrors the structured base URL into
+    /// set (only `openai-api` today), harness_studio mirrors the structured base URL into
     /// both this var and config.yaml `model.base_url`, because Hermes' own
     /// resolution paths disagree on which one wins — keeping them in sync makes
     /// the saved endpoint authoritative under either path.
     base_url_env_var: &'static str,
 }
 
-/// Curated subset of Hermes providers codeg edits via structured fields, keyed
+/// Curated subset of Hermes providers harness_studio edits via structured fields, keyed
 /// by the canonical `model.provider` id and `.env` key var from Hermes'
 /// `hermes_cli/auth.py` PROVIDER_REGISTRY (the single source of truth its own
 /// setup uses). The long tail and any exotic credential layout go through the
@@ -7782,7 +8004,7 @@ fn hermes_provider(id: &str) -> Option<&'static HermesProvider> {
 /// unchanged through 0.20.0, where `custom` stays deliberately outside
 /// PROVIDER_REGISTRY ("handled outside the registry", auth.py) and the new v12
 /// named `providers:` mapping is a separate `custom:<name>` namespace that
-/// codeg's raw config editor governs. `custom` has no `.env` key var, so the
+/// harness_studio's raw config editor governs. `custom` has no `.env` key var, so the
 /// key rides in the `model:` section next to `base_url`. Drives both the
 /// structured write (`plan_hermes_write`) and the panel projection
 /// (`project_hermes_key_and_base`).
@@ -8029,8 +8251,10 @@ fn shell_quote_arg_for(arg: &str, windows: bool) -> String {
     } else {
         "[](){}'\"$&;|<>*?`\\!#~"
     };
-    let needs_quoting =
-        arg.is_empty() || arg.chars().any(|c| c.is_whitespace() || special.contains(c));
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c.is_whitespace() || special.contains(c));
     if !needs_quoting {
         return arg.to_string();
     }
@@ -8059,6 +8283,10 @@ fn shell_join(argv: &[String]) -> String {
 /// Returned as argv vectors so callers can shell-quote per platform for
 /// display or execute them.
 async fn hermes_setup_argvs() -> (Vec<String>, Vec<String>) {
+    hermes_setup_argvs_with_probes(true).await
+}
+
+async fn hermes_setup_argvs_with_probes(probe: bool) -> (Vec<String>, Vec<String>) {
     let meta = registry::get_agent_meta(AgentType::Hermes);
     let package = match meta.distribution {
         registry::AgentDistribution::Npx { package, cmd, .. } => {
@@ -8068,7 +8296,18 @@ async fn hermes_setup_argvs() -> (Vec<String>, Vec<String>) {
                     vec![cmd.to_string(), "model".to_string()],
                 );
             }
-            if let Some(resolved) = resolve_npx_command(cmd).await {
+            let resolved = if probe {
+                resolve_npx_command(cmd).await
+            } else {
+                resolve_system_agent_binary(cmd).or_else(|| {
+                    NPM_GLOBAL_PREFIX_CACHE.lock().ok().and_then(|cached| {
+                        cached.as_ref().and_then(|(prefix, _, _)| {
+                            resolve_npx_command_from_npm_prefix(cmd, prefix)
+                        })
+                    })
+                })
+            };
+            if let Some(resolved) = resolved {
                 let bin = resolved.display().to_string();
                 return (
                     vec![bin.clone(), "acp".to_string(), "--setup".to_string()],
@@ -8147,7 +8386,7 @@ fn project_hermes_key_and_base(
     (api_key, base_url)
 }
 
-async fn load_hermes_local_config_json() -> Option<String> {
+async fn load_hermes_local_config_json_with_probes(probe: bool) -> Option<String> {
     let env_map = fs::read_to_string(hermes_env_path())
         .ok()
         .map(|raw| parse_env_file(&raw))
@@ -8178,7 +8417,8 @@ async fn load_hermes_local_config_json() -> Option<String> {
         None => (None, yaml_base_url),
     };
 
-    let (setup_command, model_command) = hermes_setup_commands().await;
+    let (setup, model_args) = hermes_setup_argvs_with_probes(probe).await;
+    let (setup_command, model_command) = (shell_join(&setup), shell_join(&model_args));
 
     let mut merged = serde_json::Map::new();
     if let Some(value) = provider {
@@ -8232,7 +8472,7 @@ pub(crate) struct HermesConfigUpdate {
 fn hermes_skip_chmod() -> bool {
     // Match Hermes' Python truthiness (`os.environ.get(...)` — an empty value is
     // falsy): only a NON-EMPTY opt-out enables skip, so a blank `HERMES_SKIP_CHMOD=`
-    // does not (and codeg still performs the 0644→0600 repair Hermes would).
+    // does not (and harness_studio still performs the 0644→0600 repair Hermes would).
     let truthy = |key: &str| std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false);
     if truthy("HERMES_CONTAINER")
         || truthy("HERMES_SKIP_CHMOD")
@@ -8261,7 +8501,7 @@ fn parse_hermes_home_mode(raw: Option<&str>) -> u32 {
 }
 
 /// Create the Hermes home directory if needed. On Unix, tighten it to
-/// `HERMES_HOME_MODE` (or `0700`) **only when codeg just created it** and Hermes
+/// `HERMES_HOME_MODE` (or `0700`) **only when harness_studio just created it** and Hermes
 /// itself would chmod (not a container/managed deployment). An existing
 /// `HERMES_HOME` is left untouched — it may be a NixOS-managed `0750`, a
 /// UID-mapped Docker volume, or otherwise deliberately group-accessible, and
@@ -8286,7 +8526,7 @@ pub(crate) fn ensure_hermes_home_secure(home: &Path) -> Result<(), AcpError> {
 /// A brand-new secret — a path whose resolved target does not exist yet, whether
 /// `path` itself is absent or a symlink to a missing target — is created
 /// owner-only (`0600` on Unix) so it is never world-readable under the process
-/// umask, the one real exposure for a first-time codeg-driven setup. An EXISTING
+/// umask, the one real exposure for a first-time harness-studio-driven setup. An EXISTING
 /// target is written through in place, which preserves everything that identifies
 /// it: its inode, mode, owner/group, POSIX ACL and xattrs, and any symlink (a
 /// dotfile-manager or secret-manager `~/.hermes/.env` keeps pointing at its real
@@ -8333,7 +8573,7 @@ pub(crate) fn write_hermes_secret_file(
     {
         use std::os::unix::fs::PermissionsExt;
         // Repair an accidentally WORLD-accessible secret (e.g. a `0644` left by an
-        // older codeg build or by the pre-fix dangling-symlink path) back to
+        // older harness_studio build or by the pre-fix dangling-symlink path) back to
         // owner-only `0600`: a world-readable API key is a leak, and tightening it
         // to `0640` would still expose it to a broad group like `staff`. A file
         // with no "other" bits — including a deliberately group-shared managed
@@ -8439,7 +8679,7 @@ fn plan_hermes_write(
         // `custom` provider IS handled (its key/endpoint live inline in
         // config.yaml — see `hermes_inlines_api_key`), but unknown ids (the
         // legacy `openai` pseudo-provider, user-defined `custom:` slugs, or
-        // anything outside the table) have no credential layout codeg can map —
+        // anything outside the table) have no credential layout harness_studio can map —
         // reject them and steer the user to the raw config.yaml editor, which
         // stays the escape hatch.
         let meta = hermes_provider(provider).ok_or_else(|| {
@@ -8550,7 +8790,7 @@ fn base_url_eq(a: &str, b: &str) -> bool {
 /// var, so auxiliary tasks (title generation, compression, …) silently fall
 /// back to the provider's registry-default host and 401 against the wrong
 /// endpoint. The settings panel already mirrors both on save; this covers
-/// configs authored outside codeg.
+/// configs authored outside harness_studio.
 ///
 /// Scope is the single ACTIVE provider's own base-URL var, never another
 /// provider's. Returns `Some((env_var, value))` to write — `value` is the
@@ -8610,7 +8850,7 @@ fn plan_hermes_base_url_reconcile(
 /// used VERBATIM (`Path(val)` — Hermes does NOT expand `~`); a blank value falls
 /// back to the default `~/.hermes` (it does NOT re-inherit the parent). With no
 /// override the child inherits the parent env, so defer to `hermes_home_dir()`
-/// (codeg's existing resolution, shared with the settings panel).
+/// (harness_studio's existing resolution, shared with the settings panel).
 fn hermes_home_for_launch(runtime_env: &BTreeMap<String, String>) -> PathBuf {
     match runtime_env.get("HERMES_HOME") {
         Some(raw) => {
@@ -8688,9 +8928,9 @@ fn agent_local_config_path(agent_type: AgentType) -> Option<PathBuf> {
         // `acp::connection::sync_antigravity_settings_file` at launch, which
         // merges only `auth.type` and the `gcp` block and leaves every other
         // key the user put there alone.
-        AgentType::Antigravity => Some(
-            crate::parsers::antigravity::resolve_antigravity_acp_dir().join("settings.json"),
-        ),
+        AgentType::Antigravity => {
+            Some(crate::parsers::antigravity::resolve_antigravity_acp_dir().join("settings.json"))
+        }
         AgentType::OpenCode => Some(resolve_opencode_config_path()),
         // The CLI's live credential store, NOT the legacy `globalState.json`
         // it migrates from once and then ignores — so "open config file" shows
@@ -8710,7 +8950,7 @@ fn agent_local_config_path(agent_type: AgentType) -> Option<PathBuf> {
         // `acp_update_agent_config_core` (written verbatim) and never reaches
         // this module's generic merge-persist, which could not delete a key.
         //
-        // Note this file has other writers: codeg's own MCP settings page owns
+        // Note this file has other writers: harness_studio's own MCP settings page owns
         // its top-level `mcpServers` (see `commands::mcp::qoder_settings_path`,
         // which resolves the same path through the same helper).
         AgentType::Qoder => Some(qoder_settings_json_path()),
@@ -8969,7 +9209,7 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         // off the DATA home (so `KIMI_CODE_HOME` moves it) while the shared
         // store hangs off the OS home (so it does not), which is why only the
         // first goes through `resolve_kimi_code_home_dir`. The kimi-native dir
-        // stays first so codeg links into Kimi's own store by default and
+        // stays first so harness_studio links into Kimi's own store by default and
         // toggling Kimi does not move a skill out from under pi/cline/codex,
         // which share `~/.agents/skills` too.
         //
@@ -8987,7 +9227,7 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         }),
         // pi auto-loads skills from `~/.pi/agent/skills` and the shared
         // `~/.agents/skills` store (both global), plus project-local
-        // `.pi/skills` / `.agents/skills` once the workspace is trusted (codeg
+        // `.pi/skills` / `.agents/skills` once the workspace is trusted (harness_studio
         // seeds that trust on connect). `~/.pi/agent/skills` additionally
         // accepts standalone `.md` files, so this mirrors Codex's spec shape.
         // The pi-native dir comes first so toggling pi links into its own dir
@@ -9059,7 +9299,7 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         // installs to `.agents` alone (and to a bare `<cwd>/skills`, which
         // nothing scans) is why this used to install skills the agent never
         // loaded — while leaving whatever the user already had in
-        // `~/.qoder/skills` invisible to codeg. Both `.agents` roots stay in
+        // `~/.qoder/skills` invisible to harness_studio. Both `.agents` roots stay in
         // the list so a user who did turn the setting on still sees them.
         AgentType::Qoder => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
@@ -9097,18 +9337,17 @@ pub(crate) fn skill_storage_spec(agent_type: AgentType) -> Option<SkillStorageSp
         // or skill subfolders", which does not distinguish a bundle's
         // `<id>/SKILL.md` from a flat `<id>.md`, and the actual scan happens
         // inside the Go harness. The directory bundle is the shape every agent
-        // supports, so codeg installs that rather than guessing at the wider
+        // supports, so harness_studio installs that rather than guessing at the wider
         // one and writing skills the agent may never load.
         AgentType::Antigravity => Some(SkillStorageSpec {
             kind: SkillStorageKind::SkillDirectoryOnly,
             global_dirs: vec![
-                crate::parsers::antigravity::resolve_antigravity_shared_config_dir()
-                    .join("skills"),
+                crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("skills"),
                 crate::parsers::antigravity::resolve_antigravity_cli_dir().join("skills"),
             ],
             project_rel_dirs: vec![".gemini/skills", ".agents/skills"],
         }),
-        // codeg cannot detect where an arbitrary ACP agent loads skills from,
+        // harness_studio cannot detect where an arbitrary ACP agent loads skills from,
         // so custom agents are gated on the user's own declaration: that the
         // agent reads the shared `.agents/skills` store (the cross-agent
         // convention OpenCode, Gemini, Cline, Codex, pi, and Cursor already
@@ -9222,7 +9461,7 @@ pub(crate) fn scoped_skill_dirs(
 /// when they reach the filesystem root — DeepSeek in `dsh-skill-filesystem`'s
 /// `findProjectRoot`, Kimi in `features/skill/catalog/skillRoots.ts`'s
 /// `projectRoots` → `findUpwardRoot(workDir, ".git", exists)`. Opening a
-/// subdirectory of a repo as the workspace would otherwise make codeg create
+/// subdirectory of a repo as the workspace would otherwise make harness_studio create
 /// and list `<subdir>/.dsh/skills` / `<subdir>/.kimi-code/skills` — a directory
 /// the agent never scans, so the skill would simply never load, with nothing on
 /// screen saying so.
@@ -9232,7 +9471,7 @@ pub(crate) fn scoped_skill_dirs(
 /// `<repo>/.agents/skills` and ignored the ones under `<repo>/sub/...`.
 ///
 /// `.git` is matched as a plain path, file or directory: in a linked worktree
-/// (which codeg creates routinely) it is a FILE, and both upstreams' existence
+/// (which harness_studio creates routinely) it is a FILE, and both upstreams' existence
 /// probes (`pathExists` / `stat`) accept that too.
 fn project_skill_base(agent_type: AgentType, workspace: &str) -> PathBuf {
     let workspace = PathBuf::from(workspace);
@@ -9368,7 +9607,7 @@ fn is_read_only_skill_path(agent_type: AgentType, skill_path: &Path) -> bool {
     let ro_root = match agent_type {
         AgentType::Codex => codex_home_dir().join("skills").join(".system"),
         // Cursor's bundled builtin skills; the CLI restores them on update,
-        // so editing/deleting through codeg would silently be undone.
+        // so editing/deleting through harness_studio would silently be undone.
         AgentType::Cursor => home_dir_or_default().join(".cursor").join("skills-cursor"),
         // `dsh-skill-filesystem` sets `skipSystem` on the `$DSH_HOME/skills`
         // root, so anything under `.system/` there belongs to the DeepSeek
@@ -9393,7 +9632,7 @@ fn skill_content_path(layout: AgentSkillLayout, skill_path: &Path) -> PathBuf {
 /// recursively and files are unlinked. This prevents `remove_dir_all` from
 /// accidentally wiping the contents of a symlink target — which is critical
 /// for the Experts feature where agent skill dirs may contain symlinks into
-/// the central `~/.codeg/skills/` store.
+/// the central `~/.harnessstudio/skills/` store.
 pub(crate) fn remove_skill_entry(path: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     let file_type = meta.file_type();
@@ -9724,10 +9963,10 @@ fn persist_cursor_cli_config(text: &str) -> Result<(), AcpError> {
 /// Validate + write settings.json, whole-document.
 ///
 /// The text is whatever the panel's advanced editor holds, which is the file as
-/// codeg last read it plus the user's edits — writing it verbatim is what lets
+/// harness_studio last read it plus the user's edits — writing it verbatim is what lets
 /// a key be DELETED, which the generic merge-persist path cannot do.
 ///
-/// Note this file has other writers (the Qoder CLI itself, and codeg's MCP
+/// Note this file has other writers (the Qoder CLI itself, and harness_studio's MCP
 /// settings page, which owns the top-level `mcpServers`). A verbatim write
 /// therefore reverts anything they wrote since the editor last loaded — the
 /// same last-writer-wins contract every raw editor in this module has.
@@ -9748,7 +9987,7 @@ fn persist_qoder_settings(text: &str) -> Result<(), AcpError> {
         .map_err(|e| AcpError::protocol(format!("write qoder settings failed: {e}")))
 }
 
-/// The `qoder` binary codeg would launch: managed cache first, then the user's
+/// The `qoder` binary harness_studio would launch: managed cache first, then the user's
 /// own install (PATH / ~/.local/bin) — the same order as `build_agent`.
 fn resolve_qoder_binary() -> Option<PathBuf> {
     if let Ok(Some((path, _))) =
@@ -9766,7 +10005,10 @@ fn resolve_qoder_binary() -> Option<PathBuf> {
 /// `PAT` is always materialized (empty when unset) so `run_qoder_probe` makes
 /// an explicit set-or-remove decision — an inherited token from the user's dev
 /// shell must not make the card claim an account that a launch would not use.
-async fn qoder_probe_env(db: &AppDatabase, personal_access_token: Option<&str>) -> BTreeMap<String, String> {
+async fn qoder_probe_env(
+    db: &AppDatabase,
+    personal_access_token: Option<&str>,
+) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> =
         agent_setting_service::get_by_agent_type(&db.conn, AgentType::Qoder)
             .await
@@ -9811,7 +10053,11 @@ async fn run_qoder_probe(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() && stdout.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("qoder {} failed: {}", args.join(" "), stderr.trim()));
+        return Err(format!(
+            "qoder {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ));
     }
     Ok(stdout)
 }
@@ -9879,9 +10125,7 @@ pub(crate) async fn acp_qoder_auth_status_core(
                         // The CLI emits 0/1 here rather than a JSON boolean.
                         allow_byok: v
                             .get("allow_byok")
-                            .and_then(|b| {
-                                b.as_bool().or_else(|| b.as_i64().map(|n| n != 0))
-                            }),
+                            .and_then(|b| b.as_bool().or_else(|| b.as_i64().map(|n| n != 0))),
                         error: None,
                         binary_path: binary_path.clone(),
                     }
@@ -9899,7 +10143,7 @@ pub(crate) async fn acp_qoder_auth_status_core(
     }
 }
 
-/// The cursor-agent binary codeg would launch: managed cache first, then the
+/// The cursor-agent binary harness_studio would launch: managed cache first, then the
 /// user's own install (PATH / ~/.local/bin) — the same order as `build_agent`.
 fn resolve_cursor_binary() -> Option<PathBuf> {
     if let Ok(Some((path, _))) =
@@ -9959,13 +10203,10 @@ async fn run_cursor_probe(
             cmd.env(key, value);
         }
     }
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| format!("cursor-agent {} timed out", args.join(" ")))?
-    .map_err(|e| format!("failed to run cursor-agent: {e}"))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+        .await
+        .map_err(|_| format!("cursor-agent {} timed out", args.join(" ")))?
+        .map_err(|e| format!("failed to run cursor-agent: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() && stdout.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -10186,7 +10427,15 @@ fn strip_ansi(input: &str) -> String {
 fn truncate_probe_output(s: &str) -> String {
     let t = s.trim();
     if t.len() > 400 {
-        format!("{}…", &t[..t.char_indices().take_while(|(i, _)| *i < 400).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(400)])
+        format!(
+            "{}…",
+            &t[..t
+                .char_indices()
+                .take_while(|(i, _)| *i < 400)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(400)]
+        )
     } else {
         t.to_string()
     }
@@ -10232,7 +10481,11 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
         // Kimi Code does NOT read shell KIMI_API_KEY/OPENAI_API_KEY; the only
         // non-interactive credential path is the `KIMI_MODEL_*` family, which
         // also takes priority over `~/.kimi-code/config.toml`.
-        AgentType::KimiCode => ("KIMI_MODEL_BASE_URL", "KIMI_MODEL_API_KEY", "KIMI_MODEL_NAME"),
+        AgentType::KimiCode => (
+            "KIMI_MODEL_BASE_URL",
+            "KIMI_MODEL_API_KEY",
+            "KIMI_MODEL_NAME",
+        ),
         // Grok's non-interactive credential is `XAI_API_KEY`. Model + endpoint
         // also have working env overrides (verified against the 0.2.94 binary):
         // `GROK_DEFAULT_MODEL` selects the default model and `GROK_XAI_API_BASE_URL`
@@ -10249,7 +10502,7 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
         // The real endpoint knob is `DEEPSEEK_BASE_URL`, read by the
         // `llm-deepseek` adapter through the launch-environment snapshot —
         // which, when the host installs none (deepseek-acp does not), falls
-        // back to `process.env`, so codeg's launch env reaches it. It resolves
+        // back to `process.env`, so harness_studio's launch env reaches it. It resolves
         // per request (`config.baseURL ?? env ?? https://api.deepseek.com`),
         // NOT at load. `DEEPSEEK_ACP_PROVIDER` is a different thing entirely —
         // the provider ROUTE id (`deepseek-official`), a registry key rather
@@ -10287,11 +10540,7 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
         // the base-url slot stays an inert `AGY_BASE_URL` placeholder for the
         // same reason `CURSOR_MODEL`/`QODER_BASE_URL` above are: it keeps the
         // generic cascade off the `OPENAI_*` keys.
-        AgentType::Antigravity => (
-            "AGY_BASE_URL",
-            "GEMINI_API_KEY",
-            "AGY_ACP_DEFAULT_MODEL",
-        ),
+        AgentType::Antigravity => ("AGY_BASE_URL", "GEMINI_API_KEY", "AGY_ACP_DEFAULT_MODEL"),
         // `CLINE_API_KEY` is not just a convenience: it is one of only two ways
         // past cline's ACP auth gate (`isSessionReady`), and the only one a BYO
         // provider can take — see [`apply_cline_launch_env`]. `CLINE_MODEL`
@@ -10331,7 +10580,7 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
 /// user's endpoint. Hence provider + key together; `CLINE_MODEL` then picks the
 /// session's default model out of that provider's catalogue.
 ///
-/// Does nothing when codeg has no usable credential for the agent, which leaves
+/// Does nothing when harness_studio has no usable credential for the agent, which leaves
 /// `tryRestoreAuth` free to find a `cline auth` login — a user signed in to
 /// Cline's own service must not be forced onto a half-filled BYO panel.
 ///
@@ -10339,7 +10588,8 @@ fn agent_env_keys(agent_type: AgentType) -> (&'static str, &'static str, &'stati
 /// [`build_runtime_env_from_setting`] (see [`agent_env_keys`]); this only fills
 /// what is still missing, so an explicit `env_json` row keeps winning.
 fn apply_cline_launch_env(config_json: Option<&str>, merged: &mut BTreeMap<String, String>) {
-    let Some(config) = config_json.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    let Some(config) =
+        config_json.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
     else {
         return;
     };
@@ -10358,11 +10608,11 @@ fn apply_cline_launch_env(config_json: Option<&str>, merged: &mut BTreeMap<Strin
     //     `CLINE_PROVIDER ?? authResult?.providerId ?? "cline"` and a ClinePass
     //     or ChatGPT account silently runs as plain Cline billing;
     //   * a stale `CLINE_PROVIDER` — an `env_json` row, or one exported in the
-    //     shell codeg was launched from — overrides the account entirely and
+    //     shell harness_studio was launched from — overrides the account entirely and
     //     freezes a selector these three are entitled to use.
     //
     // Both are cleared by writing an EMPTY value, which the spawn layer turns
-    // into `env_remove` (see the codeg convention in `acp::agent_process`) — so
+    // into `env_remove` (see the harness_studio convention in `acp::agent_process`) — so
     // this strips an inherited value rather than merely declining to add one.
     // Removal, not `""`, is what the agent needs: `??` does not fall through on
     // an empty string, so an actually-empty `CLINE_PROVIDER` would become the
@@ -10475,7 +10725,7 @@ pub(crate) async fn apply_model_provider_env(
     }
 }
 
-/// Claude Code provider-model JSON keys → ANTHROPIC_*_MODEL env var names.
+/// Claude provider-model JSON keys → native model, display and subagent env vars.
 const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
     ("main", "ANTHROPIC_MODEL"),
     ("reasoning", "ANTHROPIC_REASONING_MODEL"),
@@ -10486,6 +10736,11 @@ const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
     // available), and the id the CLI recognizes as a Fable model for its
     // automatic model fallback on third-party providers.
     ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+    ("sonnetName", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"),
+    ("opusName", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"),
+    ("fableName", "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"),
+    ("haikuName", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"),
+    ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
     // The custom model option trio appends one entry to the in-session /model
     // picker (a model the provider's gateway serves). Carried by the provider's
     // model JSON like the six model fields, so binding/cascade pushes it too.
@@ -10505,8 +10760,8 @@ const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
 /// "clear". This lets the caller overwrite even when the provider's value is
 /// empty.
 ///
-/// - Claude: returns one entry per `CLAUDE_MODEL_KEY_MAP` row — the six
-///   ANTHROPIC_*_MODEL fields plus the ANTHROPIC_CUSTOM_MODEL_OPTION trio. Each
+/// - Claude: returns one entry per `CLAUDE_MODEL_KEY_MAP` row, including model
+///   pins, display names, subagents and custom options. Each
 ///   entry is `None` when the provider's JSON omits that key or has an empty
 ///   value.
 /// - Gemini: returns `GEMINI_MODEL`.
@@ -10644,7 +10899,7 @@ fn cascade_update_agent_config(
         }
         AgentType::Hermes => {
             // Hermes self-manages credentials in ~/.hermes/.env via
-            // `hermes model` / `hermes setup`; codeg writes no provider creds.
+            // `hermes model` / `hermes setup`; harness_studio writes no provider creds.
         }
         AgentType::Cursor => {
             // Cursor authenticates via `cursor-agent login` or CURSOR_API_KEY
@@ -10689,7 +10944,7 @@ fn cascade_update_agent_config(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| "codeg".to_string());
+                .unwrap_or_else(|| "harness_studio".to_string());
             table.insert(
                 "model_provider".to_string(),
                 toml::Value::String(provider_name.clone()),
@@ -10721,8 +10976,11 @@ fn cascade_update_agent_config(
                     toml::Value::String(api_url.to_string()),
                 );
             }
-            if provider_name == "codeg" {
-                provider_table.insert("name".to_string(), toml::Value::String("codeg".to_string()));
+            if provider_name == "harness_studio" {
+                provider_table.insert(
+                    "name".to_string(),
+                    toml::Value::String("harness_studio".to_string()),
+                );
                 provider_table.insert(
                     "wire_api".to_string(),
                     toml::Value::String("responses".to_string()),
@@ -10816,9 +11074,9 @@ fn cascade_update_agent_config(
         }
         AgentType::DeepSeek => {
             // deepseek-acp authenticates via `DEEPSEEK_API_KEY` (or
-            // `~/.dsh/.credentials.yaml`, which codeg never writes), injected
+            // `~/.dsh/.credentials.yaml`, which harness_studio never writes), injected
             // as a runtime env var through the generic agent settings panel;
-            // it has no codeg-managed config file and does not participate in
+            // it has no harness-studio-managed config file and does not participate in
             // the model-provider credential cascade.
         }
         AgentType::Qoder => {
@@ -10826,7 +11084,7 @@ fn cascade_update_agent_config(
             // and no BYO-provider key — so it stays off the model-provider
             // credential cascade even though its env slots are real. The PAT
             // (`QODER_PERSONAL_ACCESS_TOKEN`) is set directly in the agent's
-            // env, and while codeg DOES manage a Qoder config file
+            // env, and while harness_studio DOES manage a Qoder config file
             // (`settings.json`, via the Qoder settings panel), that file holds
             // no credentials for the cascade to reconcile.
         }
@@ -10843,7 +11101,7 @@ fn cascade_update_agent_config(
             // reconcile either.
         }
         AgentType::Custom(_) => {
-            // Custom agents are deliberately configuration-free: codeg writes
+            // Custom agents are deliberately configuration-free: harness_studio writes
             // no config file for them and they are excluded from the
             // model-provider surface, so there is nothing to cascade. Whatever
             // credentials they need go through the generic launch-env panel.
@@ -10936,7 +11194,9 @@ pub async fn acp_preflight(
     if force_refresh.unwrap_or(false) {
         preflight::clear_npm_env_cache();
     }
-    Ok(preflight::run_preflight(agent_type).await)
+    crate::probe::with_budget(preflight::run_preflight(agent_type))
+        .await
+        .map_err(|error| AcpError::protocol(error.to_string()))
 }
 
 /// Resolve the full runtime env every ACP spawn should receive — settings
@@ -11147,7 +11407,14 @@ pub(crate) async fn acp_update_agent_env_and_refresh(
     emitter: &EventEmitter,
 ) -> Result<usize, AcpError> {
     acp_update_agent_env_core(agent_type, enabled, env, model_provider_id, db, emitter).await?;
-    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+    Ok(refresh_config_staleness(
+        manager,
+        db,
+        data_dir,
+        &[agent_type],
+        ConfigStaleKind::AgentConfig,
+    )
+    .await)
 }
 
 /// `acp_update_agent_preferences_core` followed by a staleness refresh. Shared
@@ -11179,7 +11446,14 @@ pub(crate) async fn acp_update_agent_preferences_and_refresh(
         emitter,
     )
     .await?;
-    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+    Ok(refresh_config_staleness(
+        manager,
+        db,
+        data_dir,
+        &[agent_type],
+        ConfigStaleKind::AgentConfig,
+    )
+    .await)
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -11196,7 +11470,7 @@ pub async fn acp_connect(
     app_handle: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<String, AcpError> {
-    // Resolve through the effective data dir so a custom `CODEG_DATA_DIR`
+    // Resolve through the effective data dir so a custom `HARNESS_STUDIO_DATA_DIR`
     // reaches the credential helper script the agent's git subprocess
     // will execute. `acp_connect` may be called before the app data dir
     // exists on disk (first launch); fall back to a sentinel that the
@@ -11285,16 +11559,14 @@ pub async fn acp_goal_control(
     db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<(), AcpError> {
-    manager
-        .goal_control(&db.conn, &connection_id, action)
-        .await
+    manager.goal_control(&db.conn, &connection_id, action).await
 }
 
 /// Spawn a transient ACP connection for `agent_type` with a silent emitter,
 /// read whatever `SessionConfigOptions` / `SessionModes` the agent advertises,
 /// and tear it down. The returned snapshot drives the delegation-settings UI
 /// so the user picks from the exact option set the agent will accept when
-/// codeg-mcp later spawns a subagent.
+/// harness-studio-mcp later spawns a subagent.
 ///
 /// Does NOT touch the chat-side `selectorsCache`, `localStorage` preferences,
 /// or any active connection state — see `ConnectionManager::probe_agent_options`
@@ -11651,10 +11923,24 @@ pub async fn acp_get_agent_status(
     agent_type: AgentType,
     db: tauri::State<'_, AppDatabase>,
 ) -> Result<crate::acp::types::AcpAgentStatus, AcpError> {
-    acp_get_agent_status_core(agent_type, &db).await
+    crate::probe::with_budget(acp_get_agent_status_core(agent_type, &db))
+        .await
+        .map_err(|error| AcpError::protocol(error.to_string()))?
 }
 
 pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgentInfo>, AcpError> {
+    assemble_agents(db, false).await
+}
+
+/// Settings can render configuration without launching any CLI probe.
+#[cfg(any(feature = "tauri-runtime", test, feature = "test-utils"))]
+pub(crate) async fn acp_list_agents_snapshot_core(
+    db: &AppDatabase,
+) -> Result<Vec<AcpAgentInfo>, AcpError> {
+    assemble_agents(db, true).await
+}
+
+async fn assemble_agents(db: &AppDatabase, snapshot: bool) -> Result<Vec<AcpAgentInfo>, AcpError> {
     let platform = registry::current_platform();
     let agent_types = registry::all_acp_agents();
 
@@ -11670,9 +11956,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         )
         .collect::<Vec<_>>();
 
-    agent_setting_service::ensure_defaults(&db.conn, &defaults)
-        .await
-        .map_err(|e| AcpError::protocol(e.to_string()))?;
+    if !snapshot {
+        agent_setting_service::ensure_defaults(&db.conn, &defaults)
+            .await
+            .map_err(|e| AcpError::protocol(e.to_string()))?;
+    }
     let settings_map = agent_setting_service::list_map_by_agent_type(&db.conn)
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
@@ -11683,6 +11971,25 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         let setting = settings_map.get(&agent_type);
         let meta = registry::get_agent_meta(agent_type);
         let (available, dist_type, local_installed_version) = match &meta.distribution {
+            registry::AgentDistribution::Npx { .. } if snapshot => (
+                true,
+                "npx",
+                setting.and_then(|row| row.installed_version.clone()),
+            ),
+            registry::AgentDistribution::Binary { platforms, cmd, .. } if snapshot => (
+                platforms.iter().any(|p| p.platform == platform),
+                "binary",
+                binary_cache::detect_installed_version(agent_type, cmd)
+                    .ok()
+                    .flatten()
+                    .or_else(|| setting.and_then(|row| row.installed_version.clone())),
+            ),
+            registry::AgentDistribution::Uvx { system_cmd, .. } if snapshot => (
+                uvx_agent_launchable(*system_cmd),
+                "uvx",
+                binary_cache::uvx_prepared_version(agent_type)
+                    .or_else(|| setting.and_then(|row| row.installed_version.clone())),
+            ),
             registry::AgentDistribution::Npx { cmd, package, .. } => {
                 // Keep the list path bounded: each list request probes npm
                 // global prefix at most once, then reuses the result across
@@ -11765,7 +12072,7 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         }
         let sort_order = setting.map(|m| m.sort_order).unwrap_or(idx as i32);
         // Persist detected version to DB for binary agents (npx written during install/upgrade)
-        if dist_type == "binary" {
+        if dist_type == "binary" && !snapshot {
             let _ = agent_setting_service::set_installed_version(
                 &db.conn,
                 agent_type,
@@ -11812,11 +12119,11 @@ pub(crate) async fn acp_list_agents_core(db: &AppDatabase) -> Result<Vec<AcpAgen
         // Hermes is self-managed: project its own ~/.hermes/.env + config.yaml
         // into config_json (read-only) and attach the raw config.yaml for the
         // advanced editor. The env-merge block above is skipped because
-        // `load_agent_local_config_json` returns None for Hermes (no codeg
+        // `load_agent_local_config_json` returns None for Hermes (no harness_studio
         // local config path), so no Hermes credential leaks into process env.
         let (config_json, hermes_config_yaml) = if agent_type == AgentType::Hermes {
             (
-                load_hermes_local_config_json().await,
+                load_hermes_local_config_json_with_probes(!snapshot).await,
                 fs::read_to_string(hermes_config_yaml_path()).ok(),
             )
         } else {
@@ -11909,6 +12216,14 @@ pub async fn acp_list_agents(
     acp_list_agents_core(&db).await
 }
 
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub async fn acp_list_agents_snapshot(
+    db: tauri::State<'_, AppDatabase>,
+) -> Result<Vec<AcpAgentInfo>, AcpError> {
+    acp_list_agents_snapshot_core(&db).await
+}
+
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_clear_binary_cache(agent_type: AgentType) -> Result<(), AcpError> {
     let meta = registry::get_agent_meta(agent_type);
@@ -11924,8 +12239,7 @@ pub async fn acp_clear_binary_cache(agent_type: AgentType) -> Result<(), AcpErro
 /// Scan the system temp directory for artifacts leaked by agent launches from
 /// BEFORE per-launch temp isolation shipped. Read-only.
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn acp_scan_leaked_temp(
-) -> Result<crate::acp::temp_reclaim::LeakedTempScan, AcpError> {
+pub async fn acp_scan_leaked_temp() -> Result<crate::acp::temp_reclaim::LeakedTempScan, AcpError> {
     tokio::task::spawn_blocking(crate::acp::temp_reclaim::scan)
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))
@@ -12005,10 +12319,7 @@ pub(crate) async fn acp_update_agent_preferences_core(
     }
 
     if agent_type == AgentType::OpenCode {
-        persist_opencode_native_config(
-            opencode_auth_json.as_deref(),
-            config_json.as_deref(),
-        )?;
+        persist_opencode_native_config(opencode_auth_json.as_deref(), config_json.as_deref())?;
         emit_acp_agents_updated(emitter, "preferences_updated", Some(agent_type));
         return Ok(());
     }
@@ -12158,7 +12469,11 @@ pub(crate) async fn acp_update_agent_env_core(
             codex_bound_model = Some(provider.model.clone());
         }
         if agent_type == AgentType::ClaudeCode {
-            claude_local_cascade = Some((provider.api_url.clone(), provider.api_key.clone(), model_env));
+            claude_local_cascade = Some((
+                provider.api_url.clone(),
+                provider.api_key.clone(),
+                model_env,
+            ));
         }
     }
 
@@ -12183,7 +12498,9 @@ pub(crate) async fn acp_update_agent_env_core(
             &CodexModelAction::NoOp,
             None,
         ) {
-            eprintln!("[acp_update_agent_env] cascade_update_agent_config({agent_type}) failed: {e}");
+            eprintln!(
+                "[acp_update_agent_env] cascade_update_agent_config({agent_type}) failed: {e}"
+            );
         }
     }
 
@@ -12498,10 +12815,7 @@ pub(crate) async fn acp_update_agent_config_core(
     }
 
     if agent_type == AgentType::OpenCode {
-        persist_opencode_native_config(
-            opencode_auth_json.as_deref(),
-            config_json.as_deref(),
-        )?;
+        persist_opencode_native_config(opencode_auth_json.as_deref(), config_json.as_deref())?;
         emit_acp_agents_updated(emitter, "config_updated", Some(agent_type));
         return Ok(());
     }
@@ -12563,7 +12877,14 @@ pub(crate) async fn acp_update_agent_config_and_refresh(
         emitter,
     )
     .await?;
-    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+    Ok(refresh_config_staleness(
+        manager,
+        db,
+        data_dir,
+        &[agent_type],
+        ConfigStaleKind::AgentConfig,
+    )
+    .await)
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -12738,7 +13059,9 @@ pub async fn acp_update_pi_config(
 /// directory resolution.
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn acp_load_pi_config(db: State<'_, AppDatabase>) -> Result<PiConfigProjection, AcpError> {
+pub async fn acp_load_pi_config(
+    db: State<'_, AppDatabase>,
+) -> Result<PiConfigProjection, AcpError> {
     load_pi_config_for_db(&db).await
 }
 
@@ -12849,7 +13172,7 @@ pub async fn acp_pi_acknowledge_project_trust(workspace: String) -> Result<(), A
 }
 
 /// List every decision in pi's `trust.json` so the settings page can review and
-/// revoke them — including any auto-seeded by codeg before trust became a user
+/// revoke them — including any auto-seeded by harness_studio before trust became a user
 /// decision.
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -12906,9 +13229,8 @@ fn open_external_terminal_impl(command: &str, cwd: Option<&str>) -> Result<(), A
         // literal (backslashes first, then double-quotes).
         let shell_cmd = format!("cd {} && {}", shell_single_quote(&dir), command);
         let escaped = shell_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        let osa = format!(
-            "tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell"
-        );
+        let osa =
+            format!("tell application \"Terminal\"\nactivate\ndo script \"{escaped}\"\nend tell");
         Command::new("osascript")
             .arg("-e")
             .arg(osa)
@@ -12957,7 +13279,9 @@ fn open_external_terminal_impl(command: &str, cwd: Option<&str>) -> Result<(), A
     }
 
     #[allow(unreachable_code)]
-    Err(AcpError::protocol("unsupported platform for terminal launch"))
+    Err(AcpError::protocol(
+        "unsupported platform for terminal launch",
+    ))
 }
 
 /// Quote a string for a single-quoted POSIX shell argument.
@@ -13123,7 +13447,7 @@ pub async fn acp_download_agent_binary(
     acp_download_agent_binary_core(agent_type, version, task_id, &emitter).await
 }
 
-/// Provision ONLY the uv toolchain (uvx) into codeg's cache — independent of
+/// Provision ONLY the uv toolchain (uvx) into harness_studio's cache — independent of
 /// installing any `Uvx` agent's package. Streams progress over the shared
 /// agent-install event stream so the Settings page shows a live log. Backs the
 /// uv preflight check's "Install uv" fix. After this succeeds,
@@ -13174,10 +13498,7 @@ pub(crate) async fn acp_install_uv_tool_core(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn acp_install_uv_tool(
-    task_id: String,
-    app: tauri::AppHandle,
-) -> Result<(), AcpError> {
+pub async fn acp_install_uv_tool(task_id: String, app: tauri::AppHandle) -> Result<(), AcpError> {
     let emitter = EventEmitter::Tauri(app);
     acp_install_uv_tool_core(task_id, &emitter).await
 }
@@ -13197,7 +13518,9 @@ pub(crate) async fn acp_detect_agent_local_version_core(
         .flatten()
         .and_then(|m| m.installed_version);
 
-    let detected = detect_local_version(agent_type).await;
+    let detected = crate::probe::with_budget(detect_local_version(agent_type))
+        .await
+        .map_err(|error| AcpError::protocol(error.to_string()))?;
     if let Some(version) = detected.clone() {
         let _ =
             agent_setting_service::set_installed_version(conn, agent_type, Some(version.clone()))
@@ -13206,7 +13529,7 @@ pub(crate) async fn acp_detect_agent_local_version_core(
         // `installed_version` straight from this row and shows "not installed"
         // while it's null (`acp_list_agents_core` never probes npm for it). When
         // a live probe discovers a version the DB never recorded — an agent
-        // installed outside codeg, or by a build predating version tracking —
+        // installed outside harness_studio, or by a build predating version tracking —
         // wake `useAcpAgents()` so the composer stops claiming it's missing.
         if previous.as_deref() != Some(version.as_str()) {
             emit_acp_agents_updated(emitter, "local_version_detected", Some(agent_type));
@@ -13242,14 +13565,20 @@ pub(crate) async fn acp_detect_agent_local_version_core(
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_detect_agent_local_version(
     agent_type: AgentType,
+    force_refresh: Option<bool>,
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<Option<String>, AcpError> {
     let emitter = EventEmitter::Tauri(app);
+    if force_refresh.unwrap_or(false) {
+        crate::probe::clear_cache();
+        *SYSTEM_PROBE_CACHE.lock().unwrap() = None;
+        *SYSTEM_BINARY_VERSION_CACHE.lock().unwrap() = None;
+    }
     acp_detect_agent_local_version_core(agent_type, &db.conn, &emitter).await
 }
 
-/// The newest upstream release of an agent that is newer than codeg's pin and
+/// The newest upstream release of an agent that is newer than harness_studio's pin and
 /// that Custom install can fetch, for Version Status' "Upgrade to unreviewed
 /// latest". The settings page asks once each time the user opens the agent.
 pub(crate) async fn acp_fetch_agent_latest_release_core(
@@ -13362,7 +13691,7 @@ pub(crate) async fn acp_prepare_npx_agent_core(
                         "{} installed, but its runtime did not bootstrap (`{cmd} --version` \
                          does not answer). If your npm config sets ignore-scripts, allow \
                          scripts for this package and reinstall; otherwise retry, or use \
-                         the official installer and codeg will pick up the PATH `{cmd}`.",
+                         the official installer and harness_studio will pick up the PATH `{cmd}`.",
                         meta.name
                     )));
                 }
@@ -13398,7 +13727,7 @@ pub(crate) async fn acp_prepare_npx_agent_core(
             .map_err(|e| AcpError::protocol(e.to_string()))?;
 
             // A new codex-acp can drive a codex with a different official
-            // model list; codeg's generated catalog must follow it.
+            // model list; harness_studio's generated catalog must follow it.
             if agent_type == AgentType::Codex {
                 emit_agent_install_event(
                     emitter,
@@ -13620,10 +13949,7 @@ pub(crate) async fn acp_install_pi_binary_core(
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn acp_install_pi_binary(
-    task_id: String,
-    app: tauri::AppHandle,
-) -> Result<(), AcpError> {
+pub async fn acp_install_pi_binary(task_id: String, app: tauri::AppHandle) -> Result<(), AcpError> {
     let emitter = EventEmitter::Tauri(app);
     acp_install_pi_binary_core(task_id, &emitter).await
 }
@@ -13935,7 +14261,7 @@ pub async fn opencode_provider_catalog(
 }
 
 /// The official codex model catalog (full `ModelInfo` entries), sourced at
-/// runtime from the codex codeg actually launches (cache + bundled fallback),
+/// runtime from the codex harness_studio actually launches (cache + bundled fallback),
 /// used by the settings editor for the official list, "quick-add official", and
 /// as the clone template for custom entries' heavy required fields.
 pub(crate) async fn codex_bundled_catalog_core(force_refresh: bool) -> Vec<serde_json::Value> {
@@ -14205,6 +14531,32 @@ pub(crate) async fn codex_poll_device_code_core(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn settings_snapshot_does_not_run_environment_probes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = crate::db::test_helpers::fresh_disk_db(temp.path()).await;
+        let before = agent_setting_service::list_map_by_agent_type(&db.conn)
+            .await
+            .unwrap();
+        let agents = crate::probe::without_probes(acp_list_agents_snapshot_core(&db))
+            .await
+            .unwrap();
+        assert!(registry::builtin_acp_agents()
+            .iter()
+            .all(|kind| agents.iter().any(|agent| agent.agent_type == *kind)));
+        assert!(agents
+            .iter()
+            .any(|agent| agent.agent_type == AgentType::Hermes));
+        let after = agent_setting_service::list_map_by_agent_type(&db.conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "snapshot must not insert defaults"
+        );
+    }
+
     #[test]
     fn extract_version_token_finds_the_version_in_common_banners() {
         assert_eq!(extract_version_token("0.21.0").as_deref(), Some("0.21.0"));
@@ -14300,8 +14652,7 @@ mod tests {
         // Unregistered custom id → no declared probe → the auto `--version`
         // path, exactly what a hand-added agent without a probe gets. The
         // same path serves built-ins, which can never declare a probe.
-        let version =
-            system_probed_version(AgentType::Custom("probe-e2e-test"), &bin, None).await;
+        let version = system_probed_version(AgentType::Custom("probe-e2e-test"), &bin, None).await;
         assert_eq!(version.as_deref(), Some("1.2.3"));
     }
 
@@ -14315,7 +14666,7 @@ mod tests {
         // The declared probe's program doesn't exist, so the probe yields
         // nothing; the convention path must still read the real install.
         let version = system_probed_version_with(
-            Some("codeg-missing-probe-cmd-e2e --version"),
+            Some("harness-studio-missing-probe-cmd-e2e --version"),
             &bin,
             None,
         )
@@ -14334,10 +14685,13 @@ mod tests {
 
     #[test]
     fn parse_grok_settings_migrates_legacy_permission_values() {
-        // codeg's old codeg-invented markers map onto grok's real enum so the
+        // harness_studio's old harness-studio-invented markers map onto grok's real enum so the
         // dropdown, launch flag, and grok's TUI agree.
         let approve = parse_grok_settings("[ui]\npermission_mode = \"always-approve\"\n");
-        assert_eq!(approve.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(
+            approve.permission_mode.as_deref(),
+            Some("bypassPermissions")
+        );
         let ask = parse_grok_settings("[ui]\npermission_mode = \"ask\"\n");
         assert_eq!(ask.permission_mode.as_deref(), Some("default"));
         // A real grok mode is preserved untouched.
@@ -14411,10 +14765,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(merged.contains("session_summary"), "inline sibling preserved");
+        assert!(
+            merged.contains("session_summary"),
+            "inline sibling preserved"
+        );
         assert!(merged.contains("grok-4.5"), "inline default preserved");
         assert_eq!(
-            parse_grok_settings(&merged).default_reasoning_effort.as_deref(),
+            parse_grok_settings(&merged)
+                .default_reasoning_effort
+                .as_deref(),
             Some("high")
         );
     }
@@ -14423,8 +14782,7 @@ mod tests {
     fn apply_grok_structured_config_removes_on_none() {
         let base = "[ui]\npermission_mode = \"ask\"\n\n\
                     [models]\ndefault_reasoning_effort = \"high\"\n";
-        let merged =
-            apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
+        let merged = apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
         let back = parse_grok_settings(&merged);
         assert!(back.permission_mode.is_none(), "unset removes the key");
         assert!(back.default_reasoning_effort.is_none());
@@ -14543,9 +14901,7 @@ mod tests {
         // No approvals wanted: no preset says exactly that without widening the
         // sandbox, and the model-screened default is the nearest.
         assert_eq!(
-            initial_mode_for(
-                "approval_policy = \"never\"\nsandbox_mode = \"workspace-write\"\n"
-            ),
+            initial_mode_for("approval_policy = \"never\"\nsandbox_mode = \"workspace-write\"\n"),
             Some("agent")
         );
     }
@@ -14756,7 +15112,7 @@ mod tests {
         // TOML positioning guard: a root scalar or the `[approval_policy]`
         // granular table must not be emitted AFTER an existing section, which
         // would silently reparent unrelated root keys into that section.
-        let base = "model = \"gpt-5\"\nmodel_provider = \"codeg\"\n\n\
+        let base = "model = \"gpt-5\"\nmodel_provider = \"harness_studio\"\n\n\
                     [features]\nskills = true\n\n\
                     [mcp_servers.ctx]\ncommand = \"npx\"\n";
         let merged = apply_codex_sandbox_config(
@@ -14783,7 +15139,7 @@ mod tests {
         );
         assert_eq!(
             table.get("model_provider").and_then(toml::Value::as_str),
-            Some("codeg")
+            Some("harness_studio")
         );
         assert_eq!(
             table
@@ -14807,9 +15163,9 @@ mod tests {
 # my codex config
 model = \"gw/x\"           # the model
 model_catalog_json = \"{value}\"
-model_provider = \"codeg\"
+model_provider = \"harness_studio\"
 
-[model_providers.codeg]
+[model_providers.harness_studio]
 base_url = \"https://example.test/v1\"
 "
         )
@@ -14817,34 +15173,34 @@ base_url = \"https://example.test/v1\"
 
     #[test]
     fn remove_codex_catalog_key_is_format_preserving_and_no_op_when_absent() {
-        let home = Path::new("/tmp/codeg-test-codex-home");
-        let base = config_with_catalog_ref("codeg-model-catalog.json");
+        let home = Path::new("/tmp/harness-studio-test-codex-home");
+        let base = config_with_catalog_ref("harness-studio-model-catalog.json");
         let next = remove_codex_catalog_key(&base, home)
             .unwrap()
-            .expect("codeg-owned key was present");
+            .expect("harness-studio-owned key was present");
         assert!(!next.contains("model_catalog_json"));
         // Comments and every unmanaged key survive verbatim.
         assert!(next.contains("# my codex config"));
         assert!(next.contains("model = \"gw/x\"           # the model"));
-        assert!(next.contains("[model_providers.codeg]"));
+        assert!(next.contains("[model_providers.harness_studio]"));
         assert!(next.contains("base_url = \"https://example.test/v1\""));
         // No key → no rewrite at all (callers skip the disk write).
         assert!(remove_codex_catalog_key(&next, home).unwrap().is_none());
         assert!(remove_codex_catalog_key("", home).unwrap().is_none());
     }
 
-    /// The cleanup must only ever reclaim codeg's OWN generated file. A catalog
+    /// The cleanup must only ever reclaim harness_studio's OWN generated file. A catalog
     /// the user wrote by hand (or typed into the advanced config.toml editor)
     /// reaches this path on every panel save — deleting its reference would
     /// silently orphan the user's models.
     #[test]
     fn remove_codex_catalog_key_preserves_user_owned_references() {
-        let home = Path::new("/tmp/codeg-test-codex-home");
+        let home = Path::new("/tmp/harness-studio-test-codex-home");
         for foreign in [
             "manual.json",
             "/abs/path/to/manual.json",
             "~/my-catalog.json",
-            "nested/codeg-model-catalog.json",
+            "nested/harness-studio-model-catalog.json",
             "  ",
         ] {
             let base = config_with_catalog_ref(foreign);
@@ -14853,17 +15209,17 @@ base_url = \"https://example.test/v1\"
                 "must not touch a user-owned reference: {foreign}"
             );
         }
-        // An absolute path naming codeg's own file IS codeg-owned.
+        // An absolute path naming harness_studio's own file IS harness-studio-owned.
         let abs = home
             .join(crate::acp::codex_model_catalog::CATALOG_REL)
             .to_string_lossy()
             .into_owned();
-        assert!(is_codeg_owned_catalog_ref(&abs, home));
-        assert!(is_codeg_owned_catalog_ref(
+        assert!(is_harness_studio_owned_catalog_ref(&abs, home));
+        assert!(is_harness_studio_owned_catalog_ref(
             crate::acp::codex_model_catalog::CATALOG_REL,
             home
         ));
-        assert!(!is_codeg_owned_catalog_ref("manual.json", home));
+        assert!(!is_harness_studio_owned_catalog_ref("manual.json", home));
     }
 
     fn catalog_slugs(home: &Path) -> Vec<String> {
@@ -14885,11 +15241,11 @@ base_url = \"https://example.test/v1\"
             .collect()
     }
 
-    /// A catalog codeg generated before an upgrade is re-expanded from its
+    /// A catalog harness_studio generated before an upgrade is re-expanded from its
     /// stored intent, so the new official model shows up — in codex's own
     /// rank, behind the custom — without the user re-saving anything.
     #[test]
-    fn resync_rewrites_codegs_catalog_against_the_new_official_list() {
+    fn resync_rewrites_harness_studios_catalog_against_the_new_official_list() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         let config = config_with_catalog_ref(crate::acp::codex_model_catalog::CATALOG_REL);
@@ -14933,12 +15289,12 @@ base_url = \"https://example.test/v1\"
         );
     }
 
-    /// Nothing that codeg cannot regenerate is touched: the user's own catalog,
-    /// a config with no catalog at all, and a codeg catalog whose intent sidecar
+    /// Nothing that harness_studio cannot regenerate is touched: the user's own catalog,
+    /// a config with no catalog at all, and a harness_studio catalog whose intent sidecar
     /// is gone (re-importing it against the NEW list would read every newly
     /// shipped official as one the user removed).
     #[test]
-    fn resync_leaves_catalogs_codeg_cannot_regenerate_alone() {
+    fn resync_leaves_catalogs_harness_studio_cannot_regenerate_alone() {
         let new = crate::acp::codex_model_catalog::bundled_snapshot_models();
         let intent = r#"{"customs":[{"slug":"gw/x","base":"gpt-5.6-sol"}]}"#;
         let catalog_path = |home: &Path| home.join(crate::acp::codex_model_catalog::CATALOG_REL);
@@ -14950,7 +15306,7 @@ base_url = \"https://example.test/v1\"
             CodexCatalogResync::NotOwned
         );
 
-        // The user's own catalog, even with a codeg sidecar lying around.
+        // The user's own catalog, even with a harness_studio sidecar lying around.
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         fs::write(
@@ -14982,7 +15338,7 @@ base_url = \"https://example.test/v1\"
         );
         assert!(!catalog_path(home).exists(), "no catalog was generated");
 
-        // codeg's reference, but no sidecar: the old table stays as it is.
+        // harness_studio's reference, but no sidecar: the old table stays as it is.
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
         fs::write(
@@ -15156,7 +15512,7 @@ base_url = \"https://example.test/v1\"
     fn apply_codex_sandbox_config_rejects_bad_input() {
         // Relative writable_roots are NOT rejected by codex — they resolve
         // against CODEX_HOME ("rel/dir" → ~/.codex/rel/dir), silently granting
-        // write access somewhere the user never meant. So codeg rejects them.
+        // write access somewhere the user never meant. So harness_studio rejects them.
         assert!(apply_codex_sandbox_config(
             "",
             &CodexSandboxStructuredConfig {
@@ -15264,9 +15620,8 @@ base_url = \"https://example.test/v1\"
 
         // Other `[features]` keys are not projected, and must not be mistaken
         // for this one.
-        let other = codex_config_projection_from_toml(
-            "model = \"gpt-5\"\n\n[features]\nskills = true\n",
-        );
+        let other =
+            codex_config_projection_from_toml("model = \"gpt-5\"\n\n[features]\nskills = true\n");
         assert_eq!(plain, other);
     }
 
@@ -15288,7 +15643,7 @@ base_url = \"https://example.test/v1\"
     #[test]
     fn parse_grok_settings_untracks_default_without_model_block() {
         // `[models].default` naming a stock model (no `[model.*]` block) is not a
-        // codeg-managed custom model — the panel must show the custom fields empty.
+        // harness-studio-managed custom model — the panel must show the custom fields empty.
         let toml = "[model.foo]\nbase_url = \"x\"\n\n[models]\ndefault = \"grok-4.5\"\n";
         let s = parse_grok_settings(toml);
         assert!(s.custom_model_id.is_none());
@@ -15334,7 +15689,10 @@ base_url = \"https://example.test/v1\"
             },
         )
         .unwrap();
-        assert!(!merged.contains("base_url"), "empty base_url must omit the key");
+        assert!(
+            !merged.contains("base_url"),
+            "empty base_url must omit the key"
+        );
         let back = parse_grok_settings(&merged);
         assert_eq!(back.custom_model_id.as_deref(), Some("foo"));
         assert!(back.custom_base_url.is_none());
@@ -15368,7 +15726,10 @@ base_url = \"https://example.test/v1\"
             },
         )
         .unwrap();
-        assert!(!merged.contains("old"), "the stale block + default must be gone");
+        assert!(
+            !merged.contains("old"),
+            "the stale block + default must be gone"
+        );
         let back = parse_grok_settings(&merged);
         assert_eq!(back.custom_model_id.as_deref(), Some("new"));
         assert_eq!(back.custom_base_url.as_deref(), Some("https://new/v1"));
@@ -15376,8 +15737,9 @@ base_url = \"https://example.test/v1\"
 
     #[test]
     fn apply_grok_custom_model_update_preserves_unmanaged_block_keys() {
-        // Editing a managed block keeps keys codeg doesn't own (e.g. temperature).
-        let base = "[model.foo]\nmodel = \"foo\"\ntemperature = 0.7\nbase_url = \"https://old/v1\"\n\n\
+        // Editing a managed block keeps keys harness_studio doesn't own (e.g. temperature).
+        let base =
+            "[model.foo]\nmodel = \"foo\"\ntemperature = 0.7\nbase_url = \"https://old/v1\"\n\n\
                     [models]\ndefault = \"foo\"\n";
         let merged = apply_grok_structured_config(
             base,
@@ -15397,8 +15759,7 @@ base_url = \"https://example.test/v1\"
     fn apply_grok_custom_model_clear_removes_managed_block_and_default() {
         let base = "[model.foo]\nmodel = \"foo\"\nbase_url = \"https://x/v1\"\n\n\
                     [models]\ndefault = \"foo\"\n";
-        let merged =
-            apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
+        let merged = apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
         assert!(!merged.contains("[model."), "managed block removed");
         let back = parse_grok_settings(&merged);
         assert!(back.custom_model_id.is_none());
@@ -15407,10 +15768,9 @@ base_url = \"https://example.test/v1\"
     #[test]
     fn apply_grok_custom_model_clear_leaves_handset_stock_default() {
         // Clearing the (empty) custom form must NOT delete a hand-set stock
-        // `[models].default` that was never codeg-managed.
+        // `[models].default` that was never harness-studio-managed.
         let base = "[models]\ndefault = \"grok-4.5\"\n";
-        let merged =
-            apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
+        let merged = apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
         assert!(merged.contains("default = \"grok-4.5\""));
     }
 
@@ -15431,8 +15791,7 @@ base_url = \"https://example.test/v1\"
         );
         // `None` removes an existing key.
         let base = "[session]\nauto_compact_threshold_percent = 70\n";
-        let cleared =
-            apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
+        let cleared = apply_grok_structured_config(base, &GrokStructuredConfig::default()).unwrap();
         assert!(parse_grok_settings(&cleared)
             .auto_compact_threshold_percent
             .is_none());
@@ -15451,7 +15810,7 @@ base_url = \"https://example.test/v1\"
             Some("acceptEdits")
         );
         // `default` (grok's own default) and legacy `ask` keep the flag off so
-        // ACP permission requests reach codeg's UI.
+        // ACP permission requests reach harness_studio's UI.
         assert!(grok_config_permission_mode("[ui]\npermission_mode = \"default\"\n").is_none());
         assert!(grok_config_permission_mode("[ui]\npermission_mode = \"ask\"\n").is_none());
         // Unset / malformed / unknown ⇒ no flag (preserve the ability to prompt).
@@ -15532,7 +15891,7 @@ base_url = \"https://example.test/v1\"
         assert_eq!(by_kind.get(".pi/prompts"), Some(&false));
     }
 
-    /// A bare `.pi/` directory is not a project resource for pi, so codeg must not
+    /// A bare `.pi/` directory is not a project resource for pi, so harness_studio must not
     /// prompt about it (`hasTrustRequiringProjectResources` ignores it too).
     #[test]
     fn pi_trust_resources_ignores_a_bare_pi_dir() {
@@ -15557,7 +15916,7 @@ base_url = \"https://example.test/v1\"
     }
 
     /// `~/.agents/skills` is the USER's own store, not a repo's — pi excludes it
-    /// from the trust decision and so must codeg, or every workspace under $HOME
+    /// from the trust decision and so must harness_studio, or every workspace under $HOME
     /// would raise a bogus prompt.
     #[test]
     fn pi_trust_resources_excludes_the_user_agents_skills_store() {
@@ -15681,7 +16040,7 @@ base_url = \"https://example.test/v1\"
         }
     }
 
-    /// Revoking removes codeg's entry so the folder falls back to any ancestor
+    /// Revoking removes harness_studio's entry so the folder falls back to any ancestor
     /// decision and then to pi's default. Other users' decisions must survive.
     #[test]
     fn pi_set_project_trust_revoke_removes_only_our_entry() {
@@ -15699,7 +16058,10 @@ base_url = \"https://example.test/v1\"
 
         let after = read_json_object_or_empty(&trust);
         assert_eq!(after.get(&canonical_key(&ws)), None);
-        assert_eq!(after.get("/some/other"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            after.get("/some/other"),
+            Some(&serde_json::Value::Bool(true))
+        );
         assert_eq!(after.get("/denied"), Some(&serde_json::Value::Bool(false)));
     }
 
@@ -15717,12 +16079,16 @@ base_url = \"https://example.test/v1\"
         assert!(!trust.exists());
     }
 
-    /// Drive the launch gate with an isolated pi agent dir AND an isolated codeg
-    /// home (the acknowledgement store lives there, via `CODEG_HOME`).
-    fn launch_block_for(agent_dir: &Path, codeg_home: &Path, cwd: &Path) -> Option<String> {
+    /// Drive the launch gate with an isolated pi agent dir AND an isolated harness_studio
+    /// home (the acknowledgement store lives there, via `HARNESS_STUDIO_HOME`).
+    fn launch_block_for(
+        agent_dir: &Path,
+        harness_studio_home: &Path,
+        cwd: &Path,
+    ) -> Option<String> {
         temp_env::with_var(
-            "CODEG_HOME",
-            Some(codeg_home.to_string_lossy().to_string()),
+            "HARNESS_STUDIO_HOME",
+            Some(harness_studio_home.to_string_lossy().to_string()),
             || pi_project_trust_launch_block(cwd, &pi_env_for(agent_dir)),
         )
     }
@@ -15739,7 +16105,7 @@ base_url = \"https://example.test/v1\"
             map.insert(canonical_key(&ws), serde_json::Value::Bool(verdict));
             write_json_object_pretty(&agent_dir.join("trust.json"), &map).unwrap();
         }
-        (ws, agent_dir, tmp.join("codeg-home"))
+        (ws, agent_dir, tmp.join("harness-studio-home"))
     }
 
     /// THE regression this whole change exists for on an upgraded install: pi
@@ -15772,7 +16138,7 @@ base_url = \"https://example.test/v1\"
         map.insert(canonical_key(&parent), serde_json::Value::Bool(true));
         write_json_object_pretty(&agent_dir.join("trust.json"), &map).unwrap();
 
-        let blocked = launch_block_for(&agent_dir, &tmp.path().join("codeg-home"), &ws);
+        let blocked = launch_block_for(&agent_dir, &tmp.path().join("harness-studio-home"), &ws);
 
         assert!(blocked.is_some());
         assert!(
@@ -15782,7 +16148,7 @@ base_url = \"https://example.test/v1\"
     }
 
     /// Once the user answers for the folder, it launches. Acknowledging records
-    /// only codeg's confirmation — pi's own grant is untouched.
+    /// only harness_studio's confirmation — pi's own grant is untouched.
     #[test]
     fn pi_launch_proceeds_after_the_grant_is_acknowledged() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -15830,7 +16196,7 @@ base_url = \"https://example.test/v1\"
         write_json_object_pretty(&agent_dir.join("trust.json"), &map).unwrap();
 
         assert_eq!(
-            launch_block_for(&agent_dir, &tmp.path().join("codeg-home"), &ws),
+            launch_block_for(&agent_dir, &tmp.path().join("harness-studio-home"), &ws),
             None,
         );
     }
@@ -15851,7 +16217,7 @@ base_url = \"https://example.test/v1\"
         assert!(!pi_trust_is_acknowledged_at(&ack, &canonical_key(&ws)));
     }
 
-    /// The write is a read-modify-write, and two codeg surfaces (the approval
+    /// The write is a read-modify-write, and two harness_studio surfaces (the approval
     /// banner and the settings list's revoke buttons) can fire at once. Without
     /// serialization each writer would persist the map it read, so the last one
     /// to land silently drops every entry added since it read — losing a grant
@@ -15890,7 +16256,7 @@ base_url = \"https://example.test/v1\"
         }
     }
 
-    /// The lock must not outlive the operation, or the next decision — from codeg
+    /// The lock must not outlive the operation, or the next decision — from harness_studio
     /// or from pi, which takes the same lock — would stall until it goes stale.
     #[test]
     fn pi_trust_write_releases_the_lock() {
@@ -15908,7 +16274,7 @@ base_url = \"https://example.test/v1\"
     }
 
     /// pi holds this same lock while it reads or writes its store. When it is
-    /// held, codeg must back off and report it rather than write anyway — writing
+    /// held, harness_studio must back off and report it rather than write anyway — writing
     /// through the lock is exactly the interleaving the lock exists to prevent.
     #[test]
     fn pi_trust_write_defers_to_a_lock_held_by_pi() {
@@ -15933,7 +16299,7 @@ base_url = \"https://example.test/v1\"
     }
 
     /// A lock orphaned by a crash must not wedge project trust forever — pi
-    /// breaks the same tie by age, so codeg has to agree on when to steal it.
+    /// breaks the same tie by age, so harness_studio has to agree on when to steal it.
     #[test]
     fn pi_trust_lock_missing_or_unreadable_counts_as_stale() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -15944,7 +16310,7 @@ base_url = \"https://example.test/v1\"
         assert!(!pi_trust_lock_is_stale(&fresh));
     }
 
-    /// `trust.json` holds decisions the user made inside pi. If codeg can't parse
+    /// `trust.json` holds decisions the user made inside pi. If harness_studio can't parse
     /// it, it must refuse loudly rather than rewrite the file from scratch.
     #[test]
     fn pi_set_project_trust_never_clobbers_an_unparseable_file() {
@@ -15961,7 +16327,7 @@ base_url = \"https://example.test/v1\"
     }
 
     /// The settings list surfaces decisions for review/revoke — including ones an
-    /// older codeg auto-seeded. `null` entries carry no decision, so they are not
+    /// older harness_studio auto-seeded. `null` entries carry no decision, so they are not
     /// listed.
     #[test]
     fn pi_trust_entries_lists_decisions_sorted_and_skips_nulls() {
@@ -16013,10 +16379,7 @@ base_url = \"https://example.test/v1\"
     // composer sends is clamped straight back and the picker looks broken. These
     // pin the shape pi actually reads.
 
-    fn pi_reasoning_spec(
-        reasoning: bool,
-        map: &[(&str, Option<&str>)],
-    ) -> PiModelReasoningSpec {
+    fn pi_reasoning_spec(reasoning: bool, map: &[(&str, Option<&str>)]) -> PiModelReasoningSpec {
         PiModelReasoningSpec {
             reasoning,
             thinking_level_map: map
@@ -16043,7 +16406,11 @@ base_url = \"https://example.test/v1\"
             "gpt-5.6-sol",
             Some(&pi_reasoning_spec(
                 true,
-                &[("off", Some("none")), ("minimal", None), ("xhigh", Some("xhigh"))],
+                &[
+                    ("off", Some("none")),
+                    ("minimal", None),
+                    ("xhigh", Some("xhigh")),
+                ],
             )),
         );
 
@@ -16067,7 +16434,11 @@ base_url = \"https://example.test/v1\"
             "reasoning-model",
             Some(&pi_reasoning_spec(
                 true,
-                &[("minimal", Some("minimal")), ("max", Some("max")), ("ultra", Some("ultra"))],
+                &[
+                    ("minimal", Some("minimal")),
+                    ("max", Some("max")),
+                    ("ultra", Some("ultra")),
+                ],
             )),
         );
 
@@ -16080,14 +16451,16 @@ base_url = \"https://example.test/v1\"
 
     #[test]
     fn pi_rpc_projection_keeps_only_capabilities_and_rejects_wrong_responses() {
-        let line = r#"{"id":"codeg-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"gpt-5.6-sol","reasoning":true,"thinkingLevelMap":{"max":"max"},"baseUrl":"https://secret.example","apiKey":"secret"}]}}"#;
+        let line = r#"{"id":"harness-studio-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"gpt-5.6-sol","reasoning":true,"thinkingLevelMap":{"max":"max"},"baseUrl":"https://secret.example","apiKey":"secret"}]}}"#;
         let models = parse_pi_model_capabilities(line).unwrap().unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].thinking_level_map["max"], Some("max".into()));
         let projected = serde_json::to_string(&models).unwrap();
         assert!(!projected.contains("secret"));
         // Someone else's line: keep reading.
-        assert!(parse_pi_model_capabilities(&line.replace("codeg-models", "other")).is_none());
+        assert!(
+            parse_pi_model_capabilities(&line.replace("harness-studio-models", "other")).is_none()
+        );
         // Our answer, refusing or unreadable: stop, and say it failed.
         assert_eq!(
             parse_pi_model_capabilities(&line.replace(r#""success":true"#, r#""success":false"#)),
@@ -16159,7 +16532,7 @@ base_url = \"https://example.test/v1\"
 
     #[test]
     fn pi_agent_dir_expands_tilde_override_like_the_pi_runtime() {
-        // `~` is the child's home, which `pi_child_home` reads off codeg's own
+        // `~` is the child's home, which `pi_child_home` reads off harness_studio's own
         // home variable, and other tests point `HOME` at temp dirs through
         // `temp_env`. Pin it, so this test serializes against them on
         // temp_env's lock and the expansion has one home to land in.
@@ -16179,14 +16552,14 @@ base_url = \"https://example.test/v1\"
     }
 
     /// `~` is the CHILD's home — a launch that relocates `HOME` relocates pi's
-    /// profile with it. A key the launch leaves alone is inherited from codeg,
+    /// profile with it. A key the launch leaves alone is inherited from harness_studio,
     /// while a blank one is removed from the child, so pi falls back to its
     /// default instead of inheriting anything.
     #[cfg(unix)]
     #[test]
     fn pi_agent_dir_follows_the_child_env() {
         let home = tempfile::tempdir().unwrap();
-        let inherited = || Some(std::ffi::OsString::from("/codeg/own/pi-agent"));
+        let inherited = || Some(std::ffi::OsString::from("/harness_studio/own/pi-agent"));
         let mut env = BTreeMap::new();
         env.insert(
             "HOME".to_string(),
@@ -16194,7 +16567,7 @@ base_url = \"https://example.test/v1\"
         );
         assert_eq!(
             pi_agent_dir_for_child(&env, inherited()),
-            PathBuf::from("/codeg/own/pi-agent")
+            PathBuf::from("/harness_studio/own/pi-agent")
         );
 
         env.insert("PI_CODING_AGENT_DIR".to_string(), "~/isolated".to_string());
@@ -16243,7 +16616,7 @@ base_url = \"https://example.test/v1\"
         assert_eq!(pi_child_home_from(&untouched, None), account);
         let removed = BTreeMap::from([(CHILD_HOME_KEY.to_string(), String::new())]);
         assert_eq!(
-            pi_child_home_from(&removed, Some(OsString::from("codeg-home"))),
+            pi_child_home_from(&removed, Some(OsString::from("harness-studio-home"))),
             account
         );
     }
@@ -16294,7 +16667,7 @@ base_url = \"https://example.test/v1\"
 
     /// A relative agent dir lives inside the workspace pi runs in, so the
     /// repository itself can ship the `trust.json` pi reads there. The gate must
-    /// read that same file; one under codeg's own cwd would miss the grant.
+    /// read that same file; one under harness_studio's own cwd would miss the grant.
     #[test]
     fn pi_launch_gate_reads_a_relative_agent_dir_inside_the_workspace() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -16308,8 +16681,13 @@ base_url = \"https://example.test/v1\"
 
         let env = BTreeMap::from([("PI_CODING_AGENT_DIR".to_string(), ".pi-agent".to_string())]);
         let blocked = temp_env::with_var(
-            "CODEG_HOME",
-            Some(tmp.path().join("codeg-home").to_string_lossy().to_string()),
+            "HARNESS_STUDIO_HOME",
+            Some(
+                tmp.path()
+                    .join("harness-studio-home")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             || pi_project_trust_launch_block(&ws, &env),
         );
         assert!(
@@ -16322,8 +16700,16 @@ base_url = \"https://example.test/v1\"
     fn pi_config_projection_reads_selected_agent_directory() {
         let default = tempfile::tempdir().unwrap();
         let custom = tempfile::tempdir().unwrap();
-        fs::write(default.path().join("settings.json"), r#"{"defaultModel":"wrong"}"#).unwrap();
-        fs::write(custom.path().join("settings.json"), r#"{"defaultModel":"right","defaultThinkingLevel":"max"}"#).unwrap();
+        fs::write(
+            default.path().join("settings.json"),
+            r#"{"defaultModel":"wrong"}"#,
+        )
+        .unwrap();
+        fs::write(
+            custom.path().join("settings.json"),
+            r#"{"defaultModel":"right","defaultThinkingLevel":"max"}"#,
+        )
+        .unwrap();
         let loaded = load_pi_config_at(custom.path());
         assert_eq!(loaded.default_model.as_deref(), Some("right"));
         assert_eq!(loaded.default_thinking_level.as_deref(), Some("max"));
@@ -16356,17 +16742,23 @@ base_url = \"https://example.test/v1\"
             "pi",
             r#"read request
 case "$request $*" in
-  *codeg-models*--offline*--no-session*--no-extensions*)
+  *harness-studio-models*--offline*--no-session*--no-extensions*)
     if [ -n "$PI_CODING_AGENT_DIR" ]; then
-      printf '%s\n' '{"id":"codeg-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"via-override","reasoning":true,"thinkingLevelMap":{"max":"max"}}]}}'
+      printf '%s\n' '{"id":"harness-studio-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"via-override","reasoning":true,"thinkingLevelMap":{"max":"max"}}]}}'
     fi
     ;;
 esac
 "#,
         );
         let mut env = BTreeMap::new();
-        env.insert("PI_ACP_PI_COMMAND".into(), script.to_string_lossy().into_owned());
-        env.insert("PI_CODING_AGENT_DIR".into(), temp.path().to_string_lossy().into_owned());
+        env.insert(
+            "PI_ACP_PI_COMMAND".into(),
+            script.to_string_lossy().into_owned(),
+        );
+        env.insert(
+            "PI_CODING_AGENT_DIR".into(),
+            temp.path().to_string_lossy().into_owned(),
+        );
         let catalog = query_pi_model_catalog(&env, PI_ANSWER_DEADLINE).await;
         assert_eq!(catalog.status, PiCatalogStatus::Ok);
         assert_eq!(catalog.models.len(), 1);
@@ -16406,7 +16798,7 @@ esac
             temp.path(),
             "refusing-pi",
             r#"read request
-printf '%s\n' '{"id":"codeg-models","type":"response","command":"get_available_models","success":false,"error":"boom"}'
+printf '%s\n' '{"id":"harness-studio-models","type":"response","command":"get_available_models","success":false,"error":"boom"}'
 "#,
         );
         assert_eq!(
@@ -16434,14 +16826,14 @@ printf '%s\n' '{"id":"codeg-models","type":"response","command":"get_available_m
     #[cfg(unix)]
     #[tokio::test]
     async fn pi_catalog_never_runs_a_pi_planted_in_the_shared_temp_dir() {
-        let entry = format!("codeg-planted-{}", uuid::Uuid::new_v4());
+        let entry = format!("harness-studio-planted-{}", uuid::Uuid::new_v4());
         let planted_dir = std::env::temp_dir().join(&entry);
         fs::create_dir(&planted_dir).unwrap();
         fake_pi(
             &planted_dir,
             "pi",
             r#"read request
-printf '%s\n' '{"id":"codeg-models","type":"response","command":"get_available_models","success":true,"data":{"models":[]}}'
+printf '%s\n' '{"id":"harness-studio-models","type":"response","command":"get_available_models","success":true,"data":{"models":[]}}'
 "#,
         );
         let agent_dir = tempfile::tempdir().unwrap();
@@ -16470,11 +16862,14 @@ printf '%s\n' '{"id":"codeg-models","type":"response","command":"get_available_m
             &script,
             r#"@echo off
 set /p request=
-echo {"id":"codeg-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"windows","reasoning":true,"thinkingLevelMap":{"max":"max"}}]}}
+echo {"id":"harness-studio-models","type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"openai","id":"windows","reasoning":true,"thinkingLevelMap":{"max":"max"}}]}}
 "#.replace('\n', "\r\n"),
         ).unwrap();
         let mut env = BTreeMap::new();
-        env.insert("PI_ACP_PI_COMMAND".into(), script.to_string_lossy().into_owned());
+        env.insert(
+            "PI_ACP_PI_COMMAND".into(),
+            script.to_string_lossy().into_owned(),
+        );
         let catalog = query_pi_model_catalog(&env, PI_ANSWER_DEADLINE).await;
         assert_eq!(catalog.status, PiCatalogStatus::Ok);
         assert_eq!(catalog.models.len(), 1);
@@ -16611,7 +17006,11 @@ echo {"id":"codeg-models","type":"response","command":"get_available_models","su
             "gpt-5.6-sol",
             Some(&pi_reasoning_spec(
                 true,
-                &[("off", Some("none")), ("minimal", None), ("low", Some("LOW"))],
+                &[
+                    ("off", Some("none")),
+                    ("minimal", None),
+                    ("low", Some("LOW")),
+                ],
             )),
         );
 
@@ -16620,7 +17019,10 @@ echo {"id":"codeg-models","type":"response","command":"get_available_models","su
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.6-sol");
         assert_eq!(models[0].reasoning, Some(true));
-        assert_eq!(models[0].thinking_level_map["off"], Some("none".to_string()));
+        assert_eq!(
+            models[0].thinking_level_map["off"],
+            Some("none".to_string())
+        );
         assert_eq!(models[0].thinking_level_map["minimal"], None);
         assert_eq!(models[0].thinking_level_map["low"], Some("LOW".to_string()));
     }
@@ -16809,11 +17211,11 @@ echo {"id":"codeg-models","type":"response","command":"get_available_models","su
         // endpoint is unchanged. codex-acp 1.0.1 reads `model_provider` from
         // config.toml directly, so it is no longer pinned into the launch env
         // where the fingerprint previously caught it incidentally.
-        let codeg = r#"
+        let harness_studio = r#"
 model = "gpt-5-codex"
-model_provider = "codeg"
+model_provider = "harness_studio"
 
-[model_providers.codeg]
+[model_providers.harness_studio]
 base_url = "https://gateway.example/v1"
 wire_api = "responses"
 
@@ -16821,36 +17223,44 @@ wire_api = "responses"
 base_url = "https://gateway.example/v1"
 wire_api = "chat"
 "#;
-        let other = codeg.replace(
-            "model_provider = \"codeg\"",
+        let other = harness_studio.replace(
+            "model_provider = \"harness_studio\"",
             "model_provider = \"other\"",
         );
 
-        let p_codeg = codex_config_projection_from_toml(codeg);
+        let p_harness_studio = codex_config_projection_from_toml(harness_studio);
         let p_other = codex_config_projection_from_toml(&other);
 
         assert_eq!(
-            p_codeg.get("modelProvider").and_then(|v| v.as_str()),
-            Some("codeg")
+            p_harness_studio
+                .get("modelProvider")
+                .and_then(|v| v.as_str()),
+            Some("harness_studio")
         );
         assert_eq!(
             p_other.get("modelProvider").and_then(|v| v.as_str()),
             Some("other")
         );
         // Same endpoint resolved for both providers...
-        assert_eq!(p_codeg.get("apiBaseUrl"), p_other.get("apiBaseUrl"));
+        assert_eq!(
+            p_harness_studio.get("apiBaseUrl"),
+            p_other.get("apiBaseUrl")
+        );
         // ...yet the projections differ, so the launch-config fingerprint does too.
-        assert_ne!(p_codeg, p_other);
+        assert_ne!(p_harness_studio, p_other);
 
         // Deterministic for identical input.
-        assert_eq!(codex_config_projection_from_toml(codeg), p_codeg);
+        assert_eq!(
+            codex_config_projection_from_toml(harness_studio),
+            p_harness_studio
+        );
 
         // `modelProvider` must NOT be an AgentRuntimeConfig key, or
         // build_runtime_env_from_setting would mirror it back into a runtime env
         // var (reintroducing the very MODEL_PROVIDER pin we removed).
         assert!(
             serde_json::from_value::<AgentRuntimeConfig>(serde_json::Value::Object(
-                p_codeg.clone()
+                p_harness_studio.clone()
             ))
             .is_ok()
         );
@@ -16860,14 +17270,20 @@ wire_api = "chat"
         // behavior; the bare `model` still projects.
         let bare = codex_config_projection_from_toml("model = \"gpt-5-codex\"\n");
         assert!(!bare.contains_key("modelProvider"));
-        assert_eq!(bare.get("model").and_then(|v| v.as_str()), Some("gpt-5-codex"));
+        assert_eq!(
+            bare.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5-codex")
+        );
 
         // Malformed TOML must not panic — yields an empty projection.
         assert!(codex_config_projection_from_toml("model_provider = ").is_empty());
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("codeg-acp-{name}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "harness-studio-acp-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).expect("create test directory");
         dir
     }
@@ -16998,7 +17414,7 @@ wire_api = "chat"
                 ];
                 assert_eq!(spec.global_dirs, expected);
                 // The product CLI owns `$DSH_HOME/skills/.system` (the provider
-                // sets `skipSystem` on that root), so codeg never writes there.
+                // sets `skipSystem` on that root), so harness_studio never writes there.
                 assert!(is_read_only_skill_path(
                     AgentType::DeepSeek,
                     &expected[0].join(".system").join("imagegen")
@@ -17015,7 +17431,7 @@ wire_api = "chat"
     fn deepseek_project_skills_hang_off_the_git_root() {
         // `dsh-skill-filesystem` resolves project roots by walking up to the
         // nearest `.git`, so opening a package subdirectory must still target
-        // the repo root — otherwise codeg writes a skill the agent never scans.
+        // the repo root — otherwise harness_studio writes a skill the agent never scans.
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path().join("repo");
         let nested = repo.join("packages").join("app");
@@ -17174,7 +17590,10 @@ wire_api = "chat"
             out.get("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"),
             Some(&Some("via gateway".to_string()))
         );
-        assert_eq!(out.get("ANTHROPIC_MODEL"), Some(&Some("gw/opus".to_string())));
+        assert_eq!(
+            out.get("ANTHROPIC_MODEL"),
+            Some(&Some("gw/opus".to_string()))
+        );
 
         // Omitted custom keys are authoritative clears (None => remove from env),
         // matching the five model fields' overwrite semantics.
@@ -17211,6 +17630,38 @@ wire_api = "chat"
     }
 
     #[test]
+    fn parse_provider_model_named_roles_and_subagent_round_trip_and_clear() {
+        let out = parse_provider_model(
+            AgentType::ClaudeCode,
+            Some(r#"{"sonnet":"daily[1m]","sonnetName":" Daily ","opusName":"Deep","fableName":"Long","haikuName":"Quick","subagent":" child[1m] ","reasoning":"legacy"}"#),
+        );
+        for (key, expected) in [
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "daily[1m]"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "Daily"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "Deep"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "Long"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "Quick"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "child[1m]"),
+            ("ANTHROPIC_REASONING_MODEL", "legacy"),
+        ] {
+            assert_eq!(out.get(key), Some(&Some(expected.to_string())));
+        }
+        let cleared = parse_provider_model(
+            AgentType::ClaudeCode,
+            Some(r#"{"main":"x","sonnetName":" "}"#),
+        );
+        for key in [
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ] {
+            assert_eq!(cleared.get(key), Some(&None));
+        }
+    }
+
+    #[test]
     fn parse_provider_model_codex_uses_default_slug() {
         // A structured codex catalog resolves OPENAI_MODEL to its default slug,
         // not the whole JSON blob.
@@ -17220,7 +17671,10 @@ wire_api = "chat"
 
         // A legacy plain slug passes through as the model.
         let legacy = parse_provider_model(AgentType::Codex, Some("gpt-5.5"));
-        assert_eq!(legacy.get("OPENAI_MODEL"), Some(&Some("gpt-5.5".to_string())));
+        assert_eq!(
+            legacy.get("OPENAI_MODEL"),
+            Some(&Some("gpt-5.5".to_string()))
+        );
 
         // No models → OPENAI_MODEL cleared (None).
         let empty = parse_provider_model(AgentType::Codex, Some(r#"{"models":[]}"#));
@@ -17239,13 +17693,17 @@ wire_api = "chat"
             "env": {
                 "ANTHROPIC_CUSTOM_MODEL_OPTION": "gw/opus-stale",
                 "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Stale",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale name",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "old-child[1m]",
                 "ANTHROPIC_MODEL": "keep-me"
             }
         });
         let patch = serde_json::json!({
             "env": {
                 "ANTHROPIC_CUSTOM_MODEL_OPTION": null,
-                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": null
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": null,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": null,
+                "CLAUDE_CODE_SUBAGENT_MODEL": null
             }
         });
         merge_json_values(&mut base, &patch);
@@ -17255,6 +17713,8 @@ wire_api = "chat"
             .expect("env object survives the merge");
         assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION"));
         assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"));
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"));
+        assert!(!env.contains_key("CLAUDE_CODE_SUBAGENT_MODEL"));
         assert_eq!(
             env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()),
             Some("keep-me")
@@ -17432,36 +17892,38 @@ wire_api = "chat"
             .expect("fragment must parse")
             .get("model_providers")
             .and_then(toml::Value::as_table)
-            .and_then(|providers| providers.get("codeg"))
+            .and_then(|providers| providers.get("harness_studio"))
             .and_then(toml::Value::as_table)
             .cloned()
-            .expect("fragment must define model_providers.codeg")
+            .expect("fragment must define model_providers.harness_studio")
     }
 
     fn auth_flag_of(table: &toml::map::Map<String, toml::Value>) -> Option<bool> {
-        table.get("requires_openai_auth").and_then(toml::Value::as_bool)
+        table
+            .get("requires_openai_auth")
+            .and_then(toml::Value::as_bool)
     }
 
     #[test]
     fn codex_auth_default_is_supplied_only_when_absent() {
-        // codeg provisions its provider with the key in auth.json and no
+        // harness_studio provisions its provider with the key in auth.json and no
         // `env_key`, so a provider WE create needs requires_openai_auth = true.
-        let mut fresh = provider_table_of("[model_providers.codeg]\nbase_url = \"https://x/v1\"\n");
+        let mut fresh =
+            provider_table_of("[model_providers.harness_studio]\nbase_url = \"https://x/v1\"\n");
         ensure_codex_provider_auth_default(&mut fresh);
         assert_eq!(auth_flag_of(&fresh), Some(true));
 
         // An explicit false is the user's call and must survive every path —
         // this is the regression the whole change exists for.
         let mut explicit_false = provider_table_of(
-            "[model_providers.codeg]\nbase_url = \"https://x/v1\"\nrequires_openai_auth = false\n",
+            "[model_providers.harness_studio]\nbase_url = \"https://x/v1\"\nrequires_openai_auth = false\n",
         );
         ensure_codex_provider_auth_default(&mut explicit_false);
         assert_eq!(auth_flag_of(&explicit_false), Some(false));
 
         // An explicit true is left alone rather than rewritten.
-        let mut explicit_true = provider_table_of(
-            "[model_providers.codeg]\nrequires_openai_auth = true\n",
-        );
+        let mut explicit_true =
+            provider_table_of("[model_providers.harness_studio]\nrequires_openai_auth = true\n");
         ensure_codex_provider_auth_default(&mut explicit_true);
         assert_eq!(auth_flag_of(&explicit_true), Some(true));
     }
@@ -17472,8 +17934,8 @@ wire_api = "chat"
         // `!requires_openai_auth && <non-empty x-openai-actor-authorization>`,
         // so writing the default here would silently disable that auth path.
         let mut header_present = provider_table_of(
-            "[model_providers.codeg]\nbase_url = \"https://x/v1\"\n\n\
-             [model_providers.codeg.http_headers]\n\
+            "[model_providers.harness_studio]\nbase_url = \"https://x/v1\"\n\n\
+             [model_providers.harness_studio.http_headers]\n\
              x-openai-actor-authorization = \"local-image-extension\"\n",
         );
         ensure_codex_provider_auth_default(&mut header_present);
@@ -17481,7 +17943,7 @@ wire_api = "chat"
 
         // Header matching is case-insensitive, mirroring eq_ignore_ascii_case.
         let mut mixed_case = provider_table_of(
-            "[model_providers.codeg.http_headers]\n\
+            "[model_providers.harness_studio.http_headers]\n\
              X-OpenAI-Actor-Authorization = \"local-image-extension\"\n",
         );
         ensure_codex_provider_auth_default(&mut mixed_case);
@@ -17489,7 +17951,7 @@ wire_api = "chat"
 
         // An inline table is the same table to the parser.
         let mut inline = provider_table_of(
-            "[model_providers.codeg]\n\
+            "[model_providers.harness_studio]\n\
              http_headers = { \"x-openai-actor-authorization\" = \"local-image-extension\" }\n",
         );
         ensure_codex_provider_auth_default(&mut inline);
@@ -17498,7 +17960,7 @@ wire_api = "chat"
         // An empty header value does not enable the path upstream
         // (`!value.trim().is_empty()`), so the default still applies.
         let mut empty_value = provider_table_of(
-            "[model_providers.codeg.http_headers]\nx-openai-actor-authorization = \"  \"\n",
+            "[model_providers.harness_studio.http_headers]\nx-openai-actor-authorization = \"  \"\n",
         );
         ensure_codex_provider_auth_default(&mut empty_value);
         assert_eq!(auth_flag_of(&empty_value), Some(true));
@@ -17506,8 +17968,8 @@ wire_api = "chat"
         // A header plus an explicit true is a contradictory config, but it is
         // the user's: never rewrite or remove it.
         let mut header_and_true = provider_table_of(
-            "[model_providers.codeg]\nrequires_openai_auth = true\n\n\
-             [model_providers.codeg.http_headers]\n\
+            "[model_providers.harness_studio]\nrequires_openai_auth = true\n\n\
+             [model_providers.harness_studio.http_headers]\n\
              x-openai-actor-authorization = \"local-image-extension\"\n",
         );
         ensure_codex_provider_auth_default(&mut header_and_true);
@@ -17516,7 +17978,7 @@ wire_api = "chat"
         // A quoted key containing dots is ONE literal key, not an http_headers
         // sub-table, so it must not suppress the default.
         let mut literal_dotted_key = provider_table_of(
-            "[model_providers.codeg]\n\
+            "[model_providers.harness_studio]\n\
              \"http_headers.x-openai-actor-authorization\" = \"local-image-extension\"\n",
         );
         ensure_codex_provider_auth_default(&mut literal_dotted_key);
@@ -17533,13 +17995,13 @@ wire_api = "chat"
             let config_path = dir.path().join("config.toml");
             std::fs::write(
                 &config_path,
-                "model_provider = \"codeg\"\n\n\
-                 [model_providers.codeg]\n\
+                "model_provider = \"harness_studio\"\n\n\
+                 [model_providers.harness_studio]\n\
                  base_url = \"https://old.example/v1\"\n\
-                 name = \"codeg\"\n\
+                 name = \"harness_studio\"\n\
                  wire_api = \"responses\"\n\
                  requires_openai_auth = false\n\n\
-                 [model_providers.codeg.http_headers]\n\
+                 [model_providers.harness_studio.http_headers]\n\
                  x-openai-actor-authorization = \"local-image-extension\"\n",
             )
             .expect("seed config.toml");
@@ -17592,13 +18054,13 @@ wire_api = "chat"
             assert_eq!(
                 auth_flag_of(&provider_table_of(&written)),
                 Some(true),
-                "a provider codeg creates still gets the default"
+                "a provider harness_studio creates still gets the default"
             );
         });
     }
 
     #[test]
-    fn codex_cascade_leaves_a_non_codeg_provider_alone() {
+    fn codex_cascade_leaves_a_non_harness_studio_provider_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         temp_env::with_var("CODEX_HOME", Some(dir.path()), || {
             let config_path = dir.path().join("config.toml");
@@ -17630,7 +18092,7 @@ wire_api = "chat"
                 .expect("custom provider must survive");
             assert!(
                 !custom.contains_key("requires_openai_auth"),
-                "only the codeg provider is codeg-managed"
+                "only the harness_studio provider is harness-studio-managed"
             );
         });
     }
@@ -17698,7 +18160,10 @@ wire_api = "chat"
             "the legacy approvalMode key is dropped: the CLI never reads it \
              from cli-config.json"
         );
-        assert_eq!(v.pointer("/sandbox/mode"), Some(&serde_json::json!("enabled")));
+        assert_eq!(
+            v.pointer("/sandbox/mode"),
+            Some(&serde_json::json!("enabled"))
+        );
         assert_eq!(
             v.pointer("/permissions/allow"),
             Some(&serde_json::json!(["Shell(npm run build)"]))
@@ -17721,7 +18186,9 @@ wire_api = "chat"
         // any inherited one instead of probing a credential a launch wouldn't use.
         let cleared = qoder_probe_env(&db, Some("")).await;
         assert_eq!(
-            cleared.get("QODER_PERSONAL_ACCESS_TOKEN").map(String::as_str),
+            cleared
+                .get("QODER_PERSONAL_ACCESS_TOKEN")
+                .map(String::as_str),
             Some("")
         );
         let unset = qoder_probe_env(&db, None).await;
@@ -17738,11 +18205,11 @@ wire_api = "chat"
         // API-key mode: the form value wins over saved env and is trimmed; the
         // base URL is always scrubbed to empty (⇒ removed by run_cursor_probe).
         let env = cursor_probe_env(&db, Some("  my-key  ")).await;
-        assert_eq!(env.get("CURSOR_API_KEY").map(String::as_str), Some("my-key"));
         assert_eq!(
-            env.get("CURSOR_API_BASE_URL").map(String::as_str),
-            Some("")
+            env.get("CURSOR_API_KEY").map(String::as_str),
+            Some("my-key")
         );
+        assert_eq!(env.get("CURSOR_API_BASE_URL").map(String::as_str), Some(""));
 
         // Subscription passes an empty key → present but empty, so the probe
         // strips any inherited value instead of leaking it.
@@ -17841,8 +18308,7 @@ wire_api = "chat"
     #[test]
     fn parse_cursor_models_tolerates_ansi_markers_and_bare_ids() {
         // ANSI SGR + a leading list marker + a bare-id line with no label.
-        let stdout =
-            "\u{1b}[1mAvailable models\u{1b}[0m\n- gpt-5.2 - GPT-5.2\ncomposer-2.5\n";
+        let stdout = "\u{1b}[1mAvailable models\u{1b}[0m\n- gpt-5.2 - GPT-5.2\ncomposer-2.5\n";
         let (models, default_model) = parse_cursor_models(stdout);
         assert_eq!(default_model, None);
         assert_eq!(models.len(), 2);
@@ -17859,8 +18325,8 @@ wire_api = "chat"
         // id plus the current event_seq (informational; the viewer cold-attaches
         // with a full snapshot, not a cursor replay).
         use crate::acp::manager::ConnectionManager;
+        use crate::events::EventEmitter;
         use crate::models::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         let mgr = ConnectionManager::new();
         mgr.insert_test_connection("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
@@ -17885,8 +18351,8 @@ wire_api = "chat"
         // No live connection owns the conversation → None (the client spawns +
         // owns one instead of attaching as a viewer).
         use crate::acp::manager::ConnectionManager;
+        use crate::events::EventEmitter;
         use crate::models::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         let mgr = ConnectionManager::new();
         mgr.insert_test_connection("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
@@ -17907,8 +18373,8 @@ wire_api = "chat"
         // second client opening the same historical conversation attaches as a
         // viewer instead of reusing-as-owner and later killing the connection.
         use crate::acp::manager::ConnectionManager;
+        use crate::events::EventEmitter;
         use crate::models::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         let mgr = ConnectionManager::new();
         mgr.insert_test_connection("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
@@ -17973,8 +18439,8 @@ wire_api = "chat"
         // live attach target → None, so the viewer reads persisted detail
         // instead of attaching to a dying stream.
         use crate::acp::manager::ConnectionManager;
+        use crate::events::EventEmitter;
         use crate::models::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         for terminal in [ConnectionStatus::Disconnected, ConnectionStatus::Error] {
             let mgr = ConnectionManager::new();
@@ -18070,7 +18536,7 @@ wire_api = "chat"
     }
 
     // hermes-agent's postinstall bootstraps its runtime, and it is the only
-    // package codeg force-enables lifecycle scripts for. The spec, not the
+    // package harness_studio force-enables lifecycle scripts for. The spec, not the
     // agent type, is what `npm_package_requires_scripts` keys off, so a custom
     // version spec must still name the package, or the install leaves a shim
     // that only fails later, at connect, with "runtime is not ready". The spec's
@@ -18140,7 +18606,7 @@ wire_api = "chat"
 
     #[tokio::test]
     async fn does_not_cache_failed_npm_global_prefix_resolution() {
-        let cache = tokio::sync::OnceCell::const_new();
+        let cache = std::sync::Mutex::new(None);
         let first = cached_npm_global_prefix_with(&cache, || async { None }).await;
         assert_eq!(first, None);
 
@@ -18149,6 +18615,26 @@ wire_api = "chat"
             cached_npm_global_prefix_with(&cache, || async { Some(expected.clone()) }).await;
 
         assert_eq!(second, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn npm_global_prefix_cache_expires_and_respects_refresh_generation() {
+        let previous = PathBuf::from("previous-prefix");
+        let updated = PathBuf::from("updated-prefix");
+        let cache = std::sync::Mutex::new(Some((
+            previous,
+            std::time::Instant::now() - Duration::from_secs(61),
+            crate::probe::generation(),
+        )));
+        assert_eq!(
+            cached_npm_global_prefix_with(&cache, || async { Some(updated.clone()) }).await,
+            Some(updated.clone())
+        );
+        cache.lock().unwrap().as_mut().unwrap().2 = crate::probe::generation().wrapping_sub(1);
+        assert_eq!(
+            cached_npm_global_prefix_with(&cache, || async { None }).await,
+            None
+        );
     }
 
     #[cfg(not(windows))]
@@ -18175,10 +18661,10 @@ wire_api = "chat"
         let bin_dir = home.path().join(".local").join("bin");
         let prefix = home.path().join("npm-prefix");
         let prefix_bin_dir = npm_prefix_bin_dir(&prefix);
-        let cmd = "codeg-test-local-bin-npx-agent";
+        let cmd = "harness-studio-test-local-bin-npx-agent";
         let command_path = bin_dir.join(cmd);
         // Only in the npm prefix: the list path must still fall through to it.
-        let prefix_only_cmd = "codeg-test-npm-prefix-only-npx-agent";
+        let prefix_only_cmd = "harness-studio-test-npm-prefix-only-npx-agent";
         let prefix_only_path = prefix_bin_dir.join(prefix_only_cmd);
         for path in [
             bin_dir.join(cmd),
@@ -18337,8 +18823,14 @@ wire_api = "chat"
     fn parse_env_file_ignores_comments_and_strips_quotes() {
         let raw = "# comment\n\nexport OPENROUTER_API_KEY=\"sk-or-123\"\nOPENAI_BASE_URL='https://x.test/v1'\nBARE=plain\n=novalue\n";
         let map = parse_env_file(raw);
-        assert_eq!(map.get("OPENROUTER_API_KEY").map(String::as_str), Some("sk-or-123"));
-        assert_eq!(map.get("OPENAI_BASE_URL").map(String::as_str), Some("https://x.test/v1"));
+        assert_eq!(
+            map.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("sk-or-123")
+        );
+        assert_eq!(
+            map.get("OPENAI_BASE_URL").map(String::as_str),
+            Some("https://x.test/v1")
+        );
         assert_eq!(map.get("BARE").map(String::as_str), Some("plain"));
         assert!(!map.contains_key(""));
     }
@@ -18348,9 +18840,18 @@ wire_api = "chat"
         let existing = "# secrets\nOPENROUTER_API_KEY=old\n\nOTHER_TOKEN=keep\n";
         let out = patch_env_text(existing, &[("OPENROUTER_API_KEY", "new")]);
         assert!(out.contains("# secrets"), "comment preserved: {out}");
-        assert!(out.contains("OPENROUTER_API_KEY=new"), "key replaced: {out}");
-        assert!(!out.contains("OPENROUTER_API_KEY=old"), "old value gone: {out}");
-        assert!(out.contains("OTHER_TOKEN=keep"), "unrelated key preserved: {out}");
+        assert!(
+            out.contains("OPENROUTER_API_KEY=new"),
+            "key replaced: {out}"
+        );
+        assert!(
+            !out.contains("OPENROUTER_API_KEY=old"),
+            "old value gone: {out}"
+        );
+        assert!(
+            out.contains("OTHER_TOKEN=keep"),
+            "unrelated key preserved: {out}"
+        );
         // Replacement happens in place, not appended at the end.
         assert_eq!(out.matches("OPENROUTER_API_KEY=").count(), 1);
         assert!(out.ends_with('\n'));
@@ -18362,13 +18863,22 @@ wire_api = "chat"
         // last-occurrence-wins, so a stale second line would shadow the update.
         let existing = "OPENAI_API_KEY=old1\nKEEP=1\nOPENAI_API_KEY=old2\n";
         let out = patch_env_text(existing, &[("OPENAI_API_KEY", "new")]);
-        assert_eq!(out.matches("OPENAI_API_KEY=").count(), 1, "single key: {out}");
+        assert_eq!(
+            out.matches("OPENAI_API_KEY=").count(),
+            1,
+            "single key: {out}"
+        );
         assert!(out.contains("OPENAI_API_KEY=new"));
-        assert!(!out.contains("old1") && !out.contains("old2"), "stale gone: {out}");
+        assert!(
+            !out.contains("old1") && !out.contains("old2"),
+            "stale gone: {out}"
+        );
         assert!(out.contains("KEEP=1"));
         // And a reader of the result sees the new value, not a stale shadow.
         assert_eq!(
-            parse_env_file(&out).get("OPENAI_API_KEY").map(String::as_str),
+            parse_env_file(&out)
+                .get("OPENAI_API_KEY")
+                .map(String::as_str),
             Some("new")
         );
     }
@@ -18399,7 +18909,8 @@ wire_api = "chat"
 
     #[test]
     fn merge_hermes_model_config_sets_model_and_keeps_other_keys() {
-        let existing = "terminal:\n  backend: local\nmodel:\n  default: old-model\n  provider: openai\n";
+        let existing =
+            "terminal:\n  backend: local\nmodel:\n  default: old-model\n  provider: openai\n";
         let merged = merge_hermes_model_config(
             Some(existing),
             "openrouter",
@@ -18410,14 +18921,20 @@ wire_api = "chat"
         .expect("merge");
         let value: serde_yaml::Value = serde_yaml::from_str(&merged).expect("parse merged");
         let model = value.get("model").expect("model section");
-        assert_eq!(model.get("provider").and_then(|v| v.as_str()), Some("openrouter"));
+        assert_eq!(
+            model.get("provider").and_then(|v| v.as_str()),
+            Some("openrouter")
+        );
         assert_eq!(
             model.get("default").and_then(|v| v.as_str()),
             Some("moonshotai/kimi-k2")
         );
         // Unrelated top-level keys survive the targeted merge.
         assert_eq!(
-            value.get("terminal").and_then(|t| t.get("backend")).and_then(|v| v.as_str()),
+            value
+                .get("terminal")
+                .and_then(|t| t.get("backend"))
+                .and_then(|v| v.as_str()),
             Some("local")
         );
         // No base_url was requested, so none is written.
@@ -18436,7 +18953,10 @@ wire_api = "chat"
         .expect("merge with base");
         let value: serde_yaml::Value = serde_yaml::from_str(&with_base).expect("parse");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("base_url")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
             Some("https://api.test/v1")
         );
         // Set("") clears the field (user emptied the API URL input).
@@ -18462,7 +18982,10 @@ wire_api = "chat"
         .expect("merge preserve");
         let value: serde_yaml::Value = serde_yaml::from_str(&kept).expect("parse");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("base_url")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
             Some("https://api.test/v1")
         );
     }
@@ -18483,8 +19006,14 @@ wire_api = "chat"
         .expect("merge custom");
         let value: serde_yaml::Value = serde_yaml::from_str(&with_key).expect("parse");
         let model = value.get("model").expect("model section");
-        assert_eq!(model.get("provider").and_then(|v| v.as_str()), Some("custom"));
-        assert_eq!(model.get("api_key").and_then(|v| v.as_str()), Some("sk-abc"));
+        assert_eq!(
+            model.get("provider").and_then(|v| v.as_str()),
+            Some("custom")
+        );
+        assert_eq!(
+            model.get("api_key").and_then(|v| v.as_str()),
+            Some("sk-abc")
+        );
         assert_eq!(
             model.get("base_url").and_then(|v| v.as_str()),
             Some("https://endpoint.test/v1")
@@ -18507,7 +19036,8 @@ wire_api = "chat"
 
         // custom→custom re-save with scrub_mode=false preserves a raw-editor
         // `api_mode`; switching in with scrub_mode=true drops it.
-        let with_mode = "model:\n  provider: custom\n  default: m\n  api_mode: anthropic_messages\n";
+        let with_mode =
+            "model:\n  provider: custom\n  default: m\n  api_mode: anthropic_messages\n";
         let resaved = merge_hermes_model_config(
             Some(with_mode),
             "custom",
@@ -18557,15 +19087,22 @@ wire_api = "chat"
         .expect("merge switch");
         let value: serde_yaml::Value = serde_yaml::from_str(&switched).expect("parse");
         let model = value.get("model").expect("model section");
-        assert!(model.get("api_key").is_none(), "stale inline key must be scrubbed");
-        assert!(model.get("api_mode").is_none(), "stale api_mode must be scrubbed");
+        assert!(
+            model.get("api_key").is_none(),
+            "stale inline key must be scrubbed"
+        );
+        assert!(
+            model.get("api_mode").is_none(),
+            "stale api_mode must be scrubbed"
+        );
     }
 
     #[test]
     fn plan_hermes_write_preserves_base_url_for_fixed_endpoint_provider() {
         // Anthropic (needsBaseUrl: false) behind a proxy: a structured save that
         // doesn't touch the hidden API URL field must keep the existing endpoint.
-        let existing = "model:\n  provider: anthropic\n  default: old\n  base_url: https://my-proxy/v1\n";
+        let existing =
+            "model:\n  provider: anthropic\n  default: old\n  base_url: https://my-proxy/v1\n";
         let (yaml, env) = plan_hermes_write(
             "anthropic",
             Some("sk-ant"),
@@ -18577,7 +19114,10 @@ wire_api = "chat"
         .expect("plan");
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("yaml");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("base_url")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
             Some("https://my-proxy/v1"),
             "out-of-band base_url must survive a structured save"
         );
@@ -18603,7 +19143,10 @@ wire_api = "chat"
         .expect("plan");
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("yaml");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("provider")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("provider"))
+                .and_then(|v| v.as_str()),
             Some("anthropic")
         );
         assert!(
@@ -18631,8 +19174,8 @@ wire_api = "chat"
             assert!(!env.iter().any(|(k, _)| *k == "OPENROUTER_API_KEY"));
         }
         // A provided key is written alongside the neutralization.
-        let (_, env) = plan_hermes_write("openrouter", Some("sk-or"), "m", None, None, None)
-            .expect("keyed");
+        let (_, env) =
+            plan_hermes_write("openrouter", Some("sk-or"), "m", None, None, None).expect("keyed");
         assert!(env.contains(&("OPENROUTER_API_KEY", "sk-or".to_string())));
         assert!(env.contains(&("OPENAI_API_KEY", String::new())));
     }
@@ -18679,7 +19222,11 @@ wire_api = "chat"
         let inode_before = fs::metadata(&env_path).unwrap().ino();
         write_hermes_secret_file(&env_path, "OPENROUTER_API_KEY=sk-2\n", ".env")
             .expect("rewrite env");
-        assert_eq!(mode_of(&env_path), 0o640, "existing managed mode must be preserved");
+        assert_eq!(
+            mode_of(&env_path),
+            0o640,
+            "existing managed mode must be preserved"
+        );
         assert_eq!(
             fs::metadata(&env_path).unwrap().ino(),
             inode_before,
@@ -18706,7 +19253,10 @@ wire_api = "chat"
         write_hermes_secret_file(&link, "model:\n  provider: anthropic\n", "config.yaml")
             .expect("write through symlink");
         assert!(
-            fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "the symlink must be preserved, not replaced by a regular file"
         );
         assert_eq!(
@@ -18726,7 +19276,10 @@ wire_api = "chat"
         let real = dir.join("vault-hermes.env");
         let link = dir.join(".env");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(fs::metadata(&link).is_err(), "precondition: dangling symlink");
+        assert!(
+            fs::metadata(&link).is_err(),
+            "precondition: dangling symlink"
+        );
 
         write_hermes_secret_file(&link, "OPENROUTER_API_KEY=sk\n", ".env").expect("write");
         // The target is created THROUGH the symlink and is owner-only (0600), not
@@ -18736,9 +19289,15 @@ wire_api = "chat"
             0o600,
             "a freshly created symlink target must be 0600"
         );
-        assert_eq!(fs::read_to_string(&real).unwrap(), "OPENROUTER_API_KEY=sk\n");
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "OPENROUTER_API_KEY=sk\n"
+        );
         assert!(
-            fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "the symlink itself must be preserved"
         );
     }
@@ -18763,7 +19322,11 @@ wire_api = "chat"
         fs::write(&env_path, "OPENROUTER_API_KEY=old\n").unwrap();
         fs::set_permissions(&env_path, fs::Permissions::from_mode(0o644)).unwrap();
         write_hermes_secret_file(&env_path, "OPENROUTER_API_KEY=new\n", ".env").unwrap();
-        assert_eq!(mode_of(&env_path), 0o600, "a world-readable 0644 secret → 0600");
+        assert_eq!(
+            mode_of(&env_path),
+            0o600,
+            "a world-readable 0644 secret → 0600"
+        );
         assert_eq!(
             fs::read_to_string(&env_path).unwrap(),
             "OPENROUTER_API_KEY=new\n"
@@ -18774,7 +19337,11 @@ wire_api = "chat"
         fs::write(&managed, "K=1\n").unwrap();
         fs::set_permissions(&managed, fs::Permissions::from_mode(0o640)).unwrap();
         write_hermes_secret_file(&managed, "K=2\n", ".env").unwrap();
-        assert_eq!(mode_of(&managed), 0o640, "managed group-shared mode preserved");
+        assert_eq!(
+            mode_of(&managed),
+            0o640,
+            "managed group-shared mode preserved"
+        );
     }
 
     #[cfg(unix)]
@@ -18811,7 +19378,11 @@ wire_api = "chat"
         fs::create_dir_all(&managed).unwrap();
         fs::set_permissions(&managed, fs::Permissions::from_mode(0o755)).unwrap();
         ensure_hermes_home_secure(&managed).expect("ensure managed");
-        assert_eq!(mode_of(&managed), 0o755, "existing hermes home mode preserved");
+        assert_eq!(
+            mode_of(&managed),
+            0o755,
+            "existing hermes home mode preserved"
+        );
     }
 
     // ── Hermes base-URL reconcile (auxiliary/main endpoint parity) ──────────
@@ -18842,11 +19413,19 @@ wire_api = "chat"
     fn plan_hermes_base_url_reconcile_ignores_trailing_slash() {
         // Trailing-slash-only differences must not churn .env (both directions).
         assert_eq!(
-            plan_hermes_base_url_reconcile("openai-api", Some("https://x/v1/"), Some("https://x/v1")),
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://x/v1/"),
+                Some("https://x/v1")
+            ),
             None
         );
         assert_eq!(
-            plan_hermes_base_url_reconcile("openai-api", Some("https://x/v1"), Some("https://x/v1/")),
+            plan_hermes_base_url_reconcile(
+                "openai-api",
+                Some("https://x/v1"),
+                Some("https://x/v1/")
+            ),
             None
         );
     }
@@ -18864,9 +19443,18 @@ wire_api = "chat"
     #[test]
     fn plan_hermes_base_url_reconcile_no_op_when_both_empty() {
         // Absent var and explicitly-empty var both → no-op (no redundant `KEY=`).
-        assert_eq!(plan_hermes_base_url_reconcile("openai-api", None, None), None);
-        assert_eq!(plan_hermes_base_url_reconcile("openai-api", None, Some("")), None);
-        assert_eq!(plan_hermes_base_url_reconcile("openai-api", Some("  "), Some("")), None);
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", None, None),
+            None
+        );
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", None, Some("")),
+            None
+        );
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openai-api", Some("  "), Some("")),
+            None
+        );
     }
 
     #[test]
@@ -18897,7 +19485,10 @@ wire_api = "chat"
     fn plan_hermes_base_url_reconcile_openrouter_only_touches_its_own_var() {
         // openrouter never returns an OPENAI_BASE_URL write (that would re-pollute
         // the panel's neutralization); it only reconciles OPENROUTER_BASE_URL.
-        assert_eq!(plan_hermes_base_url_reconcile("openrouter", None, None), None);
+        assert_eq!(
+            plan_hermes_base_url_reconcile("openrouter", None, None),
+            None
+        );
         assert_eq!(
             plan_hermes_base_url_reconcile("openrouter", Some("https://or/api/v1"), None),
             Some(("OPENROUTER_BASE_URL", "https://or/api/v1".to_string()))
@@ -19039,7 +19630,10 @@ wire_api = "chat"
         .unwrap();
         reconcile_hermes_runtime_env_in(home).expect("reconcile");
         let env = fs::read_to_string(home.join(".env")).unwrap();
-        assert!(env.contains("OPENAI_BASE_URL=\n"), "stale base url cleared: {env:?}");
+        assert!(
+            env.contains("OPENAI_BASE_URL=\n"),
+            "stale base url cleared: {env:?}"
+        );
         assert!(env.contains("OPENAI_API_KEY=sk"), "key preserved: {env:?}");
     }
 
@@ -19075,16 +19669,22 @@ wire_api = "chat"
         // either (both an absolute path and a literal `~/…` path are passed as-is).
         let mut abs = BTreeMap::new();
         abs.insert("HERMES_HOME".to_string(), "/tmp/hermes-alt".to_string());
-        assert_eq!(hermes_home_for_launch(&abs), PathBuf::from("/tmp/hermes-alt"));
+        assert_eq!(
+            hermes_home_for_launch(&abs),
+            PathBuf::from("/tmp/hermes-alt")
+        );
 
         let mut tilde = BTreeMap::new();
         tilde.insert("HERMES_HOME".to_string(), "~/alt-hermes".to_string());
-        assert_eq!(hermes_home_for_launch(&tilde), PathBuf::from("~/alt-hermes"));
+        assert_eq!(
+            hermes_home_for_launch(&tilde),
+            PathBuf::from("~/alt-hermes")
+        );
 
-        // Both sides of the two checks below resolve `~` off codeg's own `HOME`,
+        // Both sides of the two checks below resolve `~` off harness_studio's own `HOME`,
         // and other tests point `HOME` at temp dirs through `temp_env`. Pin it,
         // so this test serializes against them on temp_env's lock. The expected
-        // paths still come from codeg's resolver, which on Windows ignores
+        // paths still come from harness_studio's resolver, which on Windows ignores
         // `HOME` (`dirs::home_dir()` asks for the profile folder).
         let home = tempfile::tempdir().expect("tempdir");
         temp_env::with_var("HOME", Some(home.path()), || {
@@ -19098,7 +19698,7 @@ wire_api = "chat"
                 home_dir_or_default().join(".hermes")
             );
 
-            // No override → the child inherits the parent env (codeg's
+            // No override → the child inherits the parent env (harness_studio's
             // resolution).
             assert_eq!(hermes_home_for_launch(&BTreeMap::new()), hermes_home_dir());
         });
@@ -19164,10 +19764,7 @@ wire_api = "chat"
     fn hermes_skip_chmod_requires_a_non_empty_opt_out() {
         // A non-empty opt-out enables skip.
         temp_env::with_vars(
-            [
-                ("HERMES_SKIP_CHMOD", Some("1")),
-                ("HERMES_CONTAINER", None),
-            ],
+            [("HERMES_SKIP_CHMOD", Some("1")), ("HERMES_CONTAINER", None)],
             || assert!(hermes_skip_chmod(), "non-empty HERMES_SKIP_CHMOD skips"),
         );
         // An EMPTY opt-out must NOT skip (Hermes' Python truthiness treats `` as
@@ -19212,9 +19809,14 @@ wire_api = "chat"
         assert_eq!(openai_api.key_env_var, "OPENAI_API_KEY");
         assert!(openai_api.needs_base_url);
         // Hermes' first-priority key var per provider (auth.py PROVIDER_REGISTRY).
-        assert_eq!(hermes_provider("zai").expect("zai").key_env_var, "GLM_API_KEY");
         assert_eq!(
-            hermes_provider("kimi-coding").expect("kimi-coding").key_env_var,
+            hermes_provider("zai").expect("zai").key_env_var,
+            "GLM_API_KEY"
+        );
+        assert_eq!(
+            hermes_provider("kimi-coding")
+                .expect("kimi-coding")
+                .key_env_var,
             "KIMI_API_KEY"
         );
         // OAuth + AWS providers carry no API-key env var (set via terminal --setup
@@ -19327,7 +19929,10 @@ wire_api = "chat"
         assert_eq!(env, vec![("ANTHROPIC_API_KEY", "sk-ant-1".to_string())]);
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("yaml");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("provider")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("provider"))
+                .and_then(|v| v.as_str()),
             Some("anthropic")
         );
     }
@@ -19347,9 +19952,18 @@ wire_api = "chat"
         assert!(env.is_empty(), "custom must not write any .env var");
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("yaml");
         let model = value.get("model").expect("model section");
-        assert_eq!(model.get("provider").and_then(|v| v.as_str()), Some("custom"));
-        assert_eq!(model.get("default").and_then(|v| v.as_str()), Some("gpt-5.5"));
-        assert_eq!(model.get("api_key").and_then(|v| v.as_str()), Some("sk-custom-1"));
+        assert_eq!(
+            model.get("provider").and_then(|v| v.as_str()),
+            Some("custom")
+        );
+        assert_eq!(
+            model.get("default").and_then(|v| v.as_str()),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            model.get("api_key").and_then(|v| v.as_str()),
+            Some("sk-custom-1")
+        );
         assert_eq!(
             model.get("base_url").and_then(|v| v.as_str()),
             Some("https://endpoint.test/v1")
@@ -19367,7 +19981,8 @@ wire_api = "chat"
 
         // Switching TO custom from another provider that carried an `api_mode`
         // scrubs the stale mode (it must not bleed into the custom endpoint).
-        let prior = "model:\n  provider: openai-api\n  default: gpt\n  api_mode: chat_completions\n";
+        let prior =
+            "model:\n  provider: openai-api\n  default: gpt\n  api_mode: chat_completions\n";
         let (yaml, _env) = plan_hermes_write(
             "custom",
             Some("sk-2"),
@@ -19398,21 +20013,23 @@ wire_api = "chat"
         )
         .expect("plan");
         assert!(env.is_empty(), "raw mode must not write .env");
-        assert!(yaml.contains("anthropic"), "raw yaml written verbatim: {yaml}");
+        assert!(
+            yaml.contains("anthropic"),
+            "raw yaml written verbatim: {yaml}"
+        );
     }
 
     #[test]
     fn plan_hermes_write_oauth_and_blank_key_produce_no_env() {
         // OAuth provider (empty key var) → no .env update.
-        let (_, env) = plan_hermes_write("nous", Some("ignored"), "m", None, None, None)
-            .expect("oauth");
+        let (_, env) =
+            plan_hermes_write("nous", Some("ignored"), "m", None, None, None).expect("oauth");
         assert!(env.is_empty());
         // Blank key on a keyed provider with no base-URL var → nothing touched.
-        let (_, env) = plan_hermes_write("anthropic", Some("   "), "m", None, None, None)
-            .expect("blank");
-        assert!(env.is_empty());
         let (_, env) =
-            plan_hermes_write("anthropic", None, "m", None, None, None).expect("none");
+            plan_hermes_write("anthropic", Some("   "), "m", None, None, None).expect("blank");
+        assert!(env.is_empty());
+        let (_, env) = plan_hermes_write("anthropic", None, "m", None, None, None).expect("none");
         assert!(env.is_empty());
     }
 
@@ -19423,8 +20040,15 @@ wire_api = "chat"
             "newline in key must be rejected"
         );
         assert!(
-            plan_hermes_write("openai-api", None, "m", None, Some("model: [unterminated"), None)
-                .is_err(),
+            plan_hermes_write(
+                "openai-api",
+                None,
+                "m",
+                None,
+                Some("model: [unterminated"),
+                None
+            )
+            .is_err(),
             "invalid raw yaml must be rejected"
         );
     }
@@ -19451,13 +20075,16 @@ wire_api = "chat"
         );
         let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("yaml");
         assert_eq!(
-            value.get("model").and_then(|m| m.get("base_url")).and_then(|v| v.as_str()),
+            value
+                .get("model")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
             Some("https://api.test/v1")
         );
         // Clearing the base URL writes an empty override so a stale `.env` value
         // can't shadow the default endpoint.
-        let (_, env) = plan_hermes_write("openai-api", None, "m", None, None, None)
-            .expect("clear base");
+        let (_, env) =
+            plan_hermes_write("openai-api", None, "m", None, None, None).expect("clear base");
         assert_eq!(env, vec![("OPENAI_BASE_URL", String::new())]);
     }
 
@@ -19486,7 +20113,10 @@ wire_api = "chat"
     fn project_hermes_key_and_base_falls_back_to_env_base_url() {
         let mut env = BTreeMap::new();
         env.insert("OPENAI_API_KEY".to_string(), "sk-1".to_string());
-        env.insert("OPENAI_BASE_URL".to_string(), "https://proxy/v1".to_string());
+        env.insert(
+            "OPENAI_BASE_URL".to_string(),
+            "https://proxy/v1".to_string(),
+        );
         // No YAML base_url → the panel still sees the endpoint from `.env`, so a
         // later save won't clear it (regression guard for the dual-write change).
         let (key, base) = project_hermes_key_and_base("openai-api", &env, None, None);
@@ -19532,7 +20162,7 @@ wire_api = "chat"
         // leading double-quoted string makes PowerShell parse the line as a
         // string expression and fail with "Unexpected token" instead of running
         // uvx; an unquoted bare path runs in both cmd and PowerShell.
-        let path = r"C:\Users\Administrator\AppData\Local\app.codeg\acp-binaries\uv-tool\windows-x86_64\uvx.exe";
+        let path = r"C:\Users\Administrator\AppData\Local\com.harnessstudio.desktop\acp-binaries\uv-tool\windows-x86_64\uvx.exe";
         assert_eq!(shell_quote_arg_for(path, true), path);
         // On POSIX the backslash is the escape char, so it still forces quoting.
         assert_eq!(shell_quote_arg_for(path, false), format!("'{path}'"));
@@ -19590,8 +20220,9 @@ wire_api = "chat"
                         || std::path::Path::new(first)
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .is_some_and(|n| n.trim_end_matches(".cmd").trim_end_matches(".exe")
-                                == "hermes"),
+                            .is_some_and(
+                                |n| n.trim_end_matches(".cmd").trim_end_matches(".exe") == "hermes"
+                            ),
                     "unexpected launcher: {argv:?}"
                 );
             }
@@ -19631,7 +20262,10 @@ wire_api = "chat"
         let serialized = toml::to_string_pretty(&doc).expect("serialize");
         let reparsed: toml::Value = serialized.parse().expect("valid toml");
         let t = reparsed.as_table().unwrap();
-        assert_eq!(t.get("telemetry").and_then(toml::Value::as_bool), Some(true));
+        assert_eq!(
+            t.get("telemetry").and_then(toml::Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             t.get("default_model").and_then(toml::Value::as_str),
             Some(KIMI_MANAGED_MODEL_ALIAS)
@@ -19663,7 +20297,9 @@ wire_api = "chat"
             Some("claude-opus-4-7")
         );
         assert_eq!(
-            model.get("max_context_size").and_then(toml::Value::as_integer),
+            model
+                .get("max_context_size")
+                .and_then(toml::Value::as_integer),
             Some(200_000)
         );
     }
@@ -19708,14 +20344,14 @@ wire_api = "chat"
     fn kimi_managed_block_clear_preserves_user_sections() {
         let mut doc: toml::Value = r#"
 default_model = "mine"
-[providers.codeg]
+[providers.harness_studio]
 type = "openai"
 api_key = "sk"
 [providers.mine]
 type = "openai"
 api_key = "sk-user"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "x"
 [models.mine]
 provider = "mine"
@@ -19741,11 +20377,11 @@ model = "gpt"
     #[test]
     fn kimi_managed_block_clear_resets_our_default_and_empties() {
         let mut doc: toml::Value = r#"
-default_model = "codeg-managed"
-[providers.codeg]
+default_model = "harness-studio-managed"
+[providers.harness_studio]
 type = "kimi"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "kimi-for-coding"
 "#
         .parse()
@@ -20005,11 +20641,11 @@ model = "kimi-for-coding"
     #[test]
     fn kimi_project_managed_config_round_trips_reasoning_metadata() {
         let value: toml::Value = r#"
-default_model = "codeg-managed"
-[providers.codeg]
+default_model = "harness-studio-managed"
+[providers.harness_studio]
 type = "openai_responses"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "gpt-5.6-sol"
 max_context_size = 1000000
 capabilities = ["thinking", "image_in", "video_in", "tool_use"]
@@ -20033,7 +20669,10 @@ default_effort = "high"
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(efforts, vec!["low", "medium", "high"]);
-        assert_eq!(proj.get("defaultEffort").and_then(|v| v.as_str()), Some("high"));
+        assert_eq!(
+            proj.get("defaultEffort").and_then(|v| v.as_str()),
+            Some("high")
+        );
     }
 
     #[test]
@@ -20041,10 +20680,10 @@ default_effort = "high"
         // The shape the panel wrote before this feature — the projection must
         // not invent empty arrays, or the panel would read reasoning as "on".
         let value: toml::Value = r#"
-[providers.codeg]
+[providers.harness_studio]
 type = "kimi"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "kimi-k2"
 max_context_size = 262144
 "#
@@ -20063,13 +20702,13 @@ max_context_size = 262144
         // config.toml values back into the KIMI_MODEL_* runtime env, defeating the
         // single-source-of-truth between env override and config.toml.
         let value: toml::Value = r#"
-default_model = "codeg-managed"
-[providers.codeg]
+default_model = "harness-studio-managed"
+[providers.harness_studio]
 type = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key = "sk-ant"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "claude-opus-4-7"
 max_context_size = 200000
 "#
@@ -20085,7 +20724,10 @@ max_context_size = 200000
             Some("https://api.anthropic.com")
         );
         assert_eq!(proj.get("key").and_then(|v| v.as_str()), Some("sk-ant"));
-        assert_eq!(proj.get("authType").and_then(|v| v.as_str()), Some("api_key"));
+        assert_eq!(
+            proj.get("authType").and_then(|v| v.as_str()),
+            Some("api_key")
+        );
         assert_eq!(
             proj.get("modelId").and_then(|v| v.as_str()),
             Some("claude-opus-4-7")
@@ -20094,7 +20736,10 @@ max_context_size = 200000
             proj.get("maxContextSize").and_then(|v| v.as_i64()),
             Some(200000)
         );
-        assert_eq!(proj.get("hasManagedBlock"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            proj.get("hasManagedBlock"),
+            Some(&serde_json::Value::Bool(true))
+        );
         for forbidden in [
             "apiKey",
             "apiBaseUrl",
@@ -20113,12 +20758,12 @@ max_context_size = 200000
     #[test]
     fn kimi_project_managed_config_env_subtable_surfaces_as_env_auth() {
         let value: toml::Value = r#"
-[providers.codeg]
+[providers.harness_studio]
 type = "openai"
-[providers.codeg.env]
+[providers.harness_studio.env]
 OPENAI_API_KEY = "sk-x"
-[models.codeg-managed]
-provider = "codeg"
+[models.harness-studio-managed]
+provider = "harness_studio"
 model = "gpt"
 "#
         .parse()
@@ -20237,7 +20882,11 @@ model = "gpt"
     /// each of these assertions is the difference between a working agent and a
     /// user whose every provider silently vanished.
     fn assert_valid_cline_provider_store(root: &serde_json::Value) {
-        assert_eq!(root["version"], serde_json::json!(1), "version is a zod literal");
+        assert_eq!(
+            root["version"],
+            serde_json::json!(1),
+            "version is a zod literal"
+        );
         assert!(root["modes"].is_object(), "`modes` must be an object");
         for (id, entry) in root["providers"].as_object().expect("providers object") {
             let token_source = entry["tokenSource"].as_str().unwrap_or_default();
@@ -20369,12 +21018,15 @@ model = "gpt"
             "oauth-token"
         );
         assert_eq!(root["providers"]["cline"]["tokenSource"], "oauth");
-        // …as do fields on the edited provider that codeg does not own.
+        // …as do fields on the edited provider that harness_studio does not own.
         assert_eq!(
             root["providers"]["deepseek"]["settings"]["reasoning"]["effort"],
             "high"
         );
-        assert_eq!(root["providers"]["deepseek"]["settings"]["apiKey"], "sk-rotated");
+        assert_eq!(
+            root["providers"]["deepseek"]["settings"]["apiKey"],
+            "sk-rotated"
+        );
         assert_eq!(root["lastUsedProvider"], "deepseek");
     }
 
@@ -20382,13 +21034,27 @@ model = "gpt"
     fn cline_save_clears_a_field_the_panel_emptied() {
         let store = ClineStore::new();
         store
-            .save("openai-native", Some("sk-a"), Some("gpt-5.4"), Some("https://a.example/v1"))
+            .save(
+                "openai-native",
+                Some("sk-a"),
+                Some("gpt-5.4"),
+                Some("https://a.example/v1"),
+            )
             .expect("save");
-        store.save("openai-native", Some("sk-a"), None, None).expect("save 2");
+        store
+            .save("openai-native", Some("sk-a"), None, None)
+            .expect("save 2");
 
-        let settings = read_cline_json(&store.providers)["providers"]["openai-native"]["settings"].clone();
-        assert!(settings.get("model").is_none(), "cleared model must be removed");
-        assert!(settings.get("baseUrl").is_none(), "cleared base URL must be removed");
+        let settings =
+            read_cline_json(&store.providers)["providers"]["openai-native"]["settings"].clone();
+        assert!(
+            settings.get("model").is_none(),
+            "cleared model must be removed"
+        );
+        assert!(
+            settings.get("baseUrl").is_none(),
+            "cleared base URL must be removed"
+        );
     }
 
     #[test]
@@ -20412,7 +21078,9 @@ model = "gpt"
         )
         .expect("seed");
 
-        store.save("openai-codex", Some("sk-x"), None, None).expect("save");
+        store
+            .save("openai-codex", Some("sk-x"), None, None)
+            .expect("save");
         assert_eq!(
             read_cline_json(&store.providers)["providers"]["openai-codex"]["tokenSource"],
             "oauth",
@@ -20433,7 +21101,7 @@ model = "gpt"
                     "deepseek": {
                         "settings": { "provider": "deepseek" },
                         "updatedAt": "2026-01-01T00:00:00.000Z",
-                        "tokenSource": "codeg",
+                        "tokenSource": "harness_studio",
                     },
                 },
             })
@@ -20441,7 +21109,9 @@ model = "gpt"
         )
         .expect("seed");
 
-        store.save("deepseek", Some("sk-x"), None, None).expect("save");
+        store
+            .save("deepseek", Some("sk-x"), None, None)
+            .expect("save");
         // Round-tripping the out-of-enum value would hand cline a file it reads
         // as empty — every provider gone, endpoint and key with it.
         assert_valid_cline_provider_store(&read_cline_json(&store.providers));
@@ -20483,16 +21153,29 @@ model = "gpt"
     fn cline_models_catalog_keeps_models_registered_elsewhere() {
         let store = ClineStore::new();
         store
-            .save("openai-compatible", Some("sk"), Some("first"), Some("https://a.example/v1"))
+            .save(
+                "openai-compatible",
+                Some("sk"),
+                Some("first"),
+                Some("https://a.example/v1"),
+            )
             .expect("save");
         store
-            .save("openai-compatible", Some("sk"), Some("second"), Some("https://b.example/v1"))
+            .save(
+                "openai-compatible",
+                Some("sk"),
+                Some("second"),
+                Some("https://b.example/v1"),
+            )
             .expect("save 2");
 
         let entry = read_cline_json(&store.models)["providers"]["openai-compatible"].clone();
         assert_eq!(entry["provider"]["defaultModelId"], "second");
         assert_eq!(entry["provider"]["baseUrl"], "https://b.example/v1");
-        assert!(entry["models"]["first"].is_object(), "earlier model stays selectable");
+        assert!(
+            entry["models"]["first"].is_object(),
+            "earlier model stays selectable"
+        );
         assert!(entry["models"]["second"].is_object());
     }
 
@@ -20514,16 +21197,28 @@ model = "gpt"
         );
 
         store
-            .save("openai-compatible", Some("sk"), Some("m"), Some("http://127.0.0.1:11434/v1"))
+            .save(
+                "openai-compatible",
+                Some("sk"),
+                Some("m"),
+                Some("http://127.0.0.1:11434/v1"),
+            )
             .expect("a plain-http loopback endpoint is legitimate");
     }
 
     #[test]
     fn cline_reader_picks_the_last_used_provider() {
         let store = ClineStore::new();
-        store.save("deepseek", Some("sk-deep"), Some("deepseek-chat"), None).expect("save");
         store
-            .save("openai-compatible", Some("sk-compat"), Some("m"), Some("https://a.example/v1"))
+            .save("deepseek", Some("sk-deep"), Some("deepseek-chat"), None)
+            .expect("save");
+        store
+            .save(
+                "openai-compatible",
+                Some("sk-compat"),
+                Some("m"),
+                Some("https://a.example/v1"),
+            )
             .expect("save 2");
 
         let loaded = load_cline_provider_settings_at(&store.providers).expect("load");
@@ -20596,7 +21291,10 @@ model = "gpt"
             "model": "my-model",
             "apiBaseUrl": "https://proxy.example/v1",
         }));
-        assert_eq!(env.get("CLINE_API_KEY").map(String::as_str), Some("sk-test"));
+        assert_eq!(
+            env.get("CLINE_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
         assert_eq!(
             env.get("CLINE_PROVIDER").map(String::as_str),
             Some("openai-compatible"),
@@ -20606,7 +21304,10 @@ model = "gpt"
         // The endpoint travels in providers.json — `CLINE_API_BASE_URL` is
         // cline's ACCOUNT service and must never receive an LLM endpoint.
         assert!(!env.contains_key("CLINE_API_BASE_URL"));
-        assert!(!env.contains_key("OPENAI_API_KEY"), "the cline key must not leak into OPENAI_*");
+        assert!(
+            !env.contains_key("OPENAI_API_KEY"),
+            "the cline key must not leak into OPENAI_*"
+        );
     }
 
     #[test]
@@ -20662,7 +21363,7 @@ model = "gpt"
         assert!(loaded.get("apiKey").is_none());
 
         // …and the launch carries no credential of its own, so `tryRestoreAuth`
-        // finds the login instead of codeg forcing a half-filled BYO provider
+        // finds the login instead of harness_studio forcing a half-filled BYO provider
         // over it. Both keys are blanked rather than merely omitted: the spawn
         // layer reads an empty value as `env_remove`, which is the only way to
         // strip one the child would otherwise inherit.
@@ -20799,7 +21500,10 @@ model = "gpt"
         }));
         // Ollama has no API key, but the gate only tests the var for emptiness.
         assert_eq!(env.get("CLINE_API_KEY").map(String::as_str), Some("local"));
-        assert_eq!(env.get("CLINE_PROVIDER").map(String::as_str), Some("ollama"));
+        assert_eq!(
+            env.get("CLINE_PROVIDER").map(String::as_str),
+            Some("ollama")
+        );
     }
 
     #[test]
@@ -20822,6 +21526,9 @@ model = "gpt"
             Some(&setting),
             Some(&serde_json::json!({ "apiProvider": "deepseek", "apiKey": "sk" }).to_string()),
         );
-        assert_eq!(env.get("CLINE_PROVIDER").map(String::as_str), Some("cline-pass"));
+        assert_eq!(
+            env.get("CLINE_PROVIDER").map(String::as_str),
+            Some("cline-pass")
+        );
     }
 }

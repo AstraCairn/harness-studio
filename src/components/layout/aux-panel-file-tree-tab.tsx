@@ -1689,7 +1689,9 @@ export function FileTreeTab() {
             const ignored =
               desc.kind === "dir"
                 ? matcher.ignores(`${relativePath}/`) ||
-                  matcher.ignores(`${relativePath}/.codeg-ignore-probe`)
+                  matcher.ignores(
+                    `${relativePath}/.harness-studio-ignore-probe`
+                  )
                 : matcher.ignores(relativePath)
             if (ignored) {
               nextIgnoredPaths.add(desc.path)

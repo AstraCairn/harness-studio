@@ -251,21 +251,23 @@ pub fn apply_system_proxy_settings(settings: &SystemProxySettings) -> Result<(),
 
 /// Give a launch environment that carries a proxy the `NO_PROXY` to go with
 /// it, in both spellings: the loopback hosts, the list the child would inherit
-/// from codeg (`inherited`), and whatever the launch itself already sets.
+/// from harness_studio (`inherited`), and whatever the launch itself already sets.
 ///
 /// Merged rather than left to inheritance because a per-agent `NO_PROXY`
-/// would replace only its own spelling: the child would still inherit codeg's
+/// would replace only its own spelling: the child would still inherit harness_studio's
 /// `no_proxy`, which curl, Bun, Python and Node read first, so the agent's own
 /// entries would silently stop applying. And whichever way the proxy arrived —
-/// the settings, or an exported `HTTP_PROXY` codeg passes through — no agent
+/// the settings, or an exported `HTTP_PROXY` harness_studio passes through — no agent
 /// gets one without the loopback exception.
 pub(crate) fn add_no_proxy_to_launch_env(
     merged: &mut BTreeMap<String, String>,
     inherited: &[(String, String)],
 ) {
-    let carries_proxy = PROXY_ENV_KEYS
-        .iter()
-        .any(|key| merged.get(*key).is_some_and(|value| !value.trim().is_empty()));
+    let carries_proxy = PROXY_ENV_KEYS.iter().any(|key| {
+        merged
+            .get(*key)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
     if !carries_proxy {
         return;
     }
@@ -311,7 +313,7 @@ pub async fn init_proxy_from_db(conn: &DatabaseConnection) {
 /// Names of the proxy env vars currently holding a scheme-less address, e.g.
 /// `HTTPS_PROXY=127.0.0.1:7890`.
 ///
-/// codeg's own settings can no longer produce one (they are normalized before
+/// harness_studio's own settings can no longer produce one (they are normalized before
 /// export), but the startup contract deliberately leaves externally-provided
 /// values alone — a docker `-e` or a shell export can still carry a bare
 /// `host:port`. Node-based tooling rejects those outright, so callers use this
@@ -327,7 +329,7 @@ pub(crate) fn proxy_env_vars_missing_scheme() -> Vec<String> {
 /// The one proxy URL a consumer that can take only one should use: the
 /// process environment as the app's own HTTP clients and agent processes see
 /// it. `HTTPS_PROXY` wins (most page traffic is TLS), then `ALL_PROXY`, then
-/// `HTTP_PROXY`; codeg's setting writes all of them with one value, so the
+/// `HTTP_PROXY`; harness_studio's setting writes all of them with one value, so the
 /// order only matters for externally exported variables. A scheme-less value
 /// is repaired the way [`normalize_proxy_url`] does; an unparsable one is
 /// ignored. (Only the built-in browser reads it, hence desktop-only.)
@@ -408,13 +410,17 @@ mod tests {
         for proxy_key in ["HTTP_PROXY", "https_proxy", "ALL_PROXY"] {
             let mut merged = launch_env(&[(proxy_key, "http://10.0.0.2:3128")]);
             add_no_proxy_to_launch_env(&mut merged, &[]);
-            assert_eq!(no_proxy_pair(&merged), (Some(LOOPBACK), Some(LOOPBACK)), "{proxy_key}");
+            assert_eq!(
+                no_proxy_pair(&merged),
+                (Some(LOOPBACK), Some(LOOPBACK)),
+                "{proxy_key}"
+            );
         }
     }
 
     /// A per-agent `NO_PROXY` joins the list the child inherits instead of
     /// replacing one spelling of it — the lowercase one would otherwise keep
-    /// codeg's list, and curl, Bun, Python and Node read that one first.
+    /// harness_studio's list, and curl, Bun, Python and Node read that one first.
     #[test]
     fn a_per_agent_bypass_list_joins_the_inherited_one_in_both_spellings() {
         let mut merged = launch_env(&[

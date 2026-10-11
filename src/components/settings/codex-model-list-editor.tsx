@@ -74,7 +74,7 @@ function loadCatalog(force = false): Promise<CodexModelInfo[]> {
   return catalogPromise
 }
 
-function useCodexCatalog(): {
+export function useCodexCatalog(enabled = true): {
   catalog: CodexModelInfo[]
   refreshing: boolean
   refresh: () => void
@@ -83,6 +83,7 @@ function useCodexCatalog(): {
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
+    if (!enabled) return
     const listener = (models: CodexModelInfo[]) => setCatalog(models)
     catalogListeners.add(listener)
     let alive = true
@@ -93,7 +94,7 @@ function useCodexCatalog(): {
       alive = false
       catalogListeners.delete(listener)
     }
-  }, [])
+  }, [enabled])
 
   const refresh = useCallback(() => {
     setRefreshing(true)
@@ -237,7 +238,7 @@ export function CodexModelListEditor({
   const { catalog, refreshing, refresh } = useCodexCatalog()
 
   // Heal ghost exclusions (officials codex has since retired to `hide`) on the
-  // way out: they are invisible here yet would keep codeg replacing codex's
+  // way out: they are invisible here yet would keep harness_studio replacing codex's
   // whole model table. Pruning on emit — not on mount — keeps an untouched form
   // byte-identical to what was stored, so nothing reports a spurious change.
   const onChange = useCallback(
@@ -251,7 +252,7 @@ export function CodexModelListEditor({
     () => new Set(value.excludedOfficials ?? []),
     [value.excludedOfficials]
   )
-  // Once the user adds a custom or removes an official, codeg writes codex's
+  // Once the user adds a custom or removes an official, harness_studio writes codex's
   // whole `model_catalog_json` (a full-table replace), so officials codex ships
   // later stop appearing on their own until this list is refreshed + re-saved.
   // Surface that caveat wherever this editor is mounted — but only for removals

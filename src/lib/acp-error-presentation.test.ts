@@ -111,7 +111,7 @@ describe("acpErrorNotifiesDesktop", () => {
 })
 
 describe("isTurnFailureCode", () => {
-  it("recognizes codeg's verdicts on a failed turn", () => {
+  it("recognizes harness_studio's verdicts on a failed turn", () => {
     for (const code of [
       "turn_failed_refusal",
       "turn_failed_empty",

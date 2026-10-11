@@ -53,7 +53,7 @@ pub const DEFAULT_MAX_BYTES_PER_DAY: u64 = 512 * 1024 * 1024;
 /// Env var overriding [`DEFAULT_MAX_BYTES_PER_DAY`]. `0` removes the ceiling
 /// (for a deliberate long protocol-trace capture); a malformed value falls back
 /// to the default rather than silently removing the bound.
-pub const MAX_BYTES_ENV: &str = "CODEG_LOG_MAX_BYTES";
+pub const MAX_BYTES_ENV: &str = "HARNESS_STUDIO_LOG_MAX_BYTES";
 
 /// Seconds in a day. Unix time has no leap seconds, so every UTC day is exactly
 /// this long and the day number is plain integer division.
@@ -155,7 +155,10 @@ pub enum Notice {
     /// The ceiling was just crossed; file logging is off for the rest of the day.
     Exhausted { limit: u64, written: u64 },
     /// A new day opened the budget again; reports what the closed day lost.
-    Reopened { dropped_lines: u64, dropped_bytes: u64 },
+    Reopened {
+        dropped_lines: u64,
+        dropped_bytes: u64,
+    },
 }
 
 impl Notice {
@@ -328,7 +331,7 @@ pub trait NoticeSink: Send + 'static {
 /// Production sink: stderr (matching the other bootstrap diagnostics) plus a
 /// synthetic WARN record pushed straight into [`crate::logging::hub::LogHub`],
 /// so the Settings → Logs viewer shows *why* the file went quiet. The direct
-/// push bypasses the subscriber, so the `codeg_lib::logging=off` backstop can't
+/// push bypasses the subscriber, so the `harness_studio_lib::logging=off` backstop can't
 /// swallow it and no re-entrancy is possible.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StderrAndHubSink;
@@ -345,7 +348,7 @@ impl NoticeSink for StderrAndHubSink {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
                 level: "WARN",
-                target: "codeg_lib::logging".to_string(),
+                target: "harness_studio_lib::logging".to_string(),
                 message,
                 fields: Default::default(),
                 spans: Vec::new(),
@@ -388,7 +391,6 @@ impl<W: Write, C: DayClock, S: NoticeSink> BudgetedWriter<W, C, S> {
             budget,
         }
     }
-
 }
 
 impl<W: Write, C: DayClock, S: NoticeSink> Write for BudgetedWriter<W, C, S> {
@@ -453,11 +455,7 @@ mod tests {
     #[test]
     fn exhaustion_is_announced_once_and_latches_the_day_off() {
         let mut b = DayBudget::new(Some(10));
-        assert_eq!(
-            b.admit(DAY, 20).0,
-            Verdict::Drop,
-            "oversized first line"
-        );
+        assert_eq!(b.admit(DAY, 20).0, Verdict::Drop, "oversized first line");
         // Only the first drop carries the notice, and the latch keeps dropping
         // lines that would otherwise still fit under the ceiling.
         for _ in 0..50 {
@@ -526,7 +524,10 @@ mod tests {
                         dropped_lines: 1,
                         dropped_bytes: 7,
                     },
-                    Notice::Exhausted { limit: 10, written: 0 },
+                    Notice::Exhausted {
+                        limit: 10,
+                        written: 0
+                    },
                 ]
             ),
             "rollover first, then exhaustion: {notices:?}"
@@ -747,10 +748,13 @@ mod tests {
         let day = chrono::DateTime::parse_from_rfc3339("2026-09-09T19:26:25Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        assert_eq!(daily_file_name("codeg", "log", day), "codeg.2026-09-09.log");
         assert_eq!(
-            daily_file_name("codeg-server", "log", day),
-            "codeg-server.2026-09-09.log"
+            daily_file_name("harness_studio", "log", day),
+            "harness_studio.2026-09-09.log"
+        );
+        assert_eq!(
+            daily_file_name("harness-studio-server", "log", day),
+            "harness-studio-server.2026-09-09.log"
         );
     }
 
@@ -760,17 +764,29 @@ mod tests {
         let now = chrono::Utc::now();
         let today = now.format("%Y-%m-%d").to_string();
         // Same naming scheme tracing_appender uses for Rotation::DAILY.
-        std::fs::write(dir.path().join(format!("codeg.{today}.log")), vec![b'x'; 77]).unwrap();
+        std::fs::write(
+            dir.path().join(format!("harness_studio.{today}.log")),
+            vec![b'x'; 77],
+        )
+        .unwrap();
         // A different day's file, and an unrelated file, must not be counted.
-        std::fs::write(dir.path().join("codeg.1999-01-01.log"), vec![b'x'; 5000]).unwrap();
-        std::fs::write(dir.path().join("codeg-server.log"), vec![b'x'; 5000]).unwrap();
+        std::fs::write(
+            dir.path().join("harness_studio.1999-01-01.log"),
+            vec![b'x'; 5000],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("harness-studio-server.log"),
+            vec![b'x'; 5000],
+        )
+        .unwrap();
 
-        let (day, existing) = resume_point(dir.path(), "codeg", "log");
+        let (day, existing) = resume_point(dir.path(), "harness_studio", "log");
         assert_eq!(existing, 77);
         assert_eq!(day, unix_day_from_secs(now.timestamp()));
 
         // A prefix with no file today reads as a clean slate, not an error.
-        let (_, none) = resume_point(dir.path(), "codeg-server", "log");
+        let (_, none) = resume_point(dir.path(), "harness-studio-server", "log");
         assert_eq!(none, 0);
     }
 

@@ -15,14 +15,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import enMessages from "@/i18n/messages/en.json"
 import {
-  acpListAgents,
+  acpListAgentsSnapshot,
   acpUpdateAgentConfig,
   acpUpdateAgentEnv,
   listModelProviders,
 } from "@/lib/api"
 import type { AcpAgentInfo, ModelProviderInfo } from "@/lib/types"
 
-import { AcpAgentSettings } from "./acp-agent-settings"
+import {
+  AcpAgentSettings,
+  invalidateAgentCheckCache,
+} from "./acp-agent-settings"
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -135,13 +138,14 @@ async function expectBoundTo(letter: string) {
 }
 
 async function openPanel(agent: AcpAgentInfo) {
-  vi.mocked(acpListAgents).mockResolvedValue([agent])
+  vi.mocked(acpListAgentsSnapshot).mockResolvedValue([agent])
   renderPanel()
   await screen.findByText("Native JSON Config", { selector: "label" })
 }
 
 describe("AcpAgentSettings — provider rebind across an auth-mode round trip", () => {
   beforeEach(() => {
+    invalidateAgentCheckCache()
     vi.mocked(listModelProviders).mockResolvedValue(PROVIDERS)
     vi.mocked(acpUpdateAgentEnv).mockResolvedValue(0)
     vi.mocked(acpUpdateAgentConfig).mockResolvedValue(0)

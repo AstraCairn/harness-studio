@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import { WS_READY_CHANNEL } from "./constants"
 import type { AttachTransportHost } from "./web-event-stream"
-import { WebEventStream } from "./web-event-stream"
+import { AppEventStream } from "./web-event-stream"
 import type {
   CallOptions,
   EventStream,
@@ -11,7 +11,7 @@ import type {
   UnsubscribeFn,
 } from "./types"
 
-// See WebTransport for rationale. Bounded so an older remote codeg-server
+// See WebTransport for rationale. Bounded so an older remote harness-studio-server
 // (no `__ready__` support) can't permanently hang the desktop UI.
 const READY_TIMEOUT_MS = 5_000
 
@@ -25,7 +25,7 @@ const WS_DISCONNECTED_CHANNEL = "__disconnected__"
 const WS_UNAUTHORIZED_CHANNEL = "__unauthorized__"
 
 // Two wire shapes flow on the same `remote-ws-event-{id}` Tauri event:
-//   1. Legacy `{channel, payload}` envelopes from the WebEventBroadcaster
+//   1. Legacy `{channel, payload}` envelopes from the EventBroadcaster
 //      firehose (`__ready__`, folder/app channels, etc.).
 //   2. Top-level attach-protocol frames `{type, ...}` from the per-connection
 //      WS attach forwarders (`ServerMsg` in `web/ws_attach.rs`).
@@ -78,7 +78,7 @@ function isAuthenticationFailed(err: unknown): boolean {
 
 /**
  * Transport that the desktop client uses when a window is bound to a
- * remote codeg-server. Every HTTP call and WebSocket event is routed
+ * remote harness-studio-server. Every HTTP call and WebSocket event is routed
  * through Rust commands (`remote_http_call`, `remote_ws_subscribe`,
  * `remote_ws_unsubscribe`) defined in `src-tauri/src/commands/remote_proxy.rs`.
  *
@@ -130,11 +130,11 @@ export class RemoteDesktopTransport implements Transport {
   /// reconnect cycle.
   private wsOpen = false
   private wsReadyCallbacks = new Set<() => void>()
-  private eventStreamInstance: WebEventStream | null = null
+  private eventStreamInstance: AppEventStream | null = null
   /// Debounce timer for the "send failed → reissue active attaches" path.
   /// `sendWsFrame` is fire-and-forget over a Tauri invoke; if Rust reports
   /// the frame was not queued (no entry / queue full / timeout) we kick the
-  /// `wsReadyCallbacks` after a short delay so `WebEventStream.reattachAll`
+  /// `wsReadyCallbacks` after a short delay so `AppEventStream.reattachAll`
   /// runs once per failure burst rather than once per failed frame.
   private sendFailRetryTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -350,7 +350,7 @@ export class RemoteDesktopTransport implements Transport {
           }
         },
       }
-      this.eventStreamInstance = new WebEventStream(host)
+      this.eventStreamInstance = new AppEventStream(host)
       // Ensure the proxy WS is being maintained so attach frames have
       // somewhere to land. Idempotent — the proxy folds duplicate
       // subscribe calls into the existing entry.

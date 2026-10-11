@@ -29,7 +29,10 @@ function conversation(id: number, folderId: number, title: string | null) {
 }
 
 function seedWorkspace() {
-  const folders = [folder(1, "codeg"), folder(2, "web-app", "Storefront")]
+  const folders = [
+    folder(1, "harness_studio"),
+    folder(2, "web-app", "Storefront"),
+  ]
   // A chat-mode conversation's folder is hidden from the sidebar's list.
   const chatFolder = folder(3, "Chat", null, "chat")
   useAppWorkspaceStore.setState({
@@ -78,10 +81,10 @@ describe("sessionNotificationPayload", () => {
       body: "Agent is waiting for your answer",
     })
     expect(p.title).toBe("Fix the login redirect")
-    expect(p.body).toBe("codeg · Agent is waiting for your answer")
+    expect(p.body).toBe("harness_studio · Agent is waiting for your answer")
     // "Hide notification contents" must not leak the user's own words, and
     // its title names the folder again, so the body doesn't repeat it.
-    expect(p.redactedTitle).toBe("codeg - Codeg")
+    expect(p.redactedTitle).toBe("harness_studio - harness studio")
     expect(p.redactedBody).toBe("Agent is waiting for your answer")
   })
 
@@ -93,7 +96,7 @@ describe("sessionNotificationPayload", () => {
     })
     expect(p.title).toBe("Refactor README.md intro")
     expect(p.body).toBe("Storefront · Agent error: boom")
-    expect(p.redactedTitle).toBe("Storefront - Codeg")
+    expect(p.redactedTitle).toBe("Storefront - harness studio")
     expect(p.redactedBody).toBe("Agent ran into an error")
   })
 
@@ -101,7 +104,7 @@ describe("sessionNotificationPayload", () => {
     seed({ id: "t3", folderId: 1, conversationId: null, title: "New chat" })
     const p = sessionNotificationPayload("t3", null, null, { body: "done" })
     expect(p.title).toBe("New chat")
-    expect(p.body).toBe("codeg · done")
+    expect(p.body).toBe("harness_studio · done")
   })
 
   it("reaches the row through the runtime session before the tab is bound", () => {
@@ -120,7 +123,9 @@ describe("sessionNotificationPayload", () => {
 
   it("names a chat-mode session's hidden folder", () => {
     seed({ id: "t5", folderId: 3, conversationId: 30, title: "tab label" })
-    const p = sessionNotificationPayload("t5", null, "codeg", { body: "done" })
+    const p = sessionNotificationPayload("t5", null, "harness_studio", {
+      body: "done",
+    })
     expect(p.title).toBe("Plan the release notes")
     expect(p.body).toBe("Chat · done")
   })
@@ -128,44 +133,46 @@ describe("sessionNotificationPayload", () => {
   it("names no folder rather than the active one for a folderless draft", () => {
     // A chat-mode draft has no folder until its first send creates one.
     seed({ id: "t6", folderId: 0, conversationId: null, title: "New chat" })
-    const p = sessionNotificationPayload("t6", null, "codeg", { body: "done" })
+    const p = sessionNotificationPayload("t6", null, "harness_studio", {
+      body: "done",
+    })
     expect(p.title).toBe("New chat")
     expect(p.body).toBe("done")
-    expect(p.redactedTitle).toBe("Codeg")
+    expect(p.redactedTitle).toBe("harness studio")
   })
 
   it("names the conversation a tab closed mid-turn was serving", () => {
     // Closing a busy tab keeps its connection, so the turn finishes under a
     // tab id that no longer exists — its connection still knows the row.
     seedWorkspace()
-    const p = sessionNotificationPayload("closed-tab", 20, "codeg", {
+    const p = sessionNotificationPayload("closed-tab", 20, "harness_studio", {
       body: "done",
     })
     expect(p.title).toBe("Refactor README.md intro")
     expect(p.body).toBe("Storefront · done")
-    expect(p.redactedTitle).toBe("Storefront - Codeg")
+    expect(p.redactedTitle).toBe("Storefront - harness studio")
   })
 
   it("prefers the tab's own conversation over its connection's", () => {
     seed({ id: "t7", folderId: 1, conversationId: 10, title: "tab label" })
     const p = sessionNotificationPayload("t7", 20, null, { body: "done" })
     expect(p.title).toBe("Fix the login redirect")
-    expect(p.body).toBe("codeg · done")
+    expect(p.body).toBe("harness_studio · done")
   })
 
   it("keeps the old folder title when nothing names the session", () => {
     seedWorkspace()
     // No tab, and no conversation known for the connection.
     expect(
-      sessionNotificationPayload("unknown-key", undefined, "codeg", {
+      sessionNotificationPayload("unknown-key", undefined, "harness_studio", {
         body: "done",
       })
-    ).toEqual({ title: "codeg - Codeg", body: "done" })
+    ).toEqual({ title: "harness_studio - harness studio", body: "done" })
     // A delegated sub-agent's row: the conversation list leaves children out.
     expect(
-      sessionNotificationPayload("child-connection", 99, "codeg", {
+      sessionNotificationPayload("child-connection", 99, "harness_studio", {
         body: "done",
       })
-    ).toEqual({ title: "codeg - Codeg", body: "done" })
+    ).toEqual({ title: "harness_studio - harness studio", body: "done" })
   })
 })

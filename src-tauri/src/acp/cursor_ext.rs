@@ -3,7 +3,7 @@
 //! Cursor's CLI (`cursor-agent acp`) sends these as JSON-RPC **requests with
 //! ids**, even when https://cursor.com/docs/cli/acp calls some of them
 //! notifications. The ACP runtime's default for an unregistered method is `-32601 Method
-//! not found`, which is what codeg used to send — and what made a live Cursor
+//! not found`, which is what harness_studio used to send — and what made a live Cursor
 //! turn show a red banner on every `Task` spawn / todo update.
 //!
 //! Blocking methods (`cursor/ask_question`, `cursor/create_plan`) wait for a
@@ -89,7 +89,7 @@ pub struct CursorAskQuestion {
 /// Parse `cursor/ask_question` params into card specs + the id map for the
 /// reply. Cursor's shape is `{ questions: [{ id, prompt, options:[{id,label}],
 /// allowMultiple? }] }` — `prompt` not `question`, `allowMultiple` not
-/// `multiSelect`. Counts are clamped to codeg's card bounds the same way
+/// `multiSelect`. Counts are clamped to harness_studio's card bounds the same way
 /// [`crate::acp::question::parse_grok_ext_questions`] clamps Grok, so
 /// `register_question` will not decline the whole ask.
 pub fn parse_cursor_ask_questions(params: &Value) -> Result<Vec<CursorAskQuestion>, String> {
@@ -338,7 +338,7 @@ pub fn cursor_create_plan_disconnect_response() -> Value {
 /// agent only needs the documented `accepted` outcome to stop retrying.
 ///
 /// The documented `accepted` variant is `{ outcome, todos }` — `todos` is NOT
-/// optional there — and it means "the list the client now holds". Codeg keeps
+/// optional there — and it means "the list the client now holds". HarnessStudio keeps
 /// no todo state, so echo back exactly what the request carried: correct for
 /// `merge: false` (replace) and the closest honest answer for `merge: true`.
 /// Bare `accepted` is only for a request that carried no `todos` array at all.
@@ -372,7 +372,11 @@ pub fn build_cursor_task_response(params: &Value) -> Value {
 /// `cursor/generate_image` — no image renderer yet. If Cursor already wrote a
 /// file, acknowledge the path; otherwise reject so the agent does not hang.
 pub fn build_cursor_generate_image_response(params: &Value) -> Value {
-    match params.get("filePath").and_then(|v| v.as_str()).map(str::trim) {
+    match params
+        .get("filePath")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+    {
         Some(path) if !path.is_empty() => {
             cursor_outcome_with("generated", json!({ "filePath": path }))
         }
@@ -409,15 +413,23 @@ mod tests {
 
     #[test]
     fn request_types_match_cursor_docs_methods() {
-        assert!(CursorAskQuestionRequest::matches_method("cursor/ask_question"));
-        assert!(CursorCreatePlanRequest::matches_method("cursor/create_plan"));
-        assert!(CursorUpdateTodosRequest::matches_method("cursor/update_todos"));
+        assert!(CursorAskQuestionRequest::matches_method(
+            "cursor/ask_question"
+        ));
+        assert!(CursorCreatePlanRequest::matches_method(
+            "cursor/create_plan"
+        ));
+        assert!(CursorUpdateTodosRequest::matches_method(
+            "cursor/update_todos"
+        ));
         assert!(CursorTaskRequest::matches_method("cursor/task"));
         assert!(CursorGenerateImageRequest::matches_method(
             "cursor/generate_image"
         ));
         assert!(!CursorTaskRequest::matches_method("session/prompt"));
-        assert!(!CursorTaskRequest::matches_method("_x.ai/ask_user_question"));
+        assert!(!CursorTaskRequest::matches_method(
+            "_x.ai/ask_user_question"
+        ));
     }
 
     #[test]

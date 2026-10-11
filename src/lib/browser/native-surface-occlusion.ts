@@ -276,11 +276,12 @@ export function useFallbackOverlayOpen(): boolean {
 
 // Dev-only introspection for the puppet / devtools console.
 if (typeof window !== "undefined" && process.env.NODE_ENV !== "production") {
-  ;(window as unknown as Record<string, unknown>).__codegOcclusionDebug =
-    () => ({
-      count,
-      passiveCount,
-      holders: nativeSurfaceOcclusionHolders(),
-      fallbackOpen,
-    })
+  ;(
+    window as unknown as Record<string, unknown>
+  ).__harnessStudioOcclusionDebug = () => ({
+    count,
+    passiveCount,
+    holders: nativeSurfaceOcclusionHolders(),
+    fallbackOpen,
+  })
 }

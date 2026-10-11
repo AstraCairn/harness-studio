@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, Url};
 
-use crate::web::event_bridge::{emit_event, EventEmitter};
+use crate::events::{emit_event, EventEmitter};
 
 use super::agent;
 use super::console;
@@ -38,7 +38,7 @@ pub const CONSOLE_JS: &str = include_str!("../../../src/browser-injected/console
 /// would otherwise arrive twice, once from the engine and once from here.
 #[cfg(target_os = "windows")]
 pub const HELPER_JS_ENGINE_CONSOLE: &str = concat!(
-    "globalThis.__codegEngineConsole = true;\n",
+    "globalThis.__harnessStudioEngineConsole = true;\n",
     include_str!("../../../src/browser-injected/helper.js")
 );
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -54,7 +54,7 @@ pub type MessageSink = Arc<dyn Fn(String, bool, usize) + Send + Sync>;
 /// in the same world, so the page never sees either. WebKit spells the message
 /// handler the same way on both its ports, so macOS and Linux share this.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub const PREFIX_SCRIPT: &str = "globalThis.__codegSend = function (m) { window.webkit.messageHandlers.codegBrowser.postMessage(String(m)); };";
+pub const PREFIX_SCRIPT: &str = "globalThis.__harnessStudioSend = function (m) { window.webkit.messageHandlers.harnessStudioBrowser.postMessage(String(m)); };";
 
 /// The same primitive for a SUBFRAME's copy of the helper, posting through a
 /// handler the host treats as non-main-frame (Linux only — macOS learns the
@@ -66,7 +66,7 @@ pub const PREFIX_SCRIPT: &str = "globalThis.__codegSend = function (m) { window.
 /// engine's business, and a tab whose own page reported itself as a subframe
 /// would lose its address bar and never say hello.
 #[cfg(target_os = "linux")]
-pub const FRAME_PREFIX_SCRIPT: &str = "if (window.top !== window) { globalThis.__codegSend = function (m) { window.webkit.messageHandlers.codegBrowserFrame.postMessage(String(m)); }; }";
+pub const FRAME_PREFIX_SCRIPT: &str = "if (window.top !== window) { globalThis.__harnessStudioSend = function (m) { window.webkit.messageHandlers.harnessStudioBrowserFrame.postMessage(String(m)); }; }";
 
 #[derive(Debug, Deserialize)]
 pub struct Envelope {
@@ -218,8 +218,12 @@ pub fn handle_message(app: &AppHandle, tab_id: &str, raw: String, main_frame: bo
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or_default();
-            match console::parse_reported(&envelope.payload, main_frame && envelope.top, at, origin.clone())
-            {
+            match console::parse_reported(
+                &envelope.payload,
+                main_frame && envelope.top,
+                at,
+                origin.clone(),
+            ) {
                 Some(line) => {
                     if registry.push_console(tab_id, line) {
                         // The first error of this document. Said once, so the
@@ -274,13 +278,16 @@ mod tests {
         assert!(minimal.payload.is_null());
         assert!(parse_envelope("not json").is_none());
         assert!(parse_envelope(r#"{"payload":{}}"#).is_none());
-        let huge = format!(r#"{{"kind":"x","payload":"{}"}}"#, "a".repeat(MAX_MESSAGE_BYTES));
+        let huge = format!(
+            r#"{{"kind":"x","payload":"{}"}}"#,
+            "a".repeat(MAX_MESSAGE_BYTES)
+        );
         assert!(parse_envelope(&huge).is_none());
     }
 
     #[test]
     fn helper_is_bundled_and_self_contained() {
-        assert!(HELPER_JS.contains("codegBrowserHelper"));
+        assert!(HELPER_JS.contains("harnessStudioBrowserHelper"));
         assert!(!HELPER_JS.contains("import "));
         assert!(!HELPER_JS.contains("require("));
     }

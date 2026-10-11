@@ -7,17 +7,17 @@ use serde::{Deserialize, Serialize};
 use crate::acp::types::PromptInputBlock;
 use crate::models::agent::{is_valid_custom_agent_id, BUILTIN_AGENT_TYPES};
 
-// Reserved at every Codeg prompt ingress before any routing frame is appended.
+// Reserved at every HarnessStudio prompt ingress before any routing frame is appended.
 // The parser may therefore treat a structurally valid RS-bounded frame as
-// Codeg-authored without deleting an API caller's control-character text.
+// HarnessStudio-authored without deleting an API caller's control-character text.
 const ROUTE_FRAME_SEPARATOR: char = '\u{001e}';
-const ROUTE_FRAME_KIND: &str = "codeg_internal_agent_routes";
+const ROUTE_FRAME_KIND: &str = "harness_studio_internal_agent_routes";
 /// Opening bytes of the frame's descriptor line — the anchor used to find a
 /// frame in a transcript that no longer has the separators around it (see
 /// [`find_unseparated_frame`]). `kind` is the descriptor's first field, so this
 /// is a prefix of every rendered body; a field reorder that broke that is what
 /// `the_body_anchor_is_what_the_renderer_starts_with` guards.
-const ROUTE_FRAME_BODY_PREFIX: &str = "{\"kind\":\"codeg_internal_agent_routes\"";
+const ROUTE_FRAME_BODY_PREFIX: &str = "{\"kind\":\"harness_studio_internal_agent_routes\"";
 const ROUTE_FRAME_VERSION: u8 = 3;
 const MAX_ROUTE_FRAME_BYTES: usize = 16 * 1024;
 /// Distinct agents one frame may route, applied AFTER deduplication.
@@ -26,7 +26,7 @@ const MAX_AGENT_REFERENCE_OCCURRENCES: usize = 256;
 
 /// One routed agent inside the frame — nothing but the wire slug.
 ///
-/// The frame is derived from the prompt's own visible `codeg://agent/...`
+/// The frame is derived from the prompt's own visible `harnessstudio://agent/...`
 /// links, so there is no out-of-band claim to carry or verify. Serializing as
 /// `{"agentType":"..."}` is load-bearing: the frame's bytes are its identity
 /// (see [`render_internal_agent_routes`]).
@@ -51,7 +51,7 @@ fn agent_reference_regex() -> &'static Regex {
     // limited to ASCII alphanumeric, `-`, `_`, and `.`. Requiring a visible
     // label keeps this in lockstep with the frontend reference tokenizer.
     static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\[(?:\\.|[^\]\\\r\n])+\]\(codeg://agent/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\)")
+        Regex::new(r"\[(?:\\.|[^\]\\\r\n])+\]\(harnessstudio://agent/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\)")
             .expect("agent reference regex is valid")
     });
     &PATTERN
@@ -76,10 +76,10 @@ fn visible_agent_reference_types(blocks: &[PromptInputBlock]) -> Vec<String> {
 }
 
 /// Append prompt-local routing for every agent the user visibly linked, when
-/// this connection actually received the codeg-mcp companion's delegation
+/// this connection actually received the harness-studio-mcp companion's delegation
 /// group.
 ///
-/// The prompt IS the input: a visible `[label](codeg://agent/<type>)` link is
+/// The prompt IS the input: a visible `[label](harnessstudio://agent/<type>)` link is
 /// the whole criterion. That link is text the agent reads either way, and the
 /// frame grants nothing — it only names the channel a delegation should take —
 /// so there is deliberately no out-of-band claim to authenticate. Deriving from
@@ -131,7 +131,7 @@ pub(crate) fn append_agent_routes(blocks: &mut Vec<PromptInputBlock>, delegation
 
 /// The frame's exact bytes ARE its identity: `parse_internal_agent_routes`
 /// only accepts a candidate it can re-render byte-for-byte, which is what lets
-/// the parsers strip a Codeg-authored frame without ever deleting look-alike
+/// the parsers strip a HarnessStudio-authored frame without ever deleting look-alike
 /// user prose.
 ///
 /// CONSEQUENCE: editing this string orphans every frame already written into an
@@ -161,7 +161,7 @@ fn render_internal_agent_routes(frame: &InternalAgentRoutes) -> String {
 ///
 /// Split out because the separators are the one part of the frame an agent may
 /// not give back. They are reserved and scrubbed at ingress, but that only
-/// guarantees codeg never *sends* a stray one — it says nothing about what the
+/// guarantees harness_studio never *sends* a stray one — it says nothing about what the
 /// agent writes into its own store. Antigravity's ACP server, for one, joins
 /// the prompt's text blocks with a space and replaces each separator with one,
 /// so its trajectory holds this body and no separators at all.
@@ -173,9 +173,9 @@ fn render_internal_agent_routes_body(frame: &InternalAgentRoutes) -> String {
     let routes = serde_json::to_string(&frame.routes).expect("agent routes are serializable");
     format!(
         "{descriptor}\n\
-Codeg composer routing metadata (authoritative): {routes}\n\
+HarnessStudio composer routing metadata (authoritative): {routes}\n\
 When you delegate any of this work, route it through the `delegate_to_agent` \
-tool from the `codeg-mcp` server with `agent_type` taken from the matching \
+tool from the `harness-studio-mcp` server with `agent_type` taken from the matching \
 route: do not substitute your own native sub-agent, task, or spawn mechanism, \
 and do not route it through any other delegation tool.\n"
     )
@@ -191,7 +191,8 @@ fn valid_agent_wire_syntax(agent_type: &str) -> bool {
 }
 
 fn parse_internal_agent_routes(candidate: &str) -> Option<InternalAgentRoutes> {
-    if !candidate.starts_with(ROUTE_FRAME_SEPARATOR) || !candidate.ends_with(ROUTE_FRAME_SEPARATOR) {
+    if !candidate.starts_with(ROUTE_FRAME_SEPARATOR) || !candidate.ends_with(ROUTE_FRAME_SEPARATOR)
+    {
         return None;
     }
     parse_internal_agent_routes_body(
@@ -214,7 +215,7 @@ fn parse_internal_agent_routes_body(candidate: &str) -> Option<InternalAgentRout
     let routes_json = remainder
         .lines()
         .next()?
-        .strip_prefix("Codeg composer routing metadata (authoritative): ")?;
+        .strip_prefix("harness studio composer routing metadata (authoritative): ")?;
     frame.routes = serde_json::from_str(routes_json).ok()?;
     if frame.kind != ROUTE_FRAME_KIND
         || frame.version != ROUTE_FRAME_VERSION
@@ -277,11 +278,11 @@ fn find_separated_frame(input: &str, from: usize) -> Option<(usize, usize)> {
 /// A frame whose separators the agent dropped or rewrote, matched on its body.
 ///
 /// WHY THIS EXISTS. Separators are the cheapest possible proof that a frame is
-/// Codeg-authored, but they only reach a transcript intact if the agent stores
+/// HarnessStudio-authored, but they only reach a transcript intact if the agent stores
 /// the prompt verbatim — and one does not. Antigravity's ACP server joins the
 /// prompt's text blocks with a space and replaces each separator with one, so a
 /// routed turn lands in `conversations/<id>.db` as
-/// `…（使用codeg-mcp工具）  {"kind":…delegation tool.\n ` — the same body, both
+/// `…（使用harness-studio-mcp工具）  {"kind":…delegation tool.\n ` — the same body, both
 /// separators now spaces. The separated pass cannot see that, and the whole
 /// frame renders inside the user's bubble when the session is reopened.
 ///
@@ -327,7 +328,7 @@ fn unseparated_frame_end(input: &str, start: usize) -> Option<usize> {
 }
 
 /// Remove only complete frames that can be parsed and reproduced byte-for-byte.
-/// Codeg scrubs the reserved separator from every prompt at ingress, so a frame
+/// HarnessStudio scrubs the reserved separator from every prompt at ingress, so a frame
 /// that still round-trips can only have been appended at the final boundary —
 /// true for any agent's transcript, not just the one this was first written for.
 ///
@@ -381,7 +382,7 @@ pub(crate) fn contains_internal_agent_routes(input: &str) -> bool {
 /// Cutting at the SEPARATOR is sound because RS is reserved:
 /// `strip_route_separator_from_prompt` removes it from every prompt field at
 /// ingress, so a separator that survives into persisted history can only be one
-/// Codeg appended itself. The descriptor prefix carries no such guarantee — it
+/// HarnessStudio appended itself. The descriptor prefix carries no such guarantee — it
 /// is ordinary text a user could in principle type — but it is the only handle
 /// left on the agents that rewrite the separators away (Antigravity), and the
 /// blast radius of a false positive is one truncated sidebar title, against a
@@ -409,7 +410,7 @@ pub(crate) fn cut_at_route_frame_marker(text: &mut String) {
 /// The separator is one character and cannot be halved: either it is inside the
 /// capped window or no frame content is. The descriptor prefix is 37 bytes and
 /// very much can be, so a first prompt whose prose length falls in a 37-wide
-/// band leaves `…prose  {"kind":"codeg_int...` — a fragment [`str::find`] cannot
+/// band leaves `…prose  {"kind":"harness_studio_int...` — a fragment [`str::find`] cannot
 /// see, and the leak this whole cut exists to stop.
 ///
 /// Matched at the END of the string with a trailing run of `.` discarded,
@@ -418,7 +419,7 @@ pub(crate) fn cut_at_route_frame_marker(text: &mut String) {
 ///
 /// A fragment shorter than `{"kind":"c` is deliberately left alone: what
 /// survives at that length is a generic JSON opening rather than anything that
-/// identifies codeg, and matching it would start trimming ordinary prose that
+/// identifies harness_studio, and matching it would start trimming ordinary prose that
 /// happens to end in `{`.
 ///
 /// [`truncate_str`]: crate::parsers::truncate_str
@@ -449,7 +450,7 @@ pub(crate) fn contains_only_internal_agent_routes(input: &str) -> bool {
 /// message permanently unsendable with no way for the user to find the offending
 /// byte, and it also let a model echo the frame back into a `delegate_to_agent`
 /// task string and kill the child prompt. Stripping keeps the invariant that
-/// motivated the check — a byte-exact frame inside a Codeg-authored turn can
+/// motivated the check — a byte-exact frame inside a HarnessStudio-authored turn can
 /// only have been appended by [`append_agent_routes`] — and makes it stronger,
 /// since no user-supplied RS reaches the wire at all.
 ///
@@ -548,8 +549,8 @@ mod tests {
 
     #[test]
     fn every_mentioned_agent_gets_exactly_one_deduplicated_route() {
-        let visible = "ask [@Antigravity](codeg://agent/antigravity) and \
-[@Claude](codeg://agent/claude_code), then [@Antigravity](codeg://agent/antigravity) again";
+        let visible = "ask [@Antigravity](harnessstudio://agent/antigravity) and \
+[@Claude](harnessstudio://agent/claude_code), then [@Antigravity](harnessstudio://agent/antigravity) again";
         let mut blocks = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -569,8 +570,8 @@ mod tests {
         // dropped the reminder while still showing the badge. The frame grants
         // nothing the link itself doesn't, so uniform behavior wins.
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "quoting an old turn: raw [@Antigravity](codeg://agent/antigravity) and \
-[@Claude](codeg://agent/claude_code)"
+            text: "quoting an old turn: raw [@Antigravity](harnessstudio://agent/antigravity) and \
+[@Claude](harnessstudio://agent/claude_code)"
                 .into(),
         }];
         append_agent_routes(&mut blocks, true);
@@ -582,12 +583,12 @@ mod tests {
 
     #[test]
     fn a_closed_delegation_gate_is_the_only_check_on_the_parent_agent() {
-        // A parent that never received codeg-mcp (OpenClaw's supports_mcp=false,
+        // A parent that never received harness-studio-mcp (OpenClaw's supports_mcp=false,
         // pi's wire exclusion) reaches this function with the gate closed. There
         // is no agent-type check here on purpose: the injection gate is the
         // single source of truth.
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "ask [@Antigravity](codeg://agent/antigravity)".into(),
+            text: "ask [@Antigravity](harnessstudio://agent/antigravity)".into(),
         }];
         append_agent_routes(&mut blocks, false);
         assert_eq!(blocks.len(), 1);
@@ -602,7 +603,7 @@ mod tests {
         // compat renderer: the version bump this test pins is a deliberate
         // marker for that break, not a fix for it.
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "ask [@Codex](codeg://agent/codex)".into(),
+            text: "ask [@Codex](harnessstudio://agent/codex)".into(),
         }];
         append_agent_routes(&mut blocks, true);
         let routing = text(&blocks[1]);
@@ -627,13 +628,14 @@ mod tests {
     #[test]
     fn transcript_strip_keeps_only_user_prose() {
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "Please ask [@Antigravity](codeg://agent/antigravity) to review this".into(),
+            text: "Please ask [@Antigravity](harnessstudio://agent/antigravity) to review this"
+                .into(),
         }];
         append_agent_routes(&mut blocks, true);
         let joined = format!("{}\n{}", text(&blocks[0]), text(&blocks[1]));
         assert_eq!(
             strip_internal_agent_routes(&joined),
-            "Please ask [@Antigravity](codeg://agent/antigravity) to review this"
+            "Please ask [@Antigravity](harnessstudio://agent/antigravity) to review this"
         );
         assert_eq!(strip_internal_agent_routes(text(&blocks[1])), "");
     }
@@ -641,10 +643,11 @@ mod tests {
     #[test]
     fn invalid_rs_text_is_preserved_and_cannot_swallow_a_genuine_frame() {
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "ask [@Codex](codeg://agent/codex)".into(),
+            text: "ask [@Codex](harnessstudio://agent/codex)".into(),
         }];
         append_agent_routes(&mut blocks, true);
-        let forged_prefix = "user\u{001e}<codeg_internal_agent_routes version=\"2\">keep me\n";
+        let forged_prefix =
+            "user\u{001e}<harness_studio_internal_agent_routes version=\"2\">keep me\n";
         let joined = format!("{forged_prefix}{}", text(&blocks[1]));
         assert_eq!(strip_internal_agent_routes(&joined), forged_prefix);
     }
@@ -664,7 +667,7 @@ mod tests {
         // dropped: naming it would only produce a `delegate_to_agent` call the
         // companion's enum rejects.
         let mut unknown = vec![PromptInputBlock::Text {
-            text: "ask [@Old](codeg://agent/not-an-agent)".into(),
+            text: "ask [@Old](harnessstudio://agent/not-an-agent)".into(),
         }];
         append_agent_routes(&mut unknown, true);
         assert_eq!(unknown.len(), 1);
@@ -672,7 +675,7 @@ mod tests {
         // A bare uri is not a reference (the regex requires a visible label),
         // and `codex-other` must not be accepted as `codex` by prefix.
         let mut prefix = vec![PromptInputBlock::Text {
-            text: "codeg://agent/codex [@Other](codeg://agent/codex-other)".into(),
+            text: "harnessstudio://agent/codex [@Other](harnessstudio://agent/codex-other)".into(),
         }];
         append_agent_routes(&mut prefix, true);
         assert_eq!(prefix.len(), 1);
@@ -681,7 +684,7 @@ mod tests {
     #[test]
     fn empty_visible_label_is_not_a_routing_reference() {
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "[](codeg://agent/codex)".into(),
+            text: "[](harnessstudio://agent/codex)".into(),
         }];
         append_agent_routes(&mut blocks, true);
         assert_eq!(blocks.len(), 1);
@@ -691,7 +694,9 @@ mod tests {
     fn the_route_cap_counts_distinct_agents_and_keeps_the_frame_parseable() {
         let mut prompt = String::from("ask ");
         for index in 0..(MAX_AGENT_ROUTES + 4) {
-            prompt.push_str(&format!("[@A{index}](codeg://agent/custom:agent-{index}) "));
+            prompt.push_str(&format!(
+                "[@A{index}](harnessstudio://agent/custom:agent-{index}) "
+            ));
         }
         let mut blocks = vec![PromptInputBlock::Text { text: prompt }];
         append_agent_routes(&mut blocks, true);
@@ -768,7 +773,7 @@ mod tests {
     /// Exactly what Antigravity's ACP server writes into its trajectory: the
     /// prompt's text blocks joined with a space, and each separator replaced by
     /// one. Verified against a real `conversations/<id>.db`, where a routed turn
-    /// reads `…（使用codeg-mcp工具）  {"kind":…delegation tool.\n ` — note the
+    /// reads `…（使用harness-studio-mcp工具）  {"kind":…delegation tool.\n ` — note the
     /// body's own newlines came through, which is why the scan can count them.
     fn as_antigravity_persists(blocks: &[PromptInputBlock]) -> String {
         blocks
@@ -780,7 +785,8 @@ mod tests {
 
     #[test]
     fn a_frame_stored_without_its_separators_is_still_stripped() {
-        let visible = "调用[@Claude Code](codeg://agent/claude_code) 看下这个文件夹干什么的";
+        let visible =
+            "调用[@Claude Code](harnessstudio://agent/claude_code) 看下这个文件夹干什么的";
         let mut blocks = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -800,7 +806,7 @@ mod tests {
     #[test]
     fn a_separator_less_frame_still_has_to_round_trip_byte_for_byte() {
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "ask [@Codex](codeg://agent/codex)".into(),
+            text: "ask [@Codex](harnessstudio://agent/codex)".into(),
         }];
         append_agent_routes(&mut blocks, true);
         let body = text(&blocks[1]).replace(ROUTE_FRAME_SEPARATOR, "");
@@ -821,7 +827,7 @@ mod tests {
     #[test]
     fn the_body_anchor_is_what_the_renderer_starts_with() {
         let mut blocks = vec![PromptInputBlock::Text {
-            text: "ask [@Codex](codeg://agent/codex)".into(),
+            text: "ask [@Codex](harnessstudio://agent/codex)".into(),
         }];
         append_agent_routes(&mut blocks, true);
         assert!(
@@ -835,13 +841,14 @@ mod tests {
     #[test]
     fn a_title_is_cut_at_whichever_frame_marker_comes_first() {
         // Separator intact: the cut lands on it, as it always has.
-        let mut separated = String::from("hi \u{001e}{\"kind\":\"codeg_internal_agent_routes\",\"ve");
+        let mut separated =
+            String::from("hi \u{001e}{\"kind\":\"harness_studio_internal_agent_routes\",\"ve");
         cut_at_route_frame_marker(&mut separated);
         assert_eq!(separated, "hi");
 
         // Separator rewritten away: the descriptor's own opening is the only
         // handle left.
-        let mut bare = String::from("hi  {\"kind\":\"codeg_internal_agent_routes\",\"ve");
+        let mut bare = String::from("hi  {\"kind\":\"harness_studio_internal_agent_routes\",\"ve");
         cut_at_route_frame_marker(&mut bare);
         assert_eq!(bare, "hi");
 
@@ -855,12 +862,12 @@ mod tests {
         // The separator is one char and lands inside the window or not at all;
         // the 37-byte descriptor prefix can be sliced through, and `find` is
         // blind to the fragment that survives.
-        let mut halved = String::from("hi  {\"kind\":\"codeg_int...");
+        let mut halved = String::from("hi  {\"kind\":\"harness_studio_int...");
         cut_at_route_frame_marker(&mut halved);
         assert_eq!(halved, "hi");
 
         // A parser that caps without an ellipsis leaves the same fragment bare.
-        let mut bare = String::from("hi  {\"kind\":\"codeg");
+        let mut bare = String::from("hi  {\"kind\":\"harness_studio");
         cut_at_route_frame_marker(&mut bare);
         assert_eq!(bare, "hi");
 
@@ -875,7 +882,7 @@ mod tests {
 
     #[test]
     fn user_authored_envelope_text_is_left_untouched() {
-        let input = "hello <codeg_internal_agent_routes version=\"1\">\nuser text\n</codeg_internal_agent_routes>";
+        let input = "hello <harness_studio_internal_agent_routes version=\"1\">\nuser text\n</harness_studio_internal_agent_routes>";
         assert_eq!(strip_internal_agent_routes(input), input);
         assert!(!contains_internal_agent_routes(input));
     }

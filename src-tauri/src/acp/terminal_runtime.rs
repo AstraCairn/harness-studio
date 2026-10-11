@@ -56,7 +56,9 @@ pub enum TerminalRuntimeError {
 impl TerminalRuntimeError {
     pub fn into_rpc_error(self) -> agent_client_protocol::Error {
         match self {
-            Self::InvalidParams(message) => agent_client_protocol::Error::invalid_params().data(message),
+            Self::InvalidParams(message) => {
+                agent_client_protocol::Error::invalid_params().data(message)
+            }
             Self::Internal(message) => agent_client_protocol::util::internal_error(message),
         }
     }
@@ -205,10 +207,7 @@ impl TerminalInstance {
     }
 
     async fn kill_command(&self) -> Result<(), TerminalRuntimeError> {
-        if matches!(
-            *self.completion.borrow(),
-            TerminalCompletion::Exited(_)
-        ) {
+        if matches!(*self.completion.borrow(), TerminalCompletion::Exited(_)) {
             return Ok(());
         }
 
@@ -309,7 +308,7 @@ fn is_already_reaped(_err: &std::io::Error) -> bool {
 /// is what keeps `terminal/output`, `terminal/kill` and session teardown off
 /// the unbounded `Child::wait`. The task ends only once the process is **known**
 /// to be gone, so it never drops a possibly-live child (tokio does not kill on
-/// drop, and codeg never sets `kill_on_drop`).
+/// drop, and harness_studio never sets `kill_on_drop`).
 async fn own_terminal_process(terminal: Arc<TerminalInstance>, mut child: tokio::process::Child) {
     let pid = child.id();
     // Cumulative across every pass, never overwritten: a later `SIGKILL` pass
@@ -455,7 +454,7 @@ impl TerminalShellRuntimeConfig {
 pub struct TerminalRuntime {
     terminals: Mutex<TerminalMap>,
     /// Base environment merged into every spawned terminal command before
-    /// the agent's per-request `env` is applied. This is where the codeg
+    /// the agent's per-request `env` is applied. This is where the harness_studio
     /// git credential helper (`GIT_CONFIG_*`) lives so an agent that runs
     /// `git push` via the ACP `terminal/create` tool inherits the same
     /// auth path the agent process itself does. Per-request env from the
@@ -465,7 +464,7 @@ pub struct TerminalRuntime {
     /// Fallback working directory applied to spawned terminals when the
     /// agent's `terminal/create` request omits `cwd`. The connection layer
     /// sets this to the session's resolved working directory so terminals
-    /// default to the folder the conversation runs in instead of codeg's own
+    /// default to the folder the conversation runs in instead of harness_studio's own
     /// process cwd (often "/" on desktop, the dev crate dir in development).
     /// `None` leaves the process cwd inherited (legacy behavior).
     default_cwd: Option<PathBuf>,
@@ -522,10 +521,7 @@ impl TerminalRuntime {
     /// Use a shared General Settings shell value for ACP terminal fallbacks.
     /// The config is read at command creation time so existing connections pick
     /// up setting changes without being restarted.
-    pub fn with_default_shell_config(
-        mut self,
-        default_shell: TerminalShellRuntimeConfig,
-    ) -> Self {
+    pub fn with_default_shell_config(mut self, default_shell: TerminalShellRuntimeConfig) -> Self {
         self.default_shell = default_shell;
         self
     }
@@ -549,7 +545,7 @@ impl TerminalRuntime {
         // directory surfaces as a loud spawn failure rather than silently
         // running somewhere else. Only when the agent omits `cwd` do we fall
         // back to the connection's session working directory — agents like
-        // CodeBuddy omit it, which would otherwise inherit codeg's own process
+        // CodeBuddy omit it, which would otherwise inherit harness_studio's own process
         // cwd instead of the folder the conversation runs in. The fallback is
         // guarded on `is_dir` so a not-yet-created session dir never turns into
         // a spawn failure (mirrors the cwd guard in `build_agent`).
@@ -562,7 +558,7 @@ impl TerminalRuntime {
         }
 
         // Apply the runtime's base env first (e.g. `GIT_CONFIG_*` for the
-        // codeg credential helper), then layer the agent's request env on top
+        // harness_studio credential helper), then layer the agent's request env on top
         // so agents can still override or scrub specific keys.
         for (key, value) in &self.base_env {
             command.env(key, value);
@@ -613,7 +609,7 @@ impl TerminalRuntime {
         // cannot — PowerShell's `Get-ChildItem`, cmd's `dir`. A path that long
         // can never be a real executable, so rerouting it is always at least as
         // correct. Deciding off a real failed spawn — rather than a pre-spawn
-        // `which` guess that runs in codeg's own cwd/env — means we never
+        // `which` guess that runs in harness_studio's own cwd/env — means we never
         // reroute a command that would otherwise have run.
         //
         // A spawn the kernel refuses with `ETXTBSY` is retried in place instead
@@ -1114,19 +1110,27 @@ mod shell_config_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{EnvVariable, SessionId, TerminalId, WaitForTerminalExitRequest};
+    use agent_client_protocol::schema::v1::{
+        EnvVariable, SessionId, TerminalId, WaitForTerminalExitRequest,
+    };
 
     /// Regression: when an ACP agent calls `terminal/create` (e.g. to run
     /// `git push`), the runtime's base env — populated by the connection
-    /// layer with the codeg credential helper's `GIT_CONFIG_*` keys —
+    /// layer with the harness_studio credential helper's `GIT_CONFIG_*` keys —
     /// must reach the spawned process. Per-request `env` from the agent
     /// still wins on key collision so the agent can scrub or override
     /// specific keys for individual commands.
     #[tokio::test]
     async fn base_env_propagates_and_request_env_overrides() {
         let mut base_env = BTreeMap::new();
-        base_env.insert("CODEG_TEST_BASE_VAR".to_string(), "from_base".to_string());
-        base_env.insert("CODEG_TEST_OVERRIDE".to_string(), "loses".to_string());
+        base_env.insert(
+            "HARNESS_STUDIO_TEST_BASE_VAR".to_string(),
+            "from_base".to_string(),
+        );
+        base_env.insert(
+            "HARNESS_STUDIO_TEST_OVERRIDE".to_string(),
+            "loses".to_string(),
+        );
         let runtime = TerminalRuntime::with_base_env(base_env);
 
         let session_id = SessionId::new("test-session".to_string());
@@ -1135,9 +1139,13 @@ mod tests {
             "-c".into(),
             // Print both vars on separate lines so we can match each
             // independently regardless of shell quoting.
-            "printf '%s\\n' \"$CODEG_TEST_BASE_VAR\" \"$CODEG_TEST_OVERRIDE\"".into(),
+            "printf '%s\\n' \"$HARNESS_STUDIO_TEST_BASE_VAR\" \"$HARNESS_STUDIO_TEST_OVERRIDE\""
+                .into(),
         ];
-        request.env = vec![EnvVariable::new("CODEG_TEST_OVERRIDE", "request_wins")];
+        request.env = vec![EnvVariable::new(
+            "HARNESS_STUDIO_TEST_OVERRIDE",
+            "request_wins",
+        )];
 
         let response = runtime
             .create_terminal(request)
@@ -1193,17 +1201,17 @@ mod tests {
     #[tokio::test]
     async fn a_server_an_agent_starts_is_announced_to_its_window() {
         use crate::browser::types::{ServiceSource, SERVICE_DETECTED_EVENT};
-        use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+        use crate::events::{EventBroadcaster, EventEmitter};
 
         // Something really listening, so the probe has something to find.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
 
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut events = broadcaster.subscribe();
         let runtime = TerminalRuntime::with_base_env(BTreeMap::new()).with_service_watch(Some(
             ServiceWatch::new(
-                EventEmitter::test_web_only(broadcaster),
+                EventEmitter::test_local(broadcaster),
                 "main".to_string(),
                 ServiceSource::Agent,
             ),
@@ -1252,7 +1260,7 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
-        let broadcaster = Arc::new(crate::web::event_bridge::WebEventBroadcaster::new());
+        let broadcaster = Arc::new(crate::events::EventBroadcaster::new());
         let mut events = broadcaster.subscribe();
 
         let runtime = TerminalRuntime::with_base_env(BTreeMap::new());
@@ -1324,9 +1332,7 @@ mod tests {
         let config = TerminalShellRuntimeConfig::new();
         let runtime = TerminalRuntime::with_base_env(BTreeMap::new())
             .with_default_shell_config(config.clone());
-        config
-            .set(Some(shell.to_string_lossy().to_string()))
-            .await;
+        config.set(Some(shell.to_string_lossy().to_string())).await;
 
         let session_id = SessionId::new("selected-shell".to_string());
         let request = CreateTerminalRequest::new(
@@ -1346,7 +1352,7 @@ mod tests {
     }
 
     /// A `terminal/create` that omits `cwd` defaults to the runtime's
-    /// configured working directory rather than codeg's own process cwd.
+    /// configured working directory rather than harness_studio's own process cwd.
     #[tokio::test]
     async fn falls_back_to_default_cwd_when_request_omits_cwd() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1428,8 +1434,7 @@ mod tests {
 
         // Genuine shell operators must evaluate, not be passed as literal args.
         let session_id = SessionId::new("shell-ops".to_string());
-        let request =
-            CreateTerminalRequest::new(session_id.clone(), "true && echo OK".to_string());
+        let request = CreateTerminalRequest::new(session_id.clone(), "true && echo OK".to_string());
         let output = run_and_capture(&runtime, &session_id, request).await;
         assert!(
             output.contains("OK"),
@@ -1450,8 +1455,7 @@ mod tests {
 
         let session_id = SessionId::new("overlong-cmd".to_string());
         let marker = "x".repeat(5000);
-        let request =
-            CreateTerminalRequest::new(session_id.clone(), format!("echo {marker}"));
+        let request = CreateTerminalRequest::new(session_id.clone(), format!("echo {marker}"));
         let output = run_and_capture(&runtime, &session_id, request).await;
         assert!(
             output.contains(&marker),
@@ -1487,8 +1491,7 @@ mod tests {
         let runtime = TerminalRuntime::with_base_env(BTreeMap::new());
 
         let session_id = SessionId::new("direct-exec".to_string());
-        let mut request =
-            CreateTerminalRequest::new(session_id.clone(), "/bin/echo".to_string());
+        let mut request = CreateTerminalRequest::new(session_id.clone(), "/bin/echo".to_string());
         request.args = vec!["hello world".into()];
         let output = run_and_capture(&runtime, &session_id, request).await;
         assert!(
@@ -1508,7 +1511,9 @@ mod tests {
 
         let session_id = SessionId::new("missing-cwd".to_string());
         let mut request = CreateTerminalRequest::new(session_id, "pwd".to_string());
-        request.cwd = Some(PathBuf::from("/codeg-nonexistent-cwd/does/not/exist"));
+        request.cwd = Some(PathBuf::from(
+            "/harness-studio-nonexistent-cwd/does/not/exist",
+        ));
 
         let result = runtime.create_terminal(request).await;
         assert!(
@@ -1568,7 +1573,7 @@ mod tests {
     /// A relative, space-containing executable resolves against the terminal's
     /// effective cwd and runs directly — the shell fallback fires only on a
     /// genuine NotFound. This guards the regression where a pre-spawn `which`
-    /// check, run in codeg's own cwd, would shell-wrap and split the path.
+    /// check, run in harness_studio's own cwd, would shell-wrap and split the path.
     #[tokio::test]
     async fn relative_executable_with_spaces_runs_in_effective_cwd() {
         use std::os::unix::fs::PermissionsExt;
@@ -1696,7 +1701,8 @@ mod tests {
             async move {
                 runtime
                     .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
-                        session_id, terminal_id,
+                        session_id,
+                        terminal_id,
                     ))
                     .await
             }
@@ -1748,7 +1754,8 @@ mod tests {
                 tokio::spawn(async move {
                     runtime
                         .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
-                            session_id, terminal_id,
+                            session_id,
+                            terminal_id,
                         ))
                         .await
                 })
@@ -2103,7 +2110,7 @@ mod tests {
 
     /// A brand-new executable that something still holds open for writing is
     /// retried, not rejected. exec returns `ETXTBSY` while any write descriptor
-    /// to the file is open anywhere, and codeg forks constantly (git, agents,
+    /// to the file is open anywhere, and harness_studio forks constantly (git, agents,
     /// other terminals), so a descriptor inherited across a `fork()` can make an
     /// agent's just-written script briefly unrunnable — including in this test
     /// binary, which is where the flake was first observed.

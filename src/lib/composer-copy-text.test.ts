@@ -4,9 +4,9 @@ import { unescapeComposerText } from "./composer-copy-text"
 
 describe("unescapeComposerText", () => {
   it("collapses the doubled backslashes of a Windows path (the reported bug)", () => {
-    expect(unescapeComposerText("C:\\\\tools\\\\codeg\\\\xxx.xx")).toBe(
-      "C:\\tools\\codeg\\xxx.xx"
-    )
+    expect(
+      unescapeComposerText("C:\\\\tools\\\\harness_studio\\\\xxx.xx")
+    ).toBe("C:\\tools\\harness_studio\\xxx.xx")
   })
 
   it("drops the backslash from escaped inline Markdown punctuation", () => {

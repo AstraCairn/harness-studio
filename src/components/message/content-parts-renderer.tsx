@@ -49,7 +49,7 @@ import {
 } from "@/components/ai-elements/reasoning"
 import { AgentToolCallPart } from "./agent-tool-call"
 import { AskQuestionResultCard } from "./ask-question-result-card"
-import { CodegMcpToolCard } from "./codeg-mcp-tool-card"
+import { HarnessStudioMcpToolCard } from "./harness-studio-mcp-tool-card"
 import { ResumedDelegationCard } from "./resumed-delegation-card"
 import { CollabAgentCard } from "./collab-agent-card"
 import {
@@ -77,7 +77,7 @@ import {
   WAIT_TOOL_NAME,
 } from "@/lib/shell-session-tool"
 import { COLLAB_AGENT_TOOL_NAME } from "@/lib/collab-tool"
-import { isCodegMcpWorkbenchTool } from "@/lib/codeg-mcp-tool"
+import { isHarnessStudioMcpWorkbenchTool } from "@/lib/harness-studio-mcp-tool"
 import { fsSeparator } from "@/lib/path-utils"
 import { DelegatedSubThread } from "./delegated-sub-thread"
 import { DelegationStatusCard } from "./delegation-status-card"
@@ -2813,7 +2813,7 @@ const ToolCallPart = memo(function ToolCallPart({
     )
   }
 
-  // codeg-mcp ask_user_question: render the asked question(s) and the user's
+  // harness-studio-mcp ask_user_question: render the asked question(s) and the user's
   // selection as a dedicated read-only card instead of the generic tool shell.
   // The live interactive answering is handled separately by the pinned
   // AskQuestionCard; this is the in-stream record (historical + in-flight).
@@ -2828,7 +2828,7 @@ const ToolCallPart = memo(function ToolCallPart({
     )
   }
 
-  // codeg-mcp check_user_feedback: render the received steering notes as a
+  // harness-studio-mcp check_user_feedback: render the received steering notes as a
   // capsule. The no-op polls (count: 0) and in-flight checks are dropped upstream
   // by `dropHiddenFeedbackChecks`, so reaching here means there is feedback to
   // show (or, rarely, an error).
@@ -2842,7 +2842,7 @@ const ToolCallPart = memo(function ToolCallPart({
     )
   }
 
-  // codeg-mcp resume_delegation: the sub-agent that came back. Rendered as the
+  // harness-studio-mcp resume_delegation: the sub-agent that came back. Rendered as the
   // delegation card itself (with a ⟳ marker) rather than a task-id row above
   // one, and tried BEFORE the generic workbench card below — which stays as the
   // fallback for a REFUSED resume (`not_resumable`, unknown task), where there
@@ -2860,7 +2860,7 @@ const ToolCallPart = memo(function ToolCallPart({
         // a hook to find out), so the fallback goes in rather than the decision
         // coming out.
         fallback={
-          <CodegMcpToolCard
+          <HarnessStudioMcpToolCard
             tool="resume_delegation"
             input={part.input ?? null}
             output={part.output ?? null}
@@ -2872,13 +2872,13 @@ const ToolCallPart = memo(function ToolCallPart({
     )
   }
 
-  // The remaining codeg-mcp workbench companions (session lookup, work-task
+  // The remaining harness-studio-mcp workbench companions (session lookup, work-task
   // reporting, chat authoring). One compact line stating what the call was
   // about, in the same visual language as the delegation cards, instead of the
   // generic tool shell's raw argument dump.
-  if (isCodegMcpWorkbenchTool(toolNameLower)) {
+  if (isHarnessStudioMcpWorkbenchTool(toolNameLower)) {
     return (
-      <CodegMcpToolCard
+      <HarnessStudioMcpToolCard
         tool={toolNameLower}
         input={part.input ?? null}
         output={part.output ?? null}

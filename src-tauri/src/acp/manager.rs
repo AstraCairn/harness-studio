@@ -10,14 +10,14 @@ use sea_orm::{
     TransactionTrait,
 };
 
+use crate::acp::agent_mentions::strip_route_separator_from_prompt;
 use crate::acp::connection::{
     spawn_agent_connection, AgentConnection, ConnectionCommand, GoalControlAction, SteerOutcome,
 };
-use crate::acp::agent_mentions::strip_route_separator_from_prompt;
 use crate::acp::error::AcpError;
 use crate::acp::feedback::{
-    bounded_feedback_batch, FeedbackItem, FeedbackStatus, PendingFeedback,
-    SessionFeedbackAccess, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_RESPONSE_BYTES,
+    bounded_feedback_batch, FeedbackItem, FeedbackStatus, PendingFeedback, SessionFeedbackAccess,
+    MAX_FEEDBACK_CHARS, MAX_FEEDBACK_RESPONSE_BYTES,
 };
 use crate::acp::plan_approval::{
     PlanApprovalAnswer, RegisteredPlanApproval, SessionPlanApprovalAccess,
@@ -34,8 +34,8 @@ use crate::acp::types::{
 use crate::db::entities::conversation::{self, ConversationKind, ConversationStatus};
 use crate::db::service::conversation_service;
 use crate::db::AppDatabase;
+use crate::events::{emit_with_state, emit_with_state_gated, EventEmitter};
 use crate::models::agent::AgentType;
-use crate::web::event_bridge::{emit_with_state, emit_with_state_gated, EventEmitter};
 
 /// Cap on the number of prompt-text chars kept in the `user_prompt_sent`
 /// preview. Past this, `truncate_str` keeps this many chars and appends a short
@@ -318,12 +318,12 @@ fn steered_turn_changed(
     !now_in_flight || now_turns_completed != admitted_turns_completed
 }
 
-/// Read the spawn-handshake timeout from `CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS`,
+/// Read the spawn-handshake timeout from `HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS`,
 /// falling back to `SPAWN_HANDSHAKE_TIMEOUT_SECS`. Returns the configured
 /// `Duration`. Tests can construct the manager with a custom value via
 /// `with_spawn_handshake_timeout` instead of mutating env.
 fn spawn_handshake_timeout_from_env() -> Duration {
-    let secs = std::env::var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS")
+    let secs = std::env::var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(SPAWN_HANDSHAKE_TIMEOUT_SECS);
@@ -394,8 +394,7 @@ const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 /// ago that it cannot be a spawn still in flight.
 fn prune_reaped(draining: &mut DrainingChildren) {
     draining.retain(|c| {
-        c.pid.load(std::sync::atomic::Ordering::SeqCst) != 0
-            || c.parked_at.elapsed() < DRAIN_GRACE
+        c.pid.load(std::sync::atomic::Ordering::SeqCst) != 0 || c.parked_at.elapsed() < DRAIN_GRACE
     });
 }
 
@@ -445,7 +444,7 @@ pub struct ConnectionManager {
     /// Delegation broker + token registry + UDS path installed during app
     /// bootstrap (`install_delegation`). When present, `spawn_agent` propagates
     /// the injection to `spawn_agent_connection`, which makes
-    /// `codeg-mcp` appear in the agent's MCP server list during ACP
+    /// `harness-studio-mcp` appear in the agent's MCP server list during ACP
     /// init. `Arc<OnceLock>` so the inner `Self` cloned from `clone_ref` sees
     /// the install too — the lock is set once at startup and never mutated.
     delegation_injection: Arc<std::sync::OnceLock<crate::acp::connection::DelegationInjection>>,
@@ -545,16 +544,11 @@ impl ConnectionManager {
     /// Install the chat-channel manager exactly once during bootstrap so
     /// live title writes can sync bound forum topics. Calling twice is a
     /// no-op. Tests leave this unset and skip the remote sync.
-    pub fn install_chat_channel(
-        &self,
-        manager: crate::chat_channel::manager::ChatChannelManager,
-    ) {
+    pub fn install_chat_channel(&self, manager: crate::chat_channel::manager::ChatChannelManager) {
         let _ = self.chat_channel.set(manager);
     }
 
-    pub(crate) fn chat_channel(
-        &self,
-    ) -> Option<crate::chat_channel::manager::ChatChannelManager> {
+    pub(crate) fn chat_channel(&self) -> Option<crate::chat_channel::manager::ChatChannelManager> {
         self.chat_channel.get().map(|c| c.clone_ref())
     }
 
@@ -745,7 +739,9 @@ impl ConnectionManager {
         let connection_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(
             "[ACP] spawning connection id={} owner_window={} agent={:?}",
-            connection_id, owner_window_label, agent_type
+            connection_id,
+            owner_window_label,
+            agent_type
         );
 
         // `spawn_agent_connection` inserts the entry into `self.connections`,
@@ -772,7 +768,7 @@ impl ConnectionManager {
         // SessionStarted has applied (so external_id is populated for the
         // next waiter), aborted (connection died), or the timeout fires.
         // Logged on every wait so production can audit real-world handshake
-        // latencies and tune `CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS`.
+        // latencies and tune `HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS`.
         if dedup_lock.is_some() {
             let timeout = self.spawn_handshake_timeout;
             let (outcome, elapsed) = wait_for_session_started(session_started_rx, timeout).await;
@@ -914,7 +910,12 @@ impl ConnectionManager {
             }
         }
         for (state, emitter, stale) in targets {
-            emit_with_state(&state, &emitter, AcpEvent::SessionConfigStale { stale, kind }).await;
+            emit_with_state(
+                &state,
+                &emitter,
+                AcpEvent::SessionConfigStale { stale, kind },
+            )
+            .await;
         }
         stale_count
     }
@@ -1221,7 +1222,7 @@ impl ConnectionManager {
         // agent all see the full bytes.
         crate::acp::prompt_hydration::hydrate_prompt_blocks(
             &mut blocks,
-            &crate::paths::codeg_uploads_root(),
+            &crate::paths::harness_studio_uploads_root(),
         )
         .await?;
 
@@ -1344,7 +1345,7 @@ impl ConnectionManager {
                     // handled by the lifecycle subscriber.
                     let eid_opt = task_state.read().await.external_id.clone();
                     let preserved = if let Some(eid) = eid_opt {
-                        // THE codeg#500 write. Branch A above adopts a row the
+                        // THE harness_studio#500 write. Branch A above adopts a row the
                         // caller supplied, which may still be bound to an older
                         // session — a connection spawned with `session_id = None`
                         // (a reconnect that lost the id, or an unclassified
@@ -1568,10 +1569,7 @@ impl ConnectionManager {
         // for a prompt that never reached the agent, so without this the
         // lifecycle subscriber's PendingReview write also never fires and the
         // row would be stuck until a follow-up `send_prompt_linked` re-flipped it.
-        match self
-            .send_prompt_inner(conn_id, blocks, user_message)
-            .await
-        {
+        match self.send_prompt_inner(conn_id, blocks, user_message).await {
             Ok(()) => {
                 // The prompt reached the agent: surface it to the chat-channel
                 // "user message" event feed. Notification-only — never gates the
@@ -1584,11 +1582,8 @@ impl ConnectionManager {
                     )
                     .await;
                 }
-                if let (Some(cid), Some(title)) =
-                    (conversation_id_for_status, first_prompt_title)
-                {
-                    match conversation_service::seed_auto_title_if_empty(&db.conn, cid, title)
-                        .await
+                if let (Some(cid), Some(title)) = (conversation_id_for_status, first_prompt_title) {
+                    match conversation_service::seed_auto_title_if_empty(&db.conn, cid, title).await
                     {
                         Ok(true) => {
                             crate::commands::conversations::emit_conversation_upsert(
@@ -1712,7 +1707,7 @@ impl ConnectionManager {
     ///   out.
     ///
     /// Liveness deliberately does NOT gate it. `ConnectionStatus::Prompting`
-    /// (and `turn_in_flight` with it) tracks turns CODEG started, and a goal
+    /// (and `turn_in_flight` with it) tracks turns HARNESS_STUDIO started, and a goal
     /// loop's continuations are started by codex itself — detached turns no host
     /// request owns — so gating on them would skip the interrupt in exactly the
     /// case that motivated this. Any post-hoc read is unsound anyway: by the
@@ -2110,7 +2105,9 @@ impl ConnectionManager {
             // Surface failures even when the caller is gone (the detached task's
             // Result would otherwise be dropped silently).
             if let Err(ref e) = outcome {
-                tracing::error!("[ACP][ERROR] fork persistence failed (conn={conn_id_for_task}): {e}");
+                tracing::error!(
+                    "[ACP][ERROR] fork persistence failed (conn={conn_id_for_task}): {e}"
+                );
             }
             outcome
         });
@@ -2135,7 +2132,7 @@ impl ConnectionManager {
     /// title lock. Returns the sibling row id.
     ///
     /// Both titles outlive the per-turn auto-title backfill by design: neither
-    /// the user's own name nor codeg's `[Fork] ` marker exists in the session
+    /// the user's own name nor harness_studio's `[Fork] ` marker exists in the session
     /// file the backfill re-parses, so an unlocked row would silently revert to
     /// the parsed title on its next detail load.
     ///
@@ -2259,7 +2256,7 @@ impl ConnectionManager {
                     let mut active: conversation::ActiveModel = current.into();
                     if let Some(ref clean) = clean_title {
                         active.title = Set(Some(format!("[Fork] {clean}")));
-                        // ...and lock it. The `[Fork] ` marker is codeg's own —
+                        // ...and lock it. The `[Fork] ` marker is harness_studio's own —
                         // no parser derives it from a transcript — so on an
                         // unlocked row it survives only until the next detail
                         // load, where the auto-title backfill adopts the
@@ -2410,13 +2407,13 @@ impl ConnectionManager {
     /// Probe an agent for the modes / config_options it advertises on a fresh
     /// session, then immediately disconnect. The probe runs with
     /// `EventEmitter::Noop` so no event reaches the desktop webview, the
-    /// global `WebEventBroadcaster`, or the `InternalEventBus` — the events
+    /// global `EventBroadcaster`, or the `InternalEventBus` — the events
     /// land only in this probe connection's own (unsubscribed) per-connection
     /// stream and in its `SessionState` (which is the read source here).
     ///
     /// Used by the delegation-settings UI to enumerate the options the user
     /// can override, with the guarantee that what the UI shows is exactly
-    /// what `codeg-mcp` will pass through to `session/set_config_option`
+    /// what `harness-studio-mcp` will pass through to `session/set_config_option`
     /// when a delegation actually fires.
     ///
     /// Returns `Ok(snapshot)` even when the agent advertises no options
@@ -2541,13 +2538,7 @@ impl ConnectionManager {
         let grace_period = Duration::from_millis(500);
         let mut selectors_ready_at: Option<std::time::Instant> = None;
         loop {
-            let (
-                config_options,
-                modes,
-                available_commands,
-                prompt_capabilities,
-                selectors_ready,
-            ) = {
+            let (config_options, modes, available_commands, prompt_capabilities, selectors_ready) = {
                 let conns = self.connections.lock().await;
                 let conn = conns
                     .get(conn_id)
@@ -2613,7 +2604,8 @@ impl ConnectionManager {
         }
         tracing::info!(
             "[ACP] disconnect by owner window owner_window={} count={}",
-            owner_window_label, disconnected
+            owner_window_label,
+            disconnected
         );
         disconnected
     }
@@ -2699,7 +2691,8 @@ impl ConnectionManager {
         }
         tracing::info!(
             "[ACP] disconnect by agent type agent={:?} count={}",
-            agent_type, disconnected
+            agent_type,
+            disconnected
         );
 
         // Every child that could still be running as this agent: the ones just
@@ -2850,9 +2843,7 @@ impl ConnectionManager {
     /// Block new connections from being established until the returned guard
     /// is dropped. The caller must enumerate live connections only AFTER
     /// holding this, never before.
-    pub async fn lock_out_new_connections(
-        &self,
-    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+    pub async fn lock_out_new_connections(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.external_restore_lock.clone().write_owned().await
     }
 
@@ -2880,8 +2871,7 @@ impl ConnectionManager {
         let mut out = Vec::new();
         for (id, conn) in connections.iter() {
             let state = conn.state.read().await;
-            let (Some(conversation_id), Some(folder_id)) =
-                (state.conversation_id, state.folder_id)
+            let (Some(conversation_id), Some(folder_id)) = (state.conversation_id, state.folder_id)
             else {
                 continue;
             };
@@ -3067,11 +3057,8 @@ impl ConnectionManager {
             return Err(AcpError::NoActiveTurn);
         }
 
-        let item = FeedbackItem::new_pending(
-            uuid::Uuid::new_v4().to_string(),
-            text,
-            chrono::Utc::now(),
-        );
+        let item =
+            FeedbackItem::new_pending(uuid::Uuid::new_v4().to_string(), text, chrono::Utc::now());
         // Gate on `turn_in_flight` and append in ONE critical section (via the
         // gated emit): a `TurnComplete` (flips the flag) or `UserMessage`
         // (clears `feedback`) can't slip between the gate and the append+seq, so
@@ -3153,7 +3140,7 @@ impl ConnectionManager {
             Some(mut blocks) => {
                 crate::acp::prompt_hydration::hydrate_prompt_blocks(
                     &mut blocks,
-                    &crate::paths::codeg_uploads_root(),
+                    &crate::paths::harness_studio_uploads_root(),
                 )
                 .await?;
                 // Hydration is the ONLY await this path puts between admission
@@ -3229,9 +3216,9 @@ impl ConnectionManager {
                     })
                     .await
                     .map_err(|_| AcpError::ProcessExited)?;
-                let steer = reply_rx.await.map_err(|_| {
-                    AcpError::protocol("Steer reply channel closed".to_string())
-                })??;
+                let steer = reply_rx
+                    .await
+                    .map_err(|_| AcpError::protocol("Steer reply channel closed".to_string()))??;
                 match steer {
                     // Honored opt-in: the content was NOT consumed and is
                     // still host-owned. Surface the frontend's existing
@@ -3453,7 +3440,12 @@ impl ConnectionManager {
         state: &std::sync::Arc<tokio::sync::RwLock<crate::acp::SessionState>>,
         emitter: &EventEmitter,
     ) -> bool {
-        if self.pending_questions.lock().await.contains_key(question_id) {
+        if self
+            .pending_questions
+            .lock()
+            .await
+            .contains_key(question_id)
+        {
             return false;
         }
         emit_with_state(
@@ -3491,7 +3483,9 @@ impl ConnectionManager {
         // (peer-close) at the same instant; the resolved-event below still clears
         // the card.
         let _ = entry.sender.send(outcome);
-        if let Some((state, emitter)) = self.get_state_and_emitter(&entry.parent_connection_id).await
+        if let Some((state, emitter)) = self
+            .get_state_and_emitter(&entry.parent_connection_id)
+            .await
         {
             emit_with_state(
                 &state,
@@ -3516,7 +3510,9 @@ impl ConnectionManager {
         let Some(entry) = removed else {
             return;
         };
-        if let Some((state, emitter)) = self.get_state_and_emitter(&entry.parent_connection_id).await
+        if let Some((state, emitter)) = self
+            .get_state_and_emitter(&entry.parent_connection_id)
+            .await
         {
             emit_with_state(
                 &state,
@@ -3637,7 +3633,12 @@ impl ConnectionManager {
         state: &std::sync::Arc<tokio::sync::RwLock<crate::acp::SessionState>>,
         emitter: &EventEmitter,
     ) -> bool {
-        if self.pending_plan_approvals.lock().await.contains_key(approval_id) {
+        if self
+            .pending_plan_approvals
+            .lock()
+            .await
+            .contains_key(approval_id)
+        {
             return false;
         }
         emit_with_state(
@@ -3674,8 +3675,9 @@ impl ConnectionManager {
         // (teardown) at the same instant; the resolved event below still clears
         // the card.
         let _ = entry.sender.send(answer);
-        if let Some((state, emitter)) =
-            self.get_state_and_emitter(&entry.parent_connection_id).await
+        if let Some((state, emitter)) = self
+            .get_state_and_emitter(&entry.parent_connection_id)
+            .await
         {
             emit_with_state(
                 &state,
@@ -3714,8 +3716,12 @@ impl ConnectionManager {
         // (disconnect removes it before this sweep), so tolerate `None`.
         if let Some((state, emitter)) = self.get_state_and_emitter(conn_id).await {
             for approval_id in drained {
-                emit_with_state(&state, &emitter, AcpEvent::PlanApprovalResolved { approval_id })
-                    .await;
+                emit_with_state(
+                    &state,
+                    &emitter,
+                    AcpEvent::PlanApprovalResolved { approval_id },
+                )
+                .await;
             }
         }
     }
@@ -3813,7 +3819,7 @@ impl ConnectionManager {
 ///
 /// `data_dir` is required so `spawn` can build a runtime env that
 /// includes the git credential helper — without it, delegated subagents
-/// fail any git command that depends on the codeg-injected helper.
+/// fail any git command that depends on the harness-studio-injected helper.
 #[derive(Clone)]
 pub struct ConnectionManagerSpawner {
     pub manager: Arc<ConnectionManager>,
@@ -3950,8 +3956,10 @@ impl crate::acp::delegation::spawner::ConnectionSpawner for ConnectionManagerSpa
         external_session_id: &str,
         preferred_mode_id: Option<String>,
         preferred_config_values: BTreeMap<String, String>,
-    ) -> Result<crate::acp::delegation::spawner::ResumedSpawn, crate::acp::delegation::spawner::SpawnerError>
-    {
+    ) -> Result<
+        crate::acp::delegation::spawner::ResumedSpawn,
+        crate::acp::delegation::spawner::SpawnerError,
+    > {
         use crate::acp::delegation::spawner::{ResumedSpawn, SpawnerError};
         // Same parent inheritance as `spawn` — a resumed child whose emitter is
         // wired to a different broadcaster would stream to nobody.
@@ -4114,10 +4122,7 @@ pub struct ConnectionManagerFeedbackLookup {
 
 #[async_trait::async_trait]
 impl SessionFeedbackAccess for ConnectionManagerFeedbackLookup {
-    async fn read_pending_feedback(
-        &self,
-        parent_connection_id: &str,
-    ) -> Vec<PendingFeedback> {
+    async fn read_pending_feedback(&self, parent_connection_id: &str) -> Vec<PendingFeedback> {
         self.manager
             .read_pending_feedback(parent_connection_id)
             .await
@@ -4338,7 +4343,7 @@ mod tests {
     use crate::acp::feedback::MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN;
     use crate::acp::session_state::SessionState;
     use crate::acp::types::ConnectionStatus;
-    use crate::web::event_bridge::{EventEmitter, WebEvent, WebEventBroadcaster};
+    use crate::events::{AppEvent, EventBroadcaster, EventEmitter};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::{broadcast, mpsc, RwLock};
@@ -4397,7 +4402,10 @@ mod tests {
     async fn spawn_process_tree(pidfile: &std::path::Path) -> (std::process::Child, i32) {
         let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()))
+            .arg(format!(
+                "sleep 30 & echo $! > '{}'; wait",
+                pidfile.display()
+            ))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -4670,8 +4678,8 @@ mod tests {
     /// Build a broadcaster + subscribed receiver. Subscribing here (not lazily
     /// inside the test) ensures events emitted between construction and the
     /// first `recv` are buffered rather than dropped.
-    fn make_test_broadcaster() -> (Arc<WebEventBroadcaster>, broadcast::Receiver<WebEvent>) {
-        let bcast = Arc::new(WebEventBroadcaster::new());
+    fn make_test_broadcaster() -> (Arc<EventBroadcaster>, broadcast::Receiver<AppEvent>) {
+        let bcast = Arc::new(EventBroadcaster::new());
         let rx = bcast.subscribe();
         (bcast, rx)
     }
@@ -4734,7 +4742,7 @@ mod tests {
     }
 
     /// Subscribe directly to the per-connection event stream. Phase 4b
-    /// removed the dual-broadcast through the global `WebEventBroadcaster`
+    /// removed the dual-broadcast through the global `EventBroadcaster`
     /// for ACP events; the per-connection stream is now the only delivery
     /// path tests can observe. Subscribe BEFORE triggering the producing
     /// call so events emitted between subscribe and recv buffer rather
@@ -4866,8 +4874,9 @@ mod tests {
         mut rx: tokio::sync::mpsc::Receiver<crate::acp::connection::ConnectionCommand>,
         expected: GoalControlAction,
         landed: bool,
-    ) -> tokio::task::JoinHandle<tokio::sync::mpsc::Receiver<crate::acp::connection::ConnectionCommand>>
-    {
+    ) -> tokio::task::JoinHandle<
+        tokio::sync::mpsc::Receiver<crate::acp::connection::ConnectionCommand>,
+    > {
         tokio::spawn(async move {
             match rx.recv().await.expect("goal control enqueued") {
                 ConnectionCommand::GoalControl { action, reply } => {
@@ -4931,8 +4940,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_codex_goal_clear_interrupts_even_when_codeg_thinks_it_is_idle() {
-        // Codeg's `Prompting` only covers turns IT started. A goal loop's
+    async fn a_codex_goal_clear_interrupts_even_when_harness_studio_thinks_it_is_idle() {
+        // HarnessStudio's `Prompting` only covers turns IT started. A goal loop's
         // continuations are started by codex — detached turns no host request
         // owns — so the session reads "connected" while the agent is very much
         // working, which is precisely when the user hits Clear. Gating on our
@@ -4967,7 +4976,7 @@ mod tests {
         let mgr = ConnectionManager::new();
         let mut rx = insert_live_connection(&mgr, "c-goal-paused", AgentType::Codex, None).await;
         mark_prompting(&mgr, "c-goal-paused").await; // the user's own prompt
-        // `goal_active` stays false: the last snapshot was `paused`.
+                                                     // `goal_active` stays false: the last snapshot was `paused`.
 
         mgr.goal_control(&db.conn, "c-goal-paused", GoalControlAction::Clear)
             .await
@@ -5085,7 +5094,7 @@ mod tests {
             &db,
             conn_id,
             vec![PromptInputBlock::Text {
-                text: "ask [@Antigravity](codeg://agent/antigravity) to review".into(),
+                text: "ask [@Antigravity](harnessstudio://agent/antigravity) to review".into(),
             }],
             Some(folder_id),
             None,
@@ -5109,14 +5118,14 @@ mod tests {
         assert!(matches!(
             blocks.as_slice(),
             [PromptInputBlock::Text { text }]
-                if text == "ask [@Antigravity](codeg://agent/antigravity) to review"
+                if text == "ask [@Antigravity](harnessstudio://agent/antigravity) to review"
         ));
         let (message_id, user_blocks) = user_message.expect("root prompt is broadcast");
         assert_eq!(message_id, "optimistic-route");
         assert!(matches!(
             user_blocks.as_slice(),
             [crate::acp::types::UserMessageBlock::Text { text }]
-                if text == "ask [@Antigravity](codeg://agent/antigravity) to review"
+                if text == "ask [@Antigravity](harnessstudio://agent/antigravity) to review"
         ));
     }
 
@@ -5166,7 +5175,9 @@ mod tests {
             blocks,
             user_message,
             ..
-        } = cmd_rx.try_recv().expect("the prompt still reaches the agent")
+        } = cmd_rx
+            .try_recv()
+            .expect("the prompt still reaches the agent")
         else {
             panic!("expected prompt command");
         };
@@ -5188,7 +5199,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_prompt_linked_preserves_history_when_the_session_was_re_minted() {
-        // codeg#500, end to end, in the exact shape the reporter described:
+        // harness_studio#500, end to end, in the exact shape the reporter described:
         // an existing completed conversation, then a new session started in the
         // same folder and pane.
         //
@@ -6085,10 +6096,10 @@ mod tests {
         // Empty / whitespace / image-only prompts seed no title (stays NULL,
         // backfilled on first detail load as before).
         assert!(delegation_child_title_seed(&[]).is_none());
-        assert!(
-            delegation_child_title_seed(&[PromptInputBlock::Text { text: "  \n ".into() }])
-                .is_none()
-        );
+        assert!(delegation_child_title_seed(&[PromptInputBlock::Text {
+            text: "  \n ".into()
+        }])
+        .is_none());
         let img = vec![PromptInputBlock::Image {
             data: "x".into(),
             mime_type: "image/png".into(),
@@ -6425,7 +6436,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/caller-id")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         let mut rx = subscribe_conn_stream(&mgr, conn_id).await;
@@ -6471,12 +6482,12 @@ mod tests {
     /// Drain the global broadcaster and report whether a `conversation://changed`
     /// upsert for `id` carrying `external_id` was emitted.
     fn drain_has_upsert_with_external_id(
-        rx: &mut broadcast::Receiver<WebEvent>,
+        rx: &mut broadcast::Receiver<AppEvent>,
         id: i32,
         external_id: &str,
     ) -> bool {
         while let Ok(evt) = rx.try_recv() {
-            if evt.channel != crate::web::event_bridge::CONVERSATION_CHANGED_EVENT {
+            if evt.channel != crate::events::CONVERSATION_CHANGED_EVENT {
                 continue;
             }
             let p = &*evt.payload;
@@ -6508,7 +6519,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/sess-pre-b")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         {
@@ -6558,7 +6569,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/sess-pre-a")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         {
@@ -6599,7 +6610,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/x")),
-            EventEmitter::test_web_only(broadcaster),
+            EventEmitter::test_local(broadcaster),
         )
         .await;
 
@@ -6628,7 +6639,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/already")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         // Pre-link the connection state.
@@ -6704,7 +6715,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/status")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         let mut rx = subscribe_conn_stream(&mgr, conn_id).await;
@@ -6836,7 +6847,7 @@ mod tests {
             id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/reuse")),
-            EventEmitter::test_web_only(broadcaster),
+            EventEmitter::test_local(broadcaster),
         )
         .await;
         {
@@ -6870,7 +6881,7 @@ mod tests {
             existing_id,
             AgentType::ClaudeCode,
             Some(working_dir.clone()),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         {
@@ -6919,7 +6930,7 @@ mod tests {
             "torn",
             AgentType::ClaudeCode,
             Some(working_dir.clone()),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         {
@@ -7245,15 +7256,15 @@ mod tests {
     fn spawn_handshake_timeout_from_env_uses_default_when_unset() {
         // Snapshot env, mutate, restore. Single test owns this var to avoid
         // cross-test contention.
-        let prev = std::env::var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS").ok();
-        std::env::remove_var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS");
+        let prev = std::env::var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS").ok();
+        std::env::remove_var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS");
         let default = spawn_handshake_timeout_from_env();
         assert_eq!(default, Duration::from_secs(SPAWN_HANDSHAKE_TIMEOUT_SECS));
 
-        std::env::set_var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", "5");
+        std::env::set_var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", "5");
         assert_eq!(spawn_handshake_timeout_from_env(), Duration::from_secs(5));
 
-        std::env::set_var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", "garbage");
+        std::env::set_var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", "garbage");
         assert_eq!(
             spawn_handshake_timeout_from_env(),
             Duration::from_secs(SPAWN_HANDSHAKE_TIMEOUT_SECS),
@@ -7262,8 +7273,8 @@ mod tests {
 
         // Restore.
         match prev {
-            Some(v) => std::env::set_var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", v),
-            None => std::env::remove_var("CODEG_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS"),
+            Some(v) => std::env::set_var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS", v),
+            None => std::env::remove_var("HARNESS_STUDIO_ACP_SPAWN_HANDSHAKE_TIMEOUT_SECS"),
         }
     }
 
@@ -7298,7 +7309,7 @@ mod tests {
             conn_id,
             AgentType::ClaudeCode,
             Some(PathBuf::from("/tmp/cancel-rollback")),
-            EventEmitter::test_web_only(broadcaster.clone()),
+            EventEmitter::test_local(broadcaster.clone()),
         )
         .await;
         let mut rx = subscribe_conn_stream(&mgr, conn_id).await;
@@ -7510,9 +7521,10 @@ mod tests {
         let global = conversation_tag_service::create_tag(&db.conn, None, "bug", "#d73a4a")
             .await
             .unwrap();
-        let owned = conversation_tag_service::create_tag(&db.conn, Some(folder_id), "ui", "#0e8a16")
-            .await
-            .unwrap();
+        let owned =
+            conversation_tag_service::create_tag(&db.conn, Some(folder_id), "ui", "#0e8a16")
+                .await
+                .unwrap();
         conversation_tag_service::update_conversation_tags(
             &db.conn,
             pre.id,
@@ -7535,7 +7547,10 @@ mod tests {
         let sibling = conversation_service::get_by_id(&db.conn, result.sibling_conversation_id)
             .await
             .unwrap();
-        assert_eq!(sibling.tag_ids, expected, "the pre-fork history keeps its tags");
+        assert_eq!(
+            sibling.tag_ids, expected,
+            "the pre-fork history keeps its tags"
+        );
         let current = conversation_service::get_by_id(&db.conn, pre.id)
             .await
             .unwrap();
@@ -7560,7 +7575,10 @@ mod tests {
         .unwrap();
         let (mgr, join) =
             manager_with_fake_fork("c-restack", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-restack", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-restack", None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -7607,10 +7625,11 @@ mod tests {
             .await
             .unwrap();
         // Lifecycle got there first: S2 landed on the row and S1 was preserved.
-        let preserved_id = conversation_service::bind_external_id(&db.conn, pre.id, "session-S2", &[])
-            .await
-            .unwrap()
-            .expect("the lifecycle bind preserves S1");
+        let preserved_id =
+            conversation_service::bind_external_id(&db.conn, pre.id, "session-S2", &[])
+                .await
+                .unwrap()
+                .expect("the lifecycle bind preserves S1");
 
         let (mgr, join) =
             manager_with_fake_fork("c-raced", pre.id, "session-S2", "session-S1").await;
@@ -7667,7 +7686,9 @@ mod tests {
         .unwrap();
         let (mgr, join) =
             manager_with_fake_fork("c-nosp", pre.id, "session-S2", "session-S1").await;
-        mgr.fork_session(&db, "c-nosp", None, None, None).await.unwrap();
+        mgr.fork_session(&db, "c-nosp", None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -7713,7 +7734,10 @@ mod tests {
 
         let (mgr, join) =
             manager_with_fake_fork("c-latest", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-latest", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-latest", None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let current = conversation_service::get_by_id(&db.conn, pre.id)
@@ -7763,7 +7787,10 @@ mod tests {
 
         let (mgr, join) =
             manager_with_fake_fork("c-fork-lock", pre.id, "session-S2", "session-S1").await;
-        let result = mgr.fork_session(&db, "c-fork-lock", None, None, None).await.unwrap();
+        let result = mgr
+            .fork_session(&db, "c-fork-lock", None, None, None)
+            .await
+            .unwrap();
         let _ = join.await;
 
         let sibling_id = result.sibling_conversation_id;
@@ -7898,7 +7925,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(current.title, None, "no title to prefix");
-        assert!(!current.title_locked, "an unwritten title must stay unlocked");
+        assert!(
+            !current.title_locked,
+            "an unwritten title must stay unlocked"
+        );
         let sibling = conversation_service::get_by_id(&db.conn, result.sibling_conversation_id)
             .await
             .unwrap();
@@ -7910,11 +7940,13 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(
-            conversation_service::refresh_auto_title(&db.conn, sibling.id, "First Name".into())
-                .await
-                .unwrap()
-        );
+        assert!(conversation_service::refresh_auto_title(
+            &db.conn,
+            sibling.id,
+            "First Name".into()
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
@@ -8406,7 +8438,10 @@ mod tests {
         // (e.g. its session started before the feature was enabled), even mid-turn.
         let state = mgr.get_state("c1").await.unwrap();
         state.write().await.turn_in_flight = true;
-        let err = mgr.submit_feedback("c1", "note".into(), None).await.unwrap_err();
+        let err = mgr
+            .submit_feedback("c1", "note".into(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AcpError::FeedbackDisabled));
         assert!(state.read().await.feedback.is_empty());
     }
@@ -8418,7 +8453,10 @@ mod tests {
             .await;
         // Tool available but no turn in flight → nothing to steer.
         set_feedback_tool_available(&mgr, "c1").await;
-        let err = mgr.submit_feedback("c1", "note".into(), None).await.unwrap_err();
+        let err = mgr
+            .submit_feedback("c1", "note".into(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AcpError::NoActiveTurn));
         // And nothing was appended.
         let state = mgr.get_state("c1").await.unwrap();
@@ -8462,7 +8500,10 @@ mod tests {
         mark_feedback_ready(&mgr, "c1").await;
         // Empty / whitespace-only → rejected, nothing appended.
         for empty in ["", "   ", "\n\t "] {
-            let err = mgr.submit_feedback("c1", empty.into(), None).await.unwrap_err();
+            let err = mgr
+                .submit_feedback("c1", empty.into(), None)
+                .await
+                .unwrap_err();
             assert!(matches!(err, AcpError::InvalidFeedback(_)));
         }
         // Oversized → rejected.
@@ -8473,7 +8514,11 @@ mod tests {
         let at_bound = "y".repeat(MAX_FEEDBACK_CHARS);
         assert!(mgr.submit_feedback("c1", at_bound, None).await.is_ok());
         let state = mgr.get_state("c1").await.unwrap();
-        assert_eq!(state.read().await.feedback.len(), 1, "only the valid note stuck");
+        assert_eq!(
+            state.read().await.feedback.len(),
+            1,
+            "only the valid note stuck"
+        );
     }
 
     // --- native steering (push channel) ----------------------------------
@@ -8583,7 +8628,10 @@ mod tests {
         set_feedback_tool_available(&mgr, "c1").await;
         let fake_loop = answer_steer(rx, Ok(SteerOutcome::Injected));
 
-        let item = mgr.submit_feedback("c1", "  ship it  ".into(), None).await.unwrap();
+        let item = mgr
+            .submit_feedback("c1", "  ship it  ".into(), None)
+            .await
+            .unwrap();
         assert_eq!(item.status, FeedbackStatus::Delivered);
         assert!(item.delivered_at.is_some());
         assert_eq!(item.text, "ship it");
@@ -8750,7 +8798,7 @@ mod tests {
             assert_eq!(s.feedback[0].text, "one enormous screenshot");
         }
 
-        // And the wire was never trimmed: the budget governs what codeg KEEPS,
+        // And the wire was never trimmed: the budget governs what harness_studio KEEPS,
         // not what the agent receives.
         let sent = fake_loop.await.unwrap();
         assert!(matches!(
@@ -8908,7 +8956,10 @@ mod tests {
         mark_native_steering_ready(&mgr, "c1").await;
         let fake_loop = answer_steer(rx, Ok(SteerOutcome::PromptRequired));
 
-        let err = mgr.submit_feedback("c1", "note".into(), None).await.unwrap_err();
+        let err = mgr
+            .submit_feedback("c1", "note".into(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, AcpError::NoActiveTurn));
         let _ = fake_loop.await;
 
@@ -8932,7 +8983,10 @@ mod tests {
 
         // The adapter ignored the opt-in: content consumed → recorded
         // Delivered (never resent), and the session downgrades to pull.
-        let item = mgr.submit_feedback("c1", "note one".into(), None).await.unwrap();
+        let item = mgr
+            .submit_feedback("c1", "note one".into(), None)
+            .await
+            .unwrap();
         assert_eq!(item.status, FeedbackStatus::Delivered);
         let _ = fake_loop.await;
         let state = mgr.get_state("c1").await.unwrap();
@@ -8944,7 +8998,10 @@ mod tests {
         // The NEXT note rides the pull path: lands Pending, no Steer command
         // (the loop receiver was consumed above — a native attempt would fail
         // on the dead channel, so an Ok(Pending) proves the pull branch ran).
-        let second = mgr.submit_feedback("c1", "note two".into(), None).await.unwrap();
+        let second = mgr
+            .submit_feedback("c1", "note two".into(), None)
+            .await
+            .unwrap();
         assert_eq!(second.status, FeedbackStatus::Pending);
         let pending = mgr.read_pending_feedback("c1").await;
         assert_eq!(pending.len(), 1);
@@ -8977,7 +9034,10 @@ mod tests {
             }
         });
 
-        let item = mgr.submit_feedback("c1", "late note".into(), None).await.unwrap();
+        let item = mgr
+            .submit_feedback("c1", "late note".into(), None)
+            .await
+            .unwrap();
         assert_eq!(item.status, FeedbackStatus::Delivered);
         let _ = fake_loop.await;
         assert_eq!(state.read().await.feedback.len(), 1);
@@ -9059,7 +9119,10 @@ mod tests {
         mark_native_steering_ready(&mgr, "c1").await;
         // feedback_tool_available stays false.
         let fake_loop = answer_steer(rx, Ok(SteerOutcome::Injected));
-        let item = mgr.submit_feedback("c1", "no tool needed".into(), None).await.unwrap();
+        let item = mgr
+            .submit_feedback("c1", "no tool needed".into(), None)
+            .await
+            .unwrap();
         assert_eq!(item.status, FeedbackStatus::Delivered);
         let _ = fake_loop.await;
     }
@@ -9371,7 +9434,12 @@ mod tests {
         // The first is still the pending one and still answerable.
         let state = mgr.get_state("cc2").await.unwrap();
         assert_eq!(
-            state.read().await.pending_question.as_ref().map(|p| p.question_id.clone()),
+            state
+                .read()
+                .await
+                .pending_question
+                .as_ref()
+                .map(|p| p.question_id.clone()),
             Some(first.question_id.clone())
         );
         mgr.answer_question(
@@ -9407,12 +9475,7 @@ mod tests {
         assert_eq!(texts, vec!["a", "b"]);
         // A second read still returns them — read is non-destructive, so an
         // abandoned (peer-closed) call leaves the notes retryable.
-        assert_eq!(
-            mgr.read_pending_feedback("c1")
-                .await
-                .len(),
-            2
-        );
+        assert_eq!(mgr.read_pending_feedback("c1").await.len(), 2);
         {
             let state = mgr.get_state("c1").await.unwrap();
             assert!(state
@@ -9427,10 +9490,7 @@ mod tests {
         mgr.commit_feedback_delivered("c1", vec![a.id.clone(), b.id.clone()])
             .await;
         // Now READ returns nothing (delivered notes are filtered out).
-        assert!(mgr
-            .read_pending_feedback("c1")
-            .await
-            .is_empty());
+        assert!(mgr.read_pending_feedback("c1").await.is_empty());
         let state = mgr.get_state("c1").await.unwrap();
         assert!(state
             .read()
@@ -9446,12 +9506,9 @@ mod tests {
     #[tokio::test]
     async fn read_pending_missing_connection_returns_empty() {
         let mgr = ConnectionManager::new();
-        assert!(mgr
-            .read_pending_feedback("nope")
-            .await
-            .is_empty());
+        assert!(mgr.read_pending_feedback("nope").await.is_empty());
         // Commit on a missing connection is a safe no-op.
-        mgr.commit_feedback_delivered("nope", vec!["x".into()]).await;
+        mgr.commit_feedback_delivered("nope", vec!["x".into()])
+            .await;
     }
-
 }

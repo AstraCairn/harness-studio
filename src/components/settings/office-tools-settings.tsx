@@ -242,8 +242,8 @@ export function OfficeToolsBody({
       switch (state) {
         case "not_linked":
           return t("states.not_linked")
-        case "linked_to_codeg":
-          return t("states.linked_to_codeg")
+        case "linked_to_harness_studio":
+          return t("states.linked_to_harness_studio")
         case "linked_elsewhere":
           return t("states.linked_elsewhere")
         case "blocked_by_real_directory":

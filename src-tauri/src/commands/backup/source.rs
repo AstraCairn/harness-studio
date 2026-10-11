@@ -7,7 +7,7 @@
 //! dir and hands back a handle the later steps reuse.
 //!
 //! The trade is that the plaintext archive sits on disk for as long as the
-//! user takes to work through the restore dialog. That is accepted in codeg's
+//! user takes to work through the restore dialog. That is accepted in harness_studio's
 //! local-data threat model — the same directory already holds `tokens.json`
 //! and the database, mode `0700` — and it is bounded three ways, all of which
 //! are real code rather than intentions: released the moment staging succeeds,
@@ -34,7 +34,7 @@ use super::manifest::BackupPreview;
 
 /// Holds decrypted archives awaiting inspect/scan/stage. Wiped at startup by
 /// [`super::restore::cleanup_transient_dirs`].
-pub const PREPARED_DIR: &str = ".codeg-restore-prepared";
+pub const PREPARED_DIR: &str = ".harness-studio-restore-prepared";
 const META_FILE: &str = "meta.json";
 const PLAIN_ZIP: &str = "plain.zip";
 /// How long a prepared source may sit unused before it is reaped. Refreshed on
@@ -109,10 +109,11 @@ pub async fn prepare_source_core(
         let out_c = out.clone();
         let pass = passphrase.unwrap_or_default().to_string();
         let cancel = CancellationToken::new();
-        let decrypted =
-            tokio::task::spawn_blocking(move || crypto::decrypt_file(&src_c, &out_c, &pass, &cancel))
-                .await
-                .map_err(spawn_err)?;
+        let decrypted = tokio::task::spawn_blocking(move || {
+            crypto::decrypt_file(&src_c, &out_c, &pass, &cancel)
+        })
+        .await
+        .map_err(spawn_err)?;
         if let Err(e) = decrypted {
             // A wrong passphrase must not leave a partial plaintext behind.
             let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -179,7 +180,9 @@ pub fn resolve_prepared_zip(data_dir: &Path, source_id: &str) -> Result<PathBuf,
         .ok_or_else(|| AppCommandError::not_found("Prepared backup source not found"))?;
     let zip = PathBuf::from(&meta.zip_path);
     if !zip.is_file() {
-        return Err(AppCommandError::not_found("Prepared backup source not found"));
+        return Err(AppCommandError::not_found(
+            "Prepared backup source not found",
+        ));
     }
     meta.last_used_epoch = now_epoch();
     let _ = write_meta(&dir, &meta);
@@ -238,8 +241,7 @@ async fn preview_zip(zip_path: &Path, encrypted: bool) -> Result<BackupPreview, 
     // "compatible" for a backup that stage will reject.
     if compatible && archive::validate_manifest(&manifest).is_err() {
         compatible = false;
-        reject_reason =
-            Some(crate::app_error::BACKUP_I18N_KEY_UNKNOWN_FORMAT.to_string());
+        reject_reason = Some(crate::app_error::BACKUP_I18N_KEY_UNKNOWN_FORMAT.to_string());
     }
     Ok(BackupPreview {
         encrypted,
@@ -290,14 +292,16 @@ mod tests {
     use super::*;
 
     fn plaintext_archive(dir: &Path) -> PathBuf {
-        use crate::commands::backup::manifest::{BackupManifest, BACKUP_FORMAT_VERSION, BACKUP_KIND};
+        use crate::commands::backup::manifest::{
+            BackupManifest, BACKUP_FORMAT_VERSION, BACKUP_KIND,
+        };
         use sea_orm_migration::MigratorTrait;
-        let zip = dir.join("backup.codeg.zip");
+        let zip = dir.join("backup.harnessstudio.zip");
         let db = dir.join("db.bin");
         std::fs::write(&db, b"DB").unwrap();
         let mut b = archive::ArchiveBuilder::create(&zip).unwrap();
         b.add_file(
-            "db/codeg.db",
+            "db/harness-studio.db",
             &db,
             &CancellationToken::new(),
             &mut archive::null_progress(),
@@ -350,11 +354,13 @@ mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let plain = plaintext_archive(dir.path());
-        let enc = dir.path().join("backup.codegbak");
+        let enc = dir.path().join("backup.harness_studiobak");
         crypto::encrypt_file(&plain, &enc, "s3cret", &CancellationToken::new()).unwrap();
 
         // No passphrase: nothing is decrypted and no handle is issued.
-        let locked = prepare_source_core(&enc, &data_dir, None, false).await.unwrap();
+        let locked = prepare_source_core(&enc, &data_dir, None, false)
+            .await
+            .unwrap();
         assert!(locked.source_id.is_none());
         assert!(locked.preview.needs_passphrase);
 
@@ -363,7 +369,9 @@ mod tests {
             .await
             .is_err());
         assert_eq!(
-            std::fs::read_dir(data_dir.join(PREPARED_DIR)).unwrap().count(),
+            std::fs::read_dir(data_dir.join(PREPARED_DIR))
+                .unwrap()
+                .count(),
             0,
             "a failed decryption must not leave a partial plaintext"
         );
@@ -397,7 +405,7 @@ mod tests {
         let data_dir = dir.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         let plain = plaintext_archive(dir.path());
-        let enc = dir.path().join("backup.codegbak");
+        let enc = dir.path().join("backup.harness_studiobak");
         crypto::encrypt_file(&plain, &enc, "s3cret", &CancellationToken::new()).unwrap();
         let prepared = prepare_source_core(&enc, &data_dir, Some("s3cret"), false)
             .await

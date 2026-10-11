@@ -2,7 +2,7 @@
 //!
 //! A dev server announces itself by printing a line — `Local: http://localhost:5173/`,
 //! `Uvicorn running on http://127.0.0.1:8000`, `Now listening on: http://localhost:5000`.
-//! That line is the only thing codeg has that says "something is serving now",
+//! That line is the only thing harness_studio has that says "something is serving now",
 //! so it is what the auto-open feature watches. This is the `output` half of
 //! what VS Code calls `remote.autoForwardPortsSource`; the `process` half
 //! (enumerating listening sockets) is not built — see `services.rs` for why
@@ -503,9 +503,15 @@ mod tests {
     fn the_same_origin_is_rate_limited_not_silenced_forever() {
         let mut scanner = ServiceScanner::new();
         let start = Instant::now();
-        assert_eq!(scanner.feed("Local: http://localhost:5173/\n", start).len(), 1);
+        assert_eq!(
+            scanner.feed("Local: http://localhost:5173/\n", start).len(),
+            1
+        );
         assert!(scanner
-            .feed("Local: http://localhost:5173/\n", start + Duration::from_secs(3))
+            .feed(
+                "Local: http://localhost:5173/\n",
+                start + Duration::from_secs(3)
+            )
             .is_empty());
         assert_eq!(
             scanner

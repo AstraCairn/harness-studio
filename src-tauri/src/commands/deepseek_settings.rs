@@ -5,7 +5,7 @@
 //! (`$DSH_HOME/settings.yaml`, default `~/.dsh/settings.yaml`). Its `models`
 //! key is the catalog the adapter's `listModels` returns verbatim, which the
 //! bridge turns into the ACP `model` config option — i.e. the model dropdown
-//! codeg's composer shows for a DeepSeek session. Absent, the session inherits
+//! harness_studio's composer shows for a DeepSeek session. Absent, the session inherits
 //! the catalog the agent's own composition declares ([`default_models`]).
 //!
 //! The catalog is *advisory*: a request naming a model outside it still goes
@@ -26,7 +26,7 @@
 //!   written.
 //!
 //! Path resolution follows the repo-wide convention (`resolve_dsh_home_dir`):
-//! codeg's own process env, not the per-agent `env_json`, which only reaches
+//! harness_studio's own process env, not the per-agent `env_json`, which only reaches
 //! the spawned child.
 
 use std::fs;
@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::acp::error::AcpError;
+use crate::events::EventEmitter;
 use crate::models::agent::AgentType;
-use crate::web::event_bridge::EventEmitter;
 
 use super::acp::emit_acp_agents_updated;
 
@@ -137,10 +137,10 @@ pub struct DeepSeekCatalogModel {
     /// key (`resolveModels` throws on `Object.hasOwn(model, "imageDetail")`),
     /// and a refused section takes the whole catalog with it.
     ///
-    /// Kept in the shape so a document an older codeg wrote still PARSES: the
+    /// Kept in the shape so a document an older harness_studio wrote still PARSES: the
     /// panel then reports it through [`DeepSeekModelCatalog::invalid`] and the
     /// next save writes the entry without it. Dropping the field instead would
-    /// trip the unknown-key guard and refuse to edit a document codeg itself
+    /// trip the unknown-key guard and refuse to edit a document harness_studio itself
     /// produced.
     #[serde(default, skip_serializing)]
     pub image_detail: Option<String>,
@@ -203,10 +203,7 @@ pub fn default_models() -> Vec<DeepSeekCatalogModel> {
             ),
             context_window: Some(DEFAULT_CONTEXT_WINDOW),
             max_tokens: None,
-            input_modalities: Some(vec![
-                MODALITY_TEXT.to_string(),
-                MODALITY_IMAGE.to_string(),
-            ]),
+            input_modalities: Some(vec![MODALITY_TEXT.to_string(), MODALITY_IMAGE.to_string()]),
             image_pixel_budget: Some(DeepSeekImagePixelBudget::Pixels(
                 DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
             )),
@@ -227,7 +224,7 @@ pub fn default_models() -> Vec<DeepSeekCatalogModel> {
 #[serde(rename_all = "camelCase")]
 pub struct DeepSeekModelCatalog {
     /// Resolved `settings.yaml` path, shown so the user can find (or hand-edit)
-    /// the document codeg writes.
+    /// the document harness_studio writes.
     pub path: String,
     /// Whether that document exists at all.
     pub exists: bool,
@@ -310,7 +307,7 @@ fn load_deepseek_model_catalog_at(path: &Path) -> DeepSeekModelCatalog {
 /// be silently dropped by the first save.
 ///
 /// `imageDetail` is listed even though the agent no longer accepts it — see
-/// [`DeepSeekCatalogModel::image_detail`]. It is a key codeg once wrote, so
+/// [`DeepSeekCatalogModel::image_detail`]. It is a key harness_studio once wrote, so
 /// reading it and reporting it is the repair path; treating it as unknown here
 /// would refuse to edit the very documents that need fixing.
 const KNOWN_FIELDS: &[&str] = &[
@@ -369,7 +366,7 @@ fn read_models(raw: &str) -> Result<Option<Vec<DeepSeekCatalogModel>>, String> {
             if unknown {
                 let rendered = serde_yaml::to_string(key).unwrap_or_default();
                 return Err(format!(
-                    "`{SECTION_KEY}.{MODELS_KEY}` uses a field codeg does not know \
+                    "`{SECTION_KEY}.{MODELS_KEY}` uses a field harness_studio does not know \
                      ({}); edit the document by hand so nothing is lost",
                     rendered.trim()
                 ));
@@ -382,7 +379,7 @@ fn read_models(raw: &str) -> Result<Option<Vec<DeepSeekCatalogModel>>, String> {
 }
 
 /// Judge a submitted catalog by the adapter's own `resolveModels` rules, so a
-/// section codeg writes is one the adapter will actually load. Returns the
+/// section harness_studio writes is one the adapter will actually load. Returns the
 /// normalized list to store (ids/names trimmed).
 fn validate_models(models: &[DeepSeekCatalogModel]) -> Result<Vec<DeepSeekCatalogModel>, String> {
     let mut seen: Vec<String> = Vec::with_capacity(models.len());
@@ -434,8 +431,7 @@ fn validate_models(models: &[DeepSeekCatalogModel]) -> Result<Vec<DeepSeekCatalo
         let image_pixel_budget = match &model.image_pixel_budget {
             None => None,
             Some(DeepSeekImagePixelBudget::Pixels(pixels)) => {
-                bounded(Some(*pixels), "image pixel budget")?
-                    .map(DeepSeekImagePixelBudget::Pixels)
+                bounded(Some(*pixels), "image pixel budget")?.map(DeepSeekImagePixelBudget::Pixels)
             }
             Some(DeepSeekImagePixelBudget::Named(named)) => {
                 let named = named.trim();
@@ -549,9 +545,11 @@ fn update_deepseek_model_catalog_at(
     models: Option<Vec<DeepSeekCatalogModel>>,
 ) -> Result<(), AcpError> {
     let validated = match models {
-        Some(models) if !models.is_empty() => Some(validate_models(&models).map_err(|message| {
-            AcpError::protocol(format!("invalid DeepSeek model list: {message}"))
-        })?),
+        Some(models) if !models.is_empty() => {
+            Some(validate_models(&models).map_err(|message| {
+                AcpError::protocol(format!("invalid DeepSeek model list: {message}"))
+            })?)
+        }
         _ => None,
     };
 
@@ -661,7 +659,7 @@ fn resolve_write_target(path: &Path) -> Result<PathBuf, std::io::Error> {
 ///
 /// Mode: an existing document keeps its own, minus any world bits (a
 /// deliberately group-shared `0640` survives; a `0644` is repaired). A fresh
-/// one is `0600` — it is created by codeg, so its mode is codeg's
+/// one is `0600` — it is created by harness_studio, so its mode is harness_studio's
 /// responsibility, and under the usual `022` umask it would otherwise be
 /// readable by every local user.
 fn write_settings_document(path: &Path, body: &str) -> Result<(), AcpError> {
@@ -766,7 +764,7 @@ fn create_temp_file(
             .unwrap_or_default();
         let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temp = parent.join(format!(
-            ".{stem}.codeg-{}-{seq}-{nonce}.tmp",
+            ".{stem}.harness-studio-{}-{seq}-{nonce}.tmp",
             std::process::id()
         ));
         let mut options = fs::OpenOptions::new();
@@ -820,7 +818,10 @@ fn split_lines(raw: &str) -> Vec<DocLine> {
     for line in raw.split_inclusive('\n') {
         let range = offset..offset + line.len();
         offset += line.len();
-        let text = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+        let text = line
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string();
         let indent = text.find(|c: char| !c.is_whitespace());
         let comment = indent.is_some_and(|i| text.as_bytes()[i] == b'#');
         out.push(DocLine {
@@ -898,9 +899,13 @@ fn patch_settings_models(
     existing: &str,
     models: Option<&[DeepSeekCatalogModel]>,
 ) -> Result<String, String> {
-    let newline = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
-    // A document codeg cannot parse is one it must not rewrite: the splice
+    // A document harness_studio cannot parse is one it must not rewrite: the splice
     // below reasons about indentation, and the verification at the end needs a
     // "before" to compare against.
     let before: Option<serde_yaml::Value> = if existing.trim().is_empty() {
@@ -1038,9 +1043,7 @@ fn splice_models(
         // a trailing comment or blank line keeps introducing what it introduced.
         None => {
             let mut end = body_end;
-            while end > section + 1
-                && (lines[end - 1].indent.is_none() || lines[end - 1].comment)
-            {
+            while end > section + 1 && (lines[end - 1].indent.is_none() || lines[end - 1].comment) {
                 end -= 1;
             }
             (end, end)
@@ -1080,15 +1083,16 @@ fn splice_models(
             // written above `models:` goes with the section it annotated. That
             // is the one thing this splice deletes on purpose; leaving the
             // header behind to keep the note would leave the rejected shape.
-            let section_is_empty = lines[section + 1..body_end]
-                .iter()
-                .enumerate()
-                .all(|(offset, line)| {
-                    let index = section + 1 + offset;
-                    (index >= replace_from && index < replace_to)
-                        || line.indent.is_none()
-                        || line.comment
-                });
+            let section_is_empty =
+                lines[section + 1..body_end]
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, line)| {
+                        let index = section + 1 + offset;
+                        (index >= replace_from && index < replace_to)
+                            || line.indent.is_none()
+                            || line.comment
+                    });
             if section_is_empty {
                 let header_start = lines[section].range.start;
                 let mut out = String::with_capacity(existing.len());
@@ -1121,7 +1125,8 @@ fn verify_patch(
     let after: serde_yaml::Value = if patched.trim().is_empty() {
         serde_yaml::Value::Null
     } else {
-        serde_yaml::from_str(patched).map_err(|err| unsafe_edit(&format!("re-parse failed: {err}")))?
+        serde_yaml::from_str(patched)
+            .map_err(|err| unsafe_edit(&format!("re-parse failed: {err}")))?
     };
 
     let section_key = serde_yaml::Value::String(SECTION_KEY.to_string());
@@ -1138,7 +1143,9 @@ fn verify_patch(
             let expected = serde_yaml::to_value(models)
                 .map_err(|err| unsafe_edit(&format!("serialize failed: {err}")))?;
             if stored != Some(&expected) {
-                return Err(unsafe_edit("the model list did not land where it was aimed"));
+                return Err(unsafe_edit(
+                    "the model list did not land where it was aimed",
+                ));
             }
         }
         None => {
@@ -1275,7 +1282,10 @@ mod tests {
         assert_eq!(defaults[0].image_max_bytes, Some(1_048_576));
         // Upstream copies this onto the same entry and warns that dropping it
         // moves the model to the other system-prompt delivery mode silently.
-        assert_eq!(defaults[0].system_prompt_update.as_deref(), Some("in-history"));
+        assert_eq!(
+            defaults[0].system_prompt_update.as_deref(),
+            Some("in-history")
+        );
         assert!(!defaults[1].accepts_images());
 
         // Every default has to survive the same validation a user edit does.
@@ -1305,7 +1315,7 @@ mod tests {
 
     #[test]
     fn refuses_to_edit_entries_carrying_fields_it_would_drop() {
-        // A save rewrites the whole block, so a field codeg does not model
+        // A save rewrites the whole block, so a field harness_studio does not model
         // would be lost. Report it instead — the panel then refuses to edit.
         let doc = "llm-deepseek:\n  models:\n    - id: a\n      futureKnob: 1\n";
         let err = read_models(doc).expect_err("unknown field is reported");
@@ -1323,7 +1333,7 @@ mod tests {
             "      imagePixelBudget: 3\n",
             "      imageMaxBytes: 4\n",
             "      systemPromptUpdate: in-history\n",
-            // Retired upstream, but still a key codeg itself once wrote — so it
+            // Retired upstream, but still a key harness_studio itself once wrote — so it
             // stays READABLE here. Refusing it as unknown would lock the panel
             // out of exactly the documents that need repairing.
             "      imageDetail: low\n",
@@ -1506,7 +1516,7 @@ mod tests {
 
     #[test]
     fn a_stored_image_detail_is_reported_shown_without_it_and_dropped_on_save() {
-        // The full repair path for a document an older codeg wrote. Each step
+        // The full repair path for a document an older harness_studio wrote. Each step
         // carries its own half: the panel must be able to OPEN it (so the key
         // stays readable), must SAY it is not in effect (so nobody hunts for
         // why their models are missing), must not hand the key back to the
@@ -1575,7 +1585,10 @@ mod tests {
             models[0].image_pixel_budget,
             Some(DeepSeekImagePixelBudget::Named("low".into()))
         );
-        assert_eq!(models[0].system_prompt_update.as_deref(), Some("in-history"));
+        assert_eq!(
+            models[0].system_prompt_update.as_deref(),
+            Some("in-history")
+        );
 
         let patched = patch_settings_models(doc, Some(&models)).expect("patch");
         assert_eq!(models_of(&patched), models);
@@ -1658,7 +1671,7 @@ mod tests {
     #[test]
     fn replaces_a_block_written_flush_left_under_its_key() {
         // `serde_yaml`'s own emitter writes sequences at the key's indent, so a
-        // document codeg (or a script) produced looks like this.
+        // document harness_studio (or a script) produced looks like this.
         let existing = "llm-deepseek:\n  models:\n  - id: old\n  thinking: enabled\n";
         let patched = patch_settings_models(existing, Some(&[model("new")])).expect("patch");
         assert_eq!(models_of(&patched)[0].id, "new");
@@ -1702,7 +1715,9 @@ mod tests {
 
     #[test]
     fn refuses_an_inline_section_or_key_rather_than_guessing() {
-        assert!(patch_settings_models("llm-deepseek: {baseURL: x}\n", Some(&[model("a")])).is_err());
+        assert!(
+            patch_settings_models("llm-deepseek: {baseURL: x}\n", Some(&[model("a")])).is_err()
+        );
         assert!(patch_settings_models(
             "llm-deepseek:\n  models: [{id: old}]\n",
             Some(&[model("a")])
@@ -1749,8 +1764,7 @@ mod tests {
             system_prompt_update: None,
             image_detail: None,
         };
-        let patched =
-            patch_settings_models("", Some(std::slice::from_ref(&entry))).expect("patch");
+        let patched = patch_settings_models("", Some(std::slice::from_ref(&entry))).expect("patch");
         // Absent stays absent — the adapter's schema rejects an explicit null,
         // and "absent" is what selects its own default.
         assert!(!patched.contains("null"));
@@ -1779,7 +1793,10 @@ mod tests {
         );
         let models = models_of(existing);
         assert_eq!(models.len(), 2);
-        assert_eq!(models[1].name.as_deref(), Some("DeepSeek-V4.1-Flash (内测)"));
+        assert_eq!(
+            models[1].name.as_deref(),
+            Some("DeepSeek-V4.1-Flash (内测)")
+        );
         assert!(models[1].accepts_images());
 
         let patched = patch_settings_models(existing, Some(&models)).expect("patch");

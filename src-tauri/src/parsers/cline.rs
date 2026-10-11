@@ -29,13 +29,13 @@ use super::{
 // SUB-agent is written — those get a row and a sibling messages file, never a
 // manifest of their own. Listing manifests therefore yields exactly the root
 // sessions, which is what the index's own `rootOnly` filter selects, without
-// codeg opening a live SQLite store owned by another process.
+// harness_studio opening a live SQLite store owned by another process.
 //
 // The pre-3.x layout (`state/taskHistory.json` + `tasks/<id>/`) is still read
 // as a fallback so history written by an older cline does not disappear.
 
 /// `sessions/<id>/<id>.json`. Mirrors the columns of the `sessions` table;
-/// only the fields codeg surfaces are declared.
+/// only the fields harness_studio surfaces are declared.
 #[derive(Debug, Default, Deserialize)]
 struct SessionManifest {
     #[serde(default)]
@@ -286,7 +286,7 @@ impl ClineParser {
         let mut manifest: SessionManifest = serde_json::from_str(&raw).ok()?;
         // A manifest whose `session_id` is missing or disagrees with its own
         // directory is still readable — the directory name is the id every
-        // other path is built from, and the id codeg recorded as `external_id`.
+        // other path is built from, and the id harness_studio recorded as `external_id`.
         if manifest.session_id != session_id {
             manifest.session_id = session_id.to_string();
         }
@@ -455,11 +455,7 @@ impl ClineParser {
 
         backfill_turn_durations(&mut turns, &[]);
         let session_stats = compute_session_stats(&turns);
-        let summary = session_summary(
-            manifest,
-            messages.updated_at.as_deref(),
-            turns.len() as u32,
-        );
+        let summary = session_summary(manifest, messages.updated_at.as_deref(), turns.len() as u32);
 
         ConversationDetail {
             summary,
@@ -494,8 +490,8 @@ fn session_summary(
     transcript_updated_at: Option<&str>,
     message_count: u32,
 ) -> ConversationSummary {
-    let folder_path = non_empty(manifest.cwd.clone())
-        .or_else(|| non_empty(manifest.workspace_root.clone()));
+    let folder_path =
+        non_empty(manifest.cwd.clone()).or_else(|| non_empty(manifest.workspace_root.clone()));
     let folder_name = folder_path.as_deref().map(folder_name_from_path);
 
     // `metadata.title` is cline's own summary of the session; the opening
@@ -592,7 +588,10 @@ impl ClineParser {
             let folder_path = entry.cwd_on_task_initialization.clone();
             let folder_name = folder_path.as_deref().map(folder_name_from_path);
 
-            let title = entry.task.as_deref().map(|t| title_from_user_text(t.trim()));
+            let title = entry
+                .task
+                .as_deref()
+                .map(|t| title_from_user_text(t.trim()));
 
             // Count messages from api_conversation_history.json
             let api_path = tasks_dir.join("api_conversation_history.json");
@@ -630,10 +629,7 @@ impl ClineParser {
         Ok(summaries)
     }
 
-    fn legacy_conversation(
-        &self,
-        conversation_id: &str,
-    ) -> Result<ConversationDetail, ParseError> {
+    fn legacy_conversation(&self, conversation_id: &str) -> Result<ConversationDetail, ParseError> {
         let tasks_dir = self.base_dir.join("tasks").join(conversation_id);
         if !tasks_dir.exists() {
             return Err(ParseError::ConversationNotFound(
@@ -720,7 +716,7 @@ impl ClineParser {
                         duration_ms: None,
                         model,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 "user" => {
@@ -741,7 +737,7 @@ impl ClineParser {
                             duration_ms: None,
                             model: None,
                             completed_at: Some(timestamp),
-                        agent_message_id: None,
+                            agent_message_id: None,
                         });
                     }
 
@@ -757,7 +753,7 @@ impl ClineParser {
                             duration_ms: None,
                             model: None,
                             completed_at: Some(timestamp),
-                        agent_message_id: None,
+                            agent_message_id: None,
                         });
                     }
                 }
@@ -1036,8 +1032,8 @@ fn parse_content_blocks(
                             .get("is_error")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        let output_preview = tool_result_output(item.get("content"))
-                            .map(|s| truncate_str(&s, 500));
+                        let output_preview =
+                            tool_result_output(item.get("content")).map(|s| truncate_str(&s, 500));
                         blocks.push(ContentBlock::ToolResult {
                             tool_use_id,
                             output_preview,
@@ -1340,7 +1336,7 @@ mod tests {
     }
 
     /// The manifest shape observed from cline 3.0.62, trimmed to the fields
-    /// codeg reads.
+    /// harness_studio reads.
     fn manifest(session_id: &str) -> serde_json::Value {
         json!({
             "version": 1,
@@ -1422,7 +1418,10 @@ mod tests {
         assert!(reply.completed_at.is_some());
 
         assert_eq!(detail.summary.title.as_deref(), Some("Fix the parser"));
-        assert_eq!(detail.summary.folder_path.as_deref(), Some("/Users/dev/my-app"));
+        assert_eq!(
+            detail.summary.folder_path.as_deref(),
+            Some("/Users/dev/my-app")
+        );
         assert_eq!(detail.summary.git_branch.as_deref(), Some("master"));
         assert_eq!(detail.summary.model.as_deref(), Some("deepseek-v4-flash"));
     }
@@ -1451,7 +1450,10 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "s1");
         assert_eq!(summaries[0].message_count, 2);
-        assert_eq!(summaries[0].folder_path.as_deref(), Some("/Users/dev/my-app"));
+        assert_eq!(
+            summaries[0].folder_path.as_deref(),
+            Some("/Users/dev/my-app")
+        );
     }
 
     /// `messages_path` in the manifest is the absolute path the WRITING
@@ -1537,7 +1539,7 @@ mod tests {
 
     /// cline 3.0.65 writes a failed run into the transcript as an assistant
     /// message carrying the error text. The record below is verbatim from a
-    /// 3.0.65 run against an endpoint that answers 400 — codeg must not show
+    /// 3.0.65 run against an endpoint that answers 400 — harness_studio must not show
     /// it as the model's reply, and skipping it must not swallow the retry and
     /// the real answer that follow.
     #[test]
@@ -1639,7 +1641,7 @@ mod tests {
         );
 
         // Quoted INSIDE its own wrapper is markup cline cannot express and
-        // codeg cannot recover: the first closing tag ends the block, and the
+        // harness_studio cannot recover: the first closing tag ends the block, and the
         // rest is left as written. Asserted so the ambiguity is a recorded
         // outcome rather than an accident — what matters is that the pass
         // shrinks the string and terminates.

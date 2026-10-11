@@ -9,6 +9,7 @@ import {
   type PointerEvent,
   type ReactNode,
 } from "react"
+import { AgentCheckQueue } from "@/lib/agent-check-queue"
 import { Reorder, useDragControls } from "motion/react"
 import { useLocale, useTranslations } from "next-intl"
 import { useImeGuard } from "@/hooks/use-ime-guard"
@@ -95,7 +96,7 @@ import {
   acpFetchAgentLatestRelease,
   acpInstallUvTool,
   acpGetAgentStatus,
-  acpListAgents,
+  acpListAgentsSnapshot,
   acpPreflight,
   acpPrepareNpxAgent,
   acpReorderAgents,
@@ -133,7 +134,7 @@ import {
   serializeCodexModelConfig,
   type CodexModelConfig,
 } from "@/lib/types"
-import { CodexModelListEditor } from "@/components/settings/codex-model-list-editor"
+import { ProviderModelConfiguration } from "@/components/settings/provider-model-configuration"
 import {
   OpenCodeConnectDialog,
   OpenCodeCustomProviderDialog,
@@ -173,6 +174,7 @@ import { QoderConfigPanel } from "./qoder-config-panel"
 interface AgentCheckState {
   result?: PreflightResult
   error?: string
+  versionChecked?: boolean
 }
 
 const CLAUDE_AUTH_MODES = [
@@ -232,6 +234,11 @@ interface AgentDraft {
   claudeDefaultSonnetModel: string
   claudeDefaultOpusModel: string
   claudeDefaultFableModel: string
+  claudeSonnetName: string
+  claudeOpusName: string
+  claudeFableName: string
+  claudeHaikuName: string
+  claudeSubagentModel: string
   claudeCustomModelOption: string
   claudeCustomModelOptionName: string
   claudeCustomModelOptionDescription: string
@@ -393,14 +400,14 @@ function summarizeChecks(checks: UiCheckItem[]): CheckStatus | "unchecked" {
 
 /**
  * Per-agent `env_json` knob deciding WHICH SIDE of the ACP connection reads
- * files and runs commands (`HostToolsPolicy`, Rust side). codeg advertises
+ * files and runs commands (`HostToolsPolicy`, Rust side). harness_studio advertises
  * `fs.readTextFile` / `terminal` by default, and an agent that sees them stops
- * using its own backends and delegates — so the work happens in CODEG's
+ * using its own backends and delegates — so the work happens in HARNESS_STUDIO's
  * process, outside any OS sandbox the agent applies to itself. Set to
- * {@link HOST_TOOLS_AGENT} and codeg advertises neither, so the agent does its
- * own I/O and its own sandbox covers it again (#436). Absent ⇒ codeg hosts.
+ * {@link HOST_TOOLS_AGENT} and harness_studio advertises neither, so the agent does its
+ * own I/O and its own sandbox covers it again (#436). Absent ⇒ harness_studio hosts.
  */
-const HOST_TOOLS_ENV = "CODEG_ACP_HOST_TOOLS"
+const HOST_TOOLS_ENV = "HARNESS_STUDIO_ACP_HOST_TOOLS"
 const HOST_TOOLS_AGENT = "agent"
 const HOST_TOOLS_DEFAULT = "default"
 
@@ -528,7 +535,7 @@ function patchEnvText(
  * which fails OPEN on an unrecognized value rather than silently withholding.
  *
  * Reads the per-agent layer ONLY. When the key is absent and an operator has
- * exported `CODEG_ACP_HOST_TOOLS=agent` in codeg's own environment, the switch
+ * exported `HARNESS_STUDIO_ACP_HOST_TOOLS=agent` in harness_studio's own environment, the switch
  * renders off while the next connection actually withholds the channels — the
  * display understates how restricted the agent is. Showing that inherited state
  * would need the backend to report its resolved process-env value; until then
@@ -544,8 +551,8 @@ export function hostToolsAgentModeEnabled(envText: string): boolean {
  * `default` for off, rather than deleting the key.
  *
  * Deleting would be tidier but wrong: the backend resolves this knob as
- * `env_json` first, then codeg's own process env. An operator who exported
- * `CODEG_ACP_HOST_TOOLS=agent` process-wide makes "absent" mean `agent`, so a
+ * `env_json` first, then harness_studio's own process env. An operator who exported
+ * `HARNESS_STUDIO_ACP_HOST_TOOLS=agent` process-wide makes "absent" mean `agent`, so a
  * toggle that cleared the key on OFF could not turn the mode off at all — the
  * switch would read false while the next connection still withheld the
  * channels. Writing the value the user actually chose makes the per-agent
@@ -573,6 +580,11 @@ const CLAUDE_MODEL_ENV_KEYS = {
   claudeDefaultSonnetModel: "ANTHROPIC_DEFAULT_SONNET_MODEL",
   claudeDefaultOpusModel: "ANTHROPIC_DEFAULT_OPUS_MODEL",
   claudeDefaultFableModel: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  claudeSonnetName: "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+  claudeOpusName: "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+  claudeFableName: "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+  claudeHaikuName: "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+  claudeSubagentModel: "CLAUDE_CODE_SUBAGENT_MODEL",
   claudeCustomModelOption: "ANTHROPIC_CUSTOM_MODEL_OPTION",
   claudeCustomModelOptionName: "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
   claudeCustomModelOptionDescription:
@@ -675,13 +687,13 @@ const CLINE_BYO_PROVIDERS = [
 type ClineProvider =
   | (typeof CLINE_SIGNIN_PROVIDERS)[number]["value"]
   | (typeof CLINE_BYO_PROVIDERS)[number]["value"]
-  // A provider configured outside codeg (`cline auth bedrock`, a registry id
+  // A provider configured outside harness_studio (`cline auth bedrock`, a registry id
   // this list does not carry) still has to select a row, or saving from this
   // panel would silently retarget the user's store at whatever the dropdown
   // fell back to.
   | (string & {})
 
-/** Whether cline owns this provider's credential (OAuth), rather than codeg.
+/** Whether cline owns this provider's credential (OAuth), rather than harness_studio.
  *  Mirrors the backend `cline_provider_is_agent_managed`. */
 function isClineSignInProvider(provider: string): boolean {
   return CLINE_SIGNIN_PROVIDERS.some((p) => p.value === provider)
@@ -717,7 +729,7 @@ const GROK_DEFAULT_API_BACKEND = "responses"
  * and `importantEnvKeysByAgent`). */
 const GROK_API_KEY_ENV = "XAI_API_KEY"
 
-/** codeg-side knob recording the chosen authentication method. Read by the
+/** harness-studio-side knob recording the chosen authentication method. Read by the
  * launch path (`apply_grok_env_policy`): in `subscription` mode it clears any
  * inherited XAI_API_KEY so the CLI uses the `grok login` browser credential.
  * The Grok binary itself ignores this var. Mirrors Cursor's CURSOR_AUTH_MODE. */
@@ -725,12 +737,12 @@ const GROK_AUTH_MODE_ENV = "GROK_AUTH_MODE"
 
 /** The subscription sign-in command shown (and copied) in the auth card. Grok's
  * `login` is a root subcommand; a bare `grok login` matches the panel's existing
- * hint wording (codeg doesn't resolve the managed binary path here). */
+ * hint wording (harness_studio doesn't resolve the managed binary path here). */
 const GROK_LOGIN_COMMAND = "grok login"
 
 /** Grok's three authentication methods:
  *  - `subscription` — sign in with `grok login` (SuperGrok / X Premium+),
- *    whose session lives in `~/.grok/auth.json` (untouched by codeg);
+ *    whose session lives in `~/.grok/auth.json` (untouched by harness_studio);
  *  - `api_key` — a non-interactive XAI_API_KEY from the xAI console;
  *  - `custom` — a bring-your-own endpoint: a custom `[model.<id>]` in
  *    ~/.grok/config.toml with its own base_url/api_key (the custom-model card). */
@@ -739,7 +751,7 @@ export type GrokAuthMethod = "subscription" | "api_key" | "custom"
 /** Resolve the persisted Grok authentication method, tolerant of legacy rows:
  * an explicit `GROK_AUTH_MODE` wins; otherwise a configured custom model implies
  * `custom`, a saved XAI_API_KEY implies `api_key`, and an empty env means the
- * user relies on `grok login`. `hasCustomModel` reflects whether a codeg-managed
+ * user relies on `grok login`. `hasCustomModel` reflects whether a harness-studio-managed
  * `[model.<id>]` is set (it lives in config.toml, not env). Mirrors
  * `inferCursorMode`. */
 export function inferGrokMode(
@@ -995,6 +1007,11 @@ function extractImportantConfigValues(
   claudeDefaultSonnetModel: string
   claudeDefaultOpusModel: string
   claudeDefaultFableModel: string
+  claudeSonnetName: string
+  claudeOpusName: string
+  claudeFableName: string
+  claudeHaikuName: string
+  claudeSubagentModel: string
   claudeCustomModelOption: string
   claudeCustomModelOptionName: string
   claudeCustomModelOptionDescription: string
@@ -1035,6 +1052,21 @@ function extractImportantConfigValues(
   ])
   const claudeDefaultFableModel = findEnvValue(mergedEnv, [
     CLAUDE_MODEL_ENV_KEYS.claudeDefaultFableModel,
+  ])
+  const claudeSonnetName = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeSonnetName,
+  ])
+  const claudeOpusName = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeOpusName,
+  ])
+  const claudeFableName = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeFableName,
+  ])
+  const claudeHaikuName = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeHaikuName,
+  ])
+  const claudeSubagentModel = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeSubagentModel,
   ])
   const claudeCustomModelOption = findEnvValue(mergedEnv, [
     CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOption,
@@ -1081,6 +1113,11 @@ function extractImportantConfigValues(
       agentType === "claude_code" ? claudeDefaultOpusModel : "",
     claudeDefaultFableModel:
       agentType === "claude_code" ? claudeDefaultFableModel : "",
+    claudeSonnetName: agentType === "claude_code" ? claudeSonnetName : "",
+    claudeOpusName: agentType === "claude_code" ? claudeOpusName : "",
+    claudeFableName: agentType === "claude_code" ? claudeFableName : "",
+    claudeHaikuName: agentType === "claude_code" ? claudeHaikuName : "",
+    claudeSubagentModel: agentType === "claude_code" ? claudeSubagentModel : "",
     claudeCustomModelOption:
       agentType === "claude_code" ? claudeCustomModelOption : "",
     claudeCustomModelOptionName:
@@ -1846,7 +1883,7 @@ interface CodexImportantValues {
   serviceTierFast: boolean
 }
 
-const CODEX_DEFAULT_MODEL_PROVIDER = "codeg"
+const CODEX_DEFAULT_MODEL_PROVIDER = "harness_studio"
 
 /**
  * `[features]` flag that lets codex call its `request_user_input` tool in the
@@ -1857,13 +1894,13 @@ const CODEX_DEFAULT_MODEL_PROVIDER = "codeg"
  * `request_user_input_available_modes()` widens it to `Default` exactly when
  * this feature is on (codex-rs/tools/src/tool_config.rs). Without it a
  * default-mode turn that reaches for the tool is refused with
- * "request_user_input is unavailable in Default mode" — i.e. codeg's question
+ * "request_user_input is unavailable in Default mode" — i.e. harness_studio's question
  * cards only ever appear in Plan mode (openai/codex#24750).
  *
  * Stage is `UnderDevelopment` and `default_enabled` is false
  * (codex-rs/features/src/lib.rs), so it has no `/experimental` menu entry and
  * config.toml is the only way to turn it on. Verified against codex-cli 0.147.0
- * — the version codeg's pinned codex-acp 1.4.0 depends on — with
+ * — the version harness_studio's pinned codex-acp 1.4.0 depends on — with
  * `codex features list`: absent ⇒ false, `= true` ⇒ true. Unknown keys under
  * `[features]` are ignored rather than rejected (also verified), so writing it
  * is safe on a codex build that predates the flag.
@@ -1964,7 +2001,7 @@ function firstRelativeWritableRoot(text: string): string | null {
 
 /** Whether the workspace-write sub-group applies. `sandbox_mode` unset falls
  * back to `workspace-write` for any directory carrying a `[projects]` trust
- * decision (which codeg writes for every folder it opens), so "unset" keeps the
+ * decision (which harness_studio writes for every folder it opens), so "unset" keeps the
  * group live rather than greying out the very knobs the fallback uses. */
 function codexWorkspaceWriteApplies(mode: CodexSandboxModeChoice): boolean {
   return mode === "workspace-write" || mode === CODEX_SANDBOX_UNSET
@@ -1994,13 +2031,13 @@ export function codexSandboxSeedsAcpPreset(shadowed: boolean): boolean {
  * Whether to say that codex-acp 1.7.0–1.13.x cannot honor a read-only sandbox
  * (2.0.0 restored it; an adapter resolved off PATH may still be older).
  *
- * Fires exactly when codeg will inject the `read-only` preset, because the
+ * Fires exactly when harness_studio will inject the `read-only` preset, because the
  * note promises that every escalation reaches the user — true of that preset
  * on every codex-acp since 1.7.0 (`approvalsReviewer: "user"`), and false of
  * the `agent` default a shadowed config falls back to (`auto_review`, where a
  * model forwards only what it judges unsafe). Showing it for a shadowed config
  * would pair "your sandbox key is ignored" with "you will be asked about
- * everything" — the second being a guarantee codeg is not making.
+ * everything" — the second being a guarantee harness_studio is not making.
  */
 export function showsCodexReadOnlyAcpWarning(
   mode: CodexSandboxModeChoice,
@@ -2314,8 +2351,8 @@ function extractCodexTomlImportantValues(
         continue
       }
       // The three dotted `features.*` spellings below are ROOT-scoped on
-      // purpose. Inside `[model_providers.codeg]` the same text means
-      // `model_providers.codeg.features.…` — a key codex ignores — and the
+      // purpose. Inside `[model_providers.harness_studio]` the same text means
+      // `model_providers.harness_studio.features.…` — a key codex ignores — and the
       // writer only ever touches the root spelling. Reading a nested one would
       // show a value no save could clear, and (for the websocket flag, which
       // the writer re-derives on every patch) would promote a provider-local
@@ -2647,8 +2684,8 @@ function removeTomlSection(
  * turning it ON would emit a config.toml the backend refuses to persist.
  *
  * Only lines above the FIRST section header are considered: inside
- * `[model_providers.codeg]`, `features.skills` means
- * `model_providers.codeg.features.skills`, an unrelated key we must not touch.
+ * `[model_providers.harness_studio]`, `features.skills` means
+ * `model_providers.harness_studio.features.skills`, an unrelated key we must not touch.
  */
 function stripRootDottedKey(
   lines: string[],
@@ -2975,19 +3012,19 @@ function ensureCodexProviderDefaults(
   }
   let next = configTomlText
   const current = extractCodexTomlImportantValues(next)
-  const codegBaseUrl =
+  const harnessStudioBaseUrl =
     current.providerBaseUrls[CODEX_DEFAULT_MODEL_PROVIDER] ?? ""
   next = patchCodexProviderField(
     next,
     CODEX_DEFAULT_MODEL_PROVIDER,
     "base_url",
-    `base_url = ${JSON.stringify(codegBaseUrl)}`
+    `base_url = ${JSON.stringify(harnessStudioBaseUrl)}`
   )
   next = patchCodexProviderField(
     next,
     CODEX_DEFAULT_MODEL_PROVIDER,
     "name",
-    'name = "codeg"'
+    'name = "harness_studio"'
   )
   next = patchCodexProviderField(
     next,
@@ -2998,7 +3035,7 @@ function ensureCodexProviderDefaults(
   // `requires_openai_auth` is the one managed field a user legitimately owns:
   // codex defaults it to false, and its `uses_openai_actor_authorization()`
   // requires `!requires_openai_auth`, so forcing true silently disables the
-  // actor-authorization path. Supply codeg's default only when the provider
+  // actor-authorization path. Supply harness_studio's default only when the provider
   // does not already declare it — true is right for a provider *we* created
   // (key in auth.json, no env_key), never for one the user configured.
   // Read the original text: the three patches above never touch
@@ -3216,7 +3253,7 @@ export function buildGrokStructuredConfig(draft: {
   grokAutoCompactThreshold: string
 }): GrokStructuredConfig {
   // The custom-model group applies only in the `custom` auth method; the
-  // subscription / api_key methods omit the codeg-managed [model.<id>] block
+  // subscription / api_key methods omit the harness-studio-managed [model.<id>] block
   // (an empty id → the backend removes it). Permission mode, reasoning effort
   // and compaction below stay independent of the auth method.
   const modelId =
@@ -3342,6 +3379,14 @@ export function patchImportantConfigText(
       CLAUDE_MODEL_ENV_KEYS.claudeDefaultFableModel,
       patch.claudeDefaultFableModel
     )
+    assignEnv(CLAUDE_MODEL_ENV_KEYS.claudeSonnetName, patch.claudeSonnetName)
+    assignEnv(CLAUDE_MODEL_ENV_KEYS.claudeOpusName, patch.claudeOpusName)
+    assignEnv(CLAUDE_MODEL_ENV_KEYS.claudeFableName, patch.claudeFableName)
+    assignEnv(CLAUDE_MODEL_ENV_KEYS.claudeHaikuName, patch.claudeHaikuName)
+    assignEnv(
+      CLAUDE_MODEL_ENV_KEYS.claudeSubagentModel,
+      patch.claudeSubagentModel
+    )
     assignEnv(
       CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOption,
       patch.claudeCustomModelOption
@@ -3397,6 +3442,11 @@ export function applyClaudeProviderToConfigText(
     claudeDefaultSonnetModel: model.sonnet ?? "",
     claudeDefaultOpusModel: model.opus ?? "",
     claudeDefaultFableModel: model.fable ?? "",
+    claudeSonnetName: model.sonnetName ?? "",
+    claudeOpusName: model.opusName ?? "",
+    claudeFableName: model.fableName ?? "",
+    claudeHaikuName: model.haikuName ?? "",
+    claudeSubagentModel: model.subagent ?? "",
     claudeCustomModelOption: model.customOption ?? "",
     claudeCustomModelOptionName: model.customOptionName ?? "",
     claudeCustomModelOptionDescription: model.customOptionDescription ?? "",
@@ -3494,7 +3544,7 @@ export function patchEnvByImportantKey(
   value: string
 ): string {
   const keys = importantEnvKeysByAgent(agentType)
-  // The FIRST key of each list is the one codeg writes; the rest are aliases it
+  // The FIRST key of each list is the one harness_studio writes; the rest are aliases it
   // only reads. An agent that has no env var for a slot leaves that list empty,
   // and `[0]` is then `undefined` — which `patchEnvText` would happily write as
   // an env var literally named `undefined`, silently swallowing what the user
@@ -3541,6 +3591,12 @@ function applyImportantFieldToDraft(
   if (key === "claudeDefaultFableModel") {
     return { ...draft, claudeDefaultFableModel: value }
   }
+  if (key === "claudeSonnetName") return { ...draft, claudeSonnetName: value }
+  if (key === "claudeOpusName") return { ...draft, claudeOpusName: value }
+  if (key === "claudeFableName") return { ...draft, claudeFableName: value }
+  if (key === "claudeHaikuName") return { ...draft, claudeHaikuName: value }
+  if (key === "claudeSubagentModel")
+    return { ...draft, claudeSubagentModel: value }
   if (key === "claudeCustomModelOption") {
     return { ...draft, claudeCustomModelOption: value }
   }
@@ -3561,6 +3617,11 @@ function buildImportantPatchFromDraft(draft: AgentDraft): ImportantDraftPatch {
     claudeDefaultSonnetModel: draft.claudeDefaultSonnetModel,
     claudeDefaultOpusModel: draft.claudeDefaultOpusModel,
     claudeDefaultFableModel: draft.claudeDefaultFableModel,
+    claudeSonnetName: draft.claudeSonnetName,
+    claudeOpusName: draft.claudeOpusName,
+    claudeFableName: draft.claudeFableName,
+    claudeHaikuName: draft.claudeHaikuName,
+    claudeSubagentModel: draft.claudeSubagentModel,
     claudeCustomModelOption: draft.claudeCustomModelOption,
     claudeCustomModelOptionName: draft.claudeCustomModelOptionName,
     claudeCustomModelOptionDescription:
@@ -3762,6 +3823,11 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
     claudeDefaultSonnetModel: important.claudeDefaultSonnetModel,
     claudeDefaultOpusModel: important.claudeDefaultOpusModel,
     claudeDefaultFableModel: important.claudeDefaultFableModel,
+    claudeSonnetName: important.claudeSonnetName,
+    claudeOpusName: important.claudeOpusName,
+    claudeFableName: important.claudeFableName,
+    claudeHaikuName: important.claudeHaikuName,
+    claudeSubagentModel: important.claudeSubagentModel,
     claudeCustomModelOption: important.claudeCustomModelOption,
     claudeCustomModelOptionName: important.claudeCustomModelOptionName,
     claudeCustomModelOptionDescription:
@@ -3919,6 +3985,20 @@ export function compareReleaseVersion(a: string, b: string): number {
  * version to be newer than, which a manually written definition does not
  * have. Also decides whether the settings page asks the backend at all.
  */
+type CachedAgentCheck = {
+  at: number
+  state?: AgentCheckState
+  version?: string | null
+  available?: boolean
+}
+// Runtime results only. Never cache credentials or configuration drafts.
+const agentCheckCache = new Map<AgentType, CachedAgentCheck>()
+
+export function invalidateAgentCheckCache(agentType?: AgentType) {
+  if (agentType) agentCheckCache.delete(agentType)
+  else agentCheckCache.clear()
+}
+
 export function canCheckLatestRelease(agent: AcpAgentInfo): boolean {
   return (
     (agent.distribution_type === "npx" ||
@@ -3954,12 +4034,12 @@ export function latestReleaseOffer(
 }
 
 /**
- * The explainer card for agents whose codeg entry is a third-party ACP
+ * The explainer card for agents whose harness_studio entry is a third-party ACP
  * *adapter* rather than the vendor's own CLI — Claude Code and Codex.
  *
  * Ten of the twelve built-ins install the vendor CLI itself, so a user's
  * existing global install is simply detected. These two are the exception:
- * neither `claude` nor `codex` speaks ACP, so codeg installs `claude-agent-acp`
+ * neither `claude` nor `codex` speaks ACP, so harness_studio installs `claude-agent-acp`
  * / `codex-acp` instead, and the launch gate looks for THAT command. Without
  * this card the user only sees "Not installed" next to an agent they demonstrably
  * have — by far the most-reported confusion.
@@ -3992,17 +4072,17 @@ export function buildAcpAdapterCheck(
   // The English fallbacks mirror the four i18n messages one-for-one (they are
   // what renders if no translator is mounted), so each state keeps the detail
   // that state is about — above all, the path we found the vendor CLI at.
-  const split = `Codeg drives agents over ACP and the ${adapter.native_label} does not speak ACP, so Codeg needs a separate adapter package, ${adapter.adapter_package}.`
+  const split = `harness studio drives agents over ACP and the ${adapter.native_label} does not speak ACP, so harness studio needs a separate adapter package, ${adapter.adapter_package}.`
   const coexist = `It ships its own runtime, never modifies or replaces your ${adapter.native_cmd} command, and reads the same ${adapter.shared_config_dir} — your existing sign-in and settings carry over.`
   const [key, fallback] = installed
     ? sawNative
       ? [
           "adapter.readyWithNative",
-          `Adapter ${adapter.adapter_cmd} is installed — that is what Codeg launches, not your own ${adapter.native_cmd} at ${adapter.native_path}. They are separate packages that coexist, and both read ${adapter.shared_config_dir}.`,
+          `Adapter ${adapter.adapter_cmd} is installed — that is what harness studio launches, not your own ${adapter.native_cmd} at ${adapter.native_path}. They are separate packages that coexist, and both read ${adapter.shared_config_dir}.`,
         ]
       : [
           "adapter.ready",
-          `Adapter ${adapter.adapter_cmd} is installed — that is what Codeg launches. It ships its own runtime, so the ${adapter.native_label} is not required.`,
+          `Adapter ${adapter.adapter_cmd} is installed — that is what harness studio launches. It ships its own runtime, so the ${adapter.native_label} is not required.`,
         ]
     : sawNative
       ? [
@@ -4075,7 +4155,7 @@ export function buildVersionCheck(
   )
     return null
 
-  // The version codeg has reviewed and pinned for this agent.
+  // The version harness_studio has reviewed and pinned for this agent.
   const recommendedVersion = agent.registry_version ?? "unknown"
   const localVersion =
     agent.installed_version ?? acpText("version.notInstalled", "Not installed")
@@ -4446,6 +4526,7 @@ export function AcpAgentSettings() {
   const searchParams = useSearchParams()
   const [agents, setAgents] = useState<AcpAgentInfo[]>([])
   const [loadingAgents, setLoadingAgents] = useState(true)
+  const [listRevision, setListRevision] = useState(0)
   const [addCustomOpen, setAddCustomOpen] = useState(false)
   // Registry id of the custom agent being edited; non-null renders the edit
   // instance of the add dialog (its own instance so the two flows never share
@@ -4474,6 +4555,9 @@ export function AcpAgentSettings() {
     Partial<Record<AgentType, boolean>>
   >({})
   const [modelProviders, setModelProviders] = useState<ModelProviderInfo[]>([])
+  const [loadingProviders, setLoadingProviders] = useState(true)
+  const listRequestRef = useRef(0)
+  const checkQueueRef = useRef<AgentCheckQueue | null>(null)
   const [uninstallConfirmAgent, setUninstallConfirmAgent] =
     useState<AcpAgentInfo | null>(null)
   const [removeConfirmAgent, setRemoveConfirmAgent] =
@@ -4508,6 +4592,8 @@ export function AcpAgentSettings() {
   const [drafts, setDrafts] = useState<Partial<Record<AgentType, AgentDraft>>>(
     {}
   )
+  const draftsRef = useRef(drafts)
+  draftsRef.current = drafts
   const [configErrors, setConfigErrors] = useState<
     Partial<Record<AgentType, string | null>>
   >({})
@@ -4600,23 +4686,18 @@ export function AcpAgentSettings() {
   )
 
   const refreshAgents = useCallback(async () => {
-    setLoadingAgents(true)
+    const request = ++listRequestRef.current
     setLoadingError(null)
     try {
-      const [next, providers] = await Promise.all([
-        acpListAgents(),
-        listModelProviders().catch(() => [] as ModelProviderInfo[]),
-      ])
+      const next = await acpListAgentsSnapshot()
+      if (request !== listRequestRef.current) return
       setAgents(next)
+      setListRevision((revision) => revision + 1)
       publishAgentDisplay(next)
-      setModelProviders(providers)
       setDrafts((prev) => {
         const updated = { ...prev }
         for (const agent of next) {
-          if (!updated[agent.agent_type]) {
-            updated[agent.agent_type] = buildAgentDraft(agent)
-            continue
-          }
+          if (!updated[agent.agent_type]) continue
           // An EXISTING draft is deliberately kept (it may hold in-progress
           // edits) — but for the keys a structured panel owns, keeping it is
           // what loses data: the enable switch persists `draft.envText`
@@ -4634,6 +4715,7 @@ export function AcpAgentSettings() {
       setConfigErrors((prev) => {
         const updated = { ...prev }
         for (const agent of next) {
+          if (!draftsRef.current[agent.agent_type]) continue
           if (typeof updated[agent.agent_type] !== "undefined") continue
           const configText =
             typeof agent.config_json === "string" ? agent.config_json : ""
@@ -4643,95 +4725,138 @@ export function AcpAgentSettings() {
       })
     } catch (err) {
       const message = toErrorMessage(err)
-      setLoadingError(message)
+      if (request === listRequestRef.current) setLoadingError(message)
     } finally {
-      setLoadingAgents(false)
+      if (request === listRequestRef.current) setLoadingAgents(false)
     }
   }, [])
 
-  const runPreflight = useCallback(
-    async (agentType: AgentType, forceRefresh?: boolean) => {
-      setChecking((prev) => ({ ...prev, [agentType]: true }))
-      try {
-        const [resultState, versionState, statusState] =
-          await Promise.allSettled([
-            acpPreflight(agentType, forceRefresh),
-            acpDetectAgentLocalVersion(agentType),
-            acpGetAgentStatus(agentType),
-          ])
-
-        if (versionState.status === "fulfilled") {
-          setAgents((prev) => {
-            if (versionState.value === null) return prev
-            let changed = false
-            const next = prev.map((agent) => {
-              if (agent.agent_type !== agentType) return agent
-              if (agent.installed_version === versionState.value) return agent
-              changed = true
-              return { ...agent, installed_version: versionState.value }
-            })
-            return changed ? next : prev
+  const performCheck = useCallback(
+    async (agentType: AgentType, force: boolean, isCurrent: () => boolean) => {
+      const apply = (cached: CachedAgentCheck) => {
+        if (!isCurrent()) return
+        if (cached.state)
+          setCheckState((prev) => ({ ...prev, [agentType]: cached.state }))
+        setAgents((prev) =>
+          prev.map((agent) => {
+            if (agent.agent_type !== agentType) return agent
+            return {
+              ...agent,
+              ...(cached.version === undefined
+                ? {}
+                : { installed_version: cached.version }),
+              ...(cached.available === undefined
+                ? {}
+                : { available: cached.available }),
+            }
           })
-        }
-
-        // Re-sync `available` from the authoritative backend status. It is
-        // recomputed live (e.g. `uvx_agent_launchable` for custom uvx
-        // agents), so an install that provisions the runtime flips it true
-        // here — otherwise the version-status panel would stay stuck on the
-        // unavailable / "runtime not ready" branch with the freshly installed
-        // version shown.
-        if (statusState.status === "fulfilled") {
-          setAgents((prev) => {
-            let changed = false
-            const next = prev.map((agent) => {
-              if (agent.agent_type !== agentType) return agent
-              if (agent.available === statusState.value.available) return agent
-              changed = true
-              return { ...agent, available: statusState.value.available }
-            })
-            return changed ? next : prev
-          })
-        }
-
-        if (resultState.status === "fulfilled") {
-          setCheckState((prev) => ({
-            ...prev,
-            [agentType]: { result: resultState.value },
-          }))
-        } else {
-          const message =
-            resultState.reason instanceof Error
-              ? resultState.reason.message
-              : String(resultState.reason)
-          setCheckState((prev) => ({
-            ...prev,
-            [agentType]: { error: message },
-          }))
-        }
-      } catch (err) {
-        const message = toErrorMessage(err)
-        setCheckState((prev) => ({ ...prev, [agentType]: { error: message } }))
-      } finally {
-        setChecking((prev) => ({ ...prev, [agentType]: false }))
+        )
       }
+      const cached = agentCheckCache.get(agentType)
+      if (!force && cached && Date.now() - cached.at < 60_000) {
+        apply(cached)
+        return
+      }
+      if (force) agentCheckCache.delete(agentType)
+      if (isCurrent()) setChecking((prev) => ({ ...prev, [agentType]: true }))
+      let accepting = true
+      const current = () => accepting && isCurrent()
+      const next: CachedAgentCheck = { at: Date.now() }
+      let failed = false
+      const fail = (error: unknown) => {
+        if (!current()) return
+        failed = true
+        next.state = { ...next.state, error: toErrorMessage(error) }
+        apply(next)
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          Promise.allSettled([
+            acpPreflight(agentType, force)
+              .then((result) => {
+                if (!current()) return
+                next.state = { ...next.state, result }
+                apply(next)
+              })
+              .catch(fail),
+            acpDetectAgentLocalVersion(agentType, force)
+              .then((version) => {
+                if (!current()) return
+                next.version = version
+                next.state = { ...next.state, versionChecked: true }
+                apply(next)
+              })
+              .catch(fail),
+            acpGetAgentStatus(agentType)
+              .then((status) => {
+                if (!current()) return
+                next.available = status.available
+                apply(next)
+              })
+              .catch(fail),
+          ]),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              fail(t("checkTimedOut"))
+              resolve()
+            }, 15_000)
+          }),
+        ])
+        if (current() && !failed)
+          agentCheckCache.set(agentType, { ...next, at: Date.now() })
+      } finally {
+        clearTimeout(timer)
+        accepting = false
+        if (isCurrent())
+          setChecking((prev) => ({ ...prev, [agentType]: false }))
+      }
+    },
+    [t]
+  )
+  const checkRunnerRef = useRef(performCheck)
+  checkRunnerRef.current = performCheck
+  useEffect(() => {
+    const listRequest = listRequestRef
+    const queue = new AgentCheckQueue((...args) =>
+      checkRunnerRef.current(...args)
+    )
+    checkQueueRef.current = queue
+    return () => {
+      queue.stop()
+      checkQueueRef.current = null
+      ++listRequest.current
+    }
+  }, [])
+  const runPreflight = useCallback(
+    async (agentType: AgentType, force = true) => {
+      if (force) agentCheckCache.delete(agentType)
+      await checkQueueRef.current?.enqueue(agentType, force)
     },
     []
   )
 
-  const runAllPreflight = useCallback(
-    async (agentTypes: AgentType[]) => {
-      if (agentTypes.length === 0) return
-      setChecking((prev) => {
-        const next = { ...prev }
-        for (const agentType of agentTypes) {
-          next[agentType] = true
-        }
-        return next
+  const refreshAgentRegistry = useCallback(async () => {
+    agentCheckCache.clear()
+    for (const agent of agents) checkQueueRef.current?.remove(agent.agent_type)
+    setCheckState({})
+    await refreshAgents()
+  }, [agents, refreshAgents])
+
+  useEffect(() => {
+    let current = true
+    listModelProviders()
+      .then((providers) => {
+        if (current) setModelProviders(providers)
       })
-      await Promise.all(agentTypes.map((agentType) => runPreflight(agentType)))
-    },
-    [runPreflight]
-  )
+      .catch(() => {})
+      .finally(() => {
+        if (current) setLoadingProviders(false)
+      })
+    return () => {
+      current = false
+    }
+  }, [])
 
   useEffect(() => {
     return () => installStream.reset()
@@ -4764,12 +4889,14 @@ export function AcpAgentSettings() {
   }, [refreshAgents])
 
   useEffect(() => {
-    if (loadingAgents || !agentTypesKey) return
+    if (loadingAgents || !agentTypesKey || !selectedAgentType) return
+    const queue = checkQueueRef.current
+    if (!queue) return
+    queue.prioritize(selectedAgentType)
     const agentTypes = agentTypesKey.split(",") as AgentType[]
-    runAllPreflight(agentTypes).catch((err) => {
-      console.error("[Settings] run all preflight failed:", err)
-    })
-  }, [agentTypesKey, loadingAgents, runAllPreflight])
+    void queue.enqueue(selectedAgentType)
+    for (const agentType of agentTypes) void queue.enqueue(agentType)
+  }, [agentTypesKey, loadingAgents, selectedAgentType, listRevision])
 
   useEffect(() => {
     if (!requestedAgentType) {
@@ -5073,7 +5200,7 @@ export function AcpAgentSettings() {
   // structured merge and the raw editor each write keys the other doesn't echo).
   const reseedAgentDraft = useCallback(async (agentType: AgentType) => {
     try {
-      const fresh = await acpListAgents()
+      const fresh = await acpListAgentsSnapshot()
       setAgents(fresh)
       publishAgentDisplay(fresh)
       const agent = fresh.find((a) => a.agent_type === agentType)
@@ -5101,6 +5228,8 @@ export function AcpAgentSettings() {
     ) => {
       if (busyActionRef.current.has(agent.agent_type)) return
       busyActionRef.current.add(agent.agent_type)
+      agentCheckCache.delete(agent.agent_type)
+      checkQueueRef.current?.remove(agent.agent_type)
       setBusyBinaryAction((prev) => ({ ...prev, [agent.agent_type]: true }))
       setRunningActionKind((prev) => ({
         ...prev,
@@ -5206,6 +5335,8 @@ export function AcpAgentSettings() {
     ) => {
       if (busyActionRef.current.has(agent.agent_type)) return
       busyActionRef.current.add(agent.agent_type)
+      agentCheckCache.delete(agent.agent_type)
+      checkQueueRef.current?.remove(agent.agent_type)
       setBusyBinaryAction((prev) => ({ ...prev, [agent.agent_type]: true }))
       setRunningActionKind((prev) => ({
         ...prev,
@@ -5331,6 +5462,8 @@ export function AcpAgentSettings() {
       if (!id) return
       setRemovingCustomAgent(true)
       try {
+        agentCheckCache.clear()
+        checkQueueRef.current?.remove(agent.agent_type)
         await acpDeleteCustomAgent(id, false)
         toast.success(t("customAgentRemoved", { name: agent.name }))
         setSelectedAgentType(null)
@@ -5348,6 +5481,8 @@ export function AcpAgentSettings() {
     async (agent: AcpAgentInfo) => {
       if (busyActionRef.current.has(agent.agent_type)) return
       busyActionRef.current.add(agent.agent_type)
+      agentCheckCache.delete(agent.agent_type)
+      checkQueueRef.current?.remove(agent.agent_type)
       setBusyBinaryAction((prev) => ({ ...prev, [agent.agent_type]: true }))
       setRunningActionKind((prev) => ({
         ...prev,
@@ -5400,6 +5535,8 @@ export function AcpAgentSettings() {
     async (agent: AcpAgentInfo) => {
       if (busyActionRef.current.has(agent.agent_type)) return
       busyActionRef.current.add(agent.agent_type)
+      agentCheckCache.delete(agent.agent_type)
+      checkQueueRef.current?.remove(agent.agent_type)
       setBusyBinaryAction((prev) => ({ ...prev, [agent.agent_type]: true }))
       setRunningActionKind((prev) => ({
         ...prev,
@@ -5647,6 +5784,9 @@ export function AcpAgentSettings() {
 
   const renderCheck = (agent: AcpAgentInfo, check: UiCheckItem) => {
     const checkKey = `${agent.agent_type}:${check.check_id}`
+    const versionPending =
+      check.check_id === "version_status" &&
+      !checkState[agent.agent_type]?.versionChecked
     const expanded = expandedChecks[checkKey] ?? check.status !== "pass"
     const footerFixes = check.footerFixes ?? []
 
@@ -5675,9 +5815,15 @@ export function AcpAgentSettings() {
             <span className="text-xs font-medium truncate">{check.label}</span>
           </div>
           <span
-            className={`text-2xs font-semibold shrink-0 ${statusTone(check.status)}`}
+            className={`text-2xs font-semibold shrink-0 ${versionPending ? "text-muted-foreground" : statusTone(check.status)}`}
           >
-            {check.status.toUpperCase()}
+            {versionPending
+              ? t(
+                  checking[agent.agent_type]
+                    ? "status.checking"
+                    : "status.unchecked"
+                )
+              : check.status.toUpperCase()}
           </span>
         </button>
 
@@ -5729,9 +5875,29 @@ export function AcpAgentSettings() {
   const selectedCurrent = selectedAgent
     ? checkState[selectedAgent.agent_type]
     : undefined
-  const selectedDraft = selectedAgent
-    ? (drafts[selectedAgent.agent_type] ?? buildAgentDraft(selectedAgent))
-    : null
+  const selectedDraft = useMemo(
+    () =>
+      selectedAgent
+        ? (drafts[selectedAgent.agent_type] ?? buildAgentDraft(selectedAgent))
+        : null,
+    [drafts, selectedAgent]
+  )
+  useEffect(() => {
+    if (!selectedAgent || !selectedDraft) return
+    setDrafts((prev) =>
+      prev[selectedAgent.agent_type]
+        ? prev
+        : {
+            ...prev,
+            [selectedAgent.agent_type]: selectedDraft,
+          }
+    )
+    setConfigErrors((prev) => ({
+      ...prev,
+      [selectedAgent.agent_type]: parseConfigJsonText(selectedDraft.configText)
+        .error,
+    }))
+  }, [selectedAgent, selectedDraft])
   const selectedConfigError = selectedAgent
     ? (configErrors[selectedAgent.agent_type] ?? null)
     : null
@@ -6047,6 +6213,11 @@ export function AcpAgentSettings() {
         claudeDefaultSonnetModel: important.claudeDefaultSonnetModel,
         claudeDefaultOpusModel: important.claudeDefaultOpusModel,
         claudeDefaultFableModel: important.claudeDefaultFableModel,
+        claudeSonnetName: important.claudeSonnetName,
+        claudeOpusName: important.claudeOpusName,
+        claudeFableName: important.claudeFableName,
+        claudeHaikuName: important.claudeHaikuName,
+        claudeSubagentModel: important.claudeSubagentModel,
         claudeCustomModelOption: important.claudeCustomModelOption,
         claudeCustomModelOptionName: important.claudeCustomModelOptionName,
         claudeCustomModelOptionDescription:
@@ -6085,7 +6256,11 @@ export function AcpAgentSettings() {
             key,
             value
           ),
-          configText: nextJson.configText,
+          configText: patchImportantConfigText(
+            selectedAgent.agent_type,
+            current.configText,
+            buildImportantPatchFromDraft(nextCurrent)
+          ).configText,
         }
       })
     },
@@ -6243,6 +6418,11 @@ export function AcpAgentSettings() {
         const claudeSonnet = claudeModel.sonnet ?? ""
         const claudeOpus = claudeModel.opus ?? ""
         const claudeFable = claudeModel.fable ?? ""
+        const claudeSonnetName = claudeModel.sonnetName ?? ""
+        const claudeOpusName = claudeModel.opusName ?? ""
+        const claudeFableName = claudeModel.fableName ?? ""
+        const claudeHaikuName = claudeModel.haikuName ?? ""
+        const claudeSubagentModel = claudeModel.subagent ?? ""
         const claudeCustomOption = claudeModel.customOption ?? ""
         const claudeCustomOptionName = claudeModel.customOptionName ?? ""
         const claudeCustomOptionDescription =
@@ -6260,6 +6440,11 @@ export function AcpAgentSettings() {
             claudeDefaultSonnetModel: claudeSonnet,
             claudeDefaultOpusModel: claudeOpus,
             claudeDefaultFableModel: claudeFable,
+            claudeSonnetName,
+            claudeOpusName,
+            claudeFableName,
+            claudeHaikuName,
+            claudeSubagentModel,
             // The custom model option travels with the provider's model JSON,
             // authoritative like the six model fields: a defined value sets it,
             // an empty/omitted value clears the key from config.env.
@@ -6324,6 +6509,36 @@ export function AcpAgentSettings() {
           nextEnvText = patchEnvByImportantKey(
             agentType,
             nextEnvText,
+            "claudeSonnetName",
+            claudeSonnetName
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeOpusName",
+            claudeOpusName
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeFableName",
+            claudeFableName
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeHaikuName",
+            claudeHaikuName
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeSubagentModel",
+            claudeSubagentModel
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
             "claudeCustomModelOption",
             claudeCustomOption
           )
@@ -6350,6 +6565,11 @@ export function AcpAgentSettings() {
             claudeDefaultSonnetModel: claudeSonnet,
             claudeDefaultOpusModel: claudeOpus,
             claudeDefaultFableModel: claudeFable,
+            claudeSonnetName,
+            claudeOpusName,
+            claudeFableName,
+            claudeHaikuName,
+            claudeSubagentModel,
             claudeCustomModelOption: claudeCustomOption,
             claudeCustomModelOptionName: claudeCustomOptionName,
             claudeCustomModelOptionDescription: claudeCustomOptionDescription,
@@ -6382,7 +6602,7 @@ export function AcpAgentSettings() {
         nextConfigTomlText = updateTomlRootStringKey(
           nextConfigTomlText,
           "model_catalog_json",
-          codexHasConfig ? "codeg-model-catalog.json" : ""
+          codexHasConfig ? "harness-studio-model-catalog.json" : ""
         )
         const synced = extractCodexImportantValues(
           nextAuthJsonText,
@@ -7546,7 +7766,7 @@ export function AcpAgentSettings() {
         return
       }
 
-      // "api_key" or "model_provider": ensure model_provider = "codeg" in toml
+      // "api_key" or "model_provider": ensure model_provider = "harness_studio" in toml
       const nextConfigTomlText = patchCodexConfigTomlText(
         selectedDraft.codexConfigTomlText,
         { modelProvider: CODEX_DEFAULT_MODEL_PROVIDER }
@@ -7586,7 +7806,7 @@ export function AcpAgentSettings() {
       const defaultSlug = next.default ?? next.customs[0]?.slug ?? ""
       // `next` arrives already pruned of exclusions that no longer name a
       // listable official, so a plain count is the *effective* customization —
-      // codeg only takes over codex's model table when something really deviates.
+      // harness_studio only takes over codex's model table when something really deviates.
       const hasCatalog =
         next.customs.length > 0 || (next.excludedOfficials?.length ?? 0) > 0
       updateSelectedDraft((current) => {
@@ -7598,7 +7818,7 @@ export function AcpAgentSettings() {
         toml = updateTomlRootStringKey(
           toml,
           "model_catalog_json",
-          hasCatalog ? "codeg-model-catalog.json" : ""
+          hasCatalog ? "harness-studio-model-catalog.json" : ""
         )
         return {
           ...current,
@@ -7971,7 +8191,7 @@ export function AcpAgentSettings() {
       <AddCustomAgentDialog
         open={addCustomOpen}
         onOpenChange={setAddCustomOpen}
-        onAdded={() => void refreshAgents()}
+        onAdded={() => void refreshAgentRegistry()}
       />
 
       {/* Keyed by the id so switching agents never leaks a previous form. */}
@@ -7983,7 +8203,7 @@ export function AcpAgentSettings() {
           onOpenChange={(next) => {
             if (!next) setEditCustomAgentId(null)
           }}
-          onAdded={() => void refreshAgents()}
+          onAdded={() => void refreshAgentRegistry()}
         />
       )}
 
@@ -8009,18 +8229,24 @@ export function AcpAgentSettings() {
             {sortedAgents.map((agent) => {
               const current = checkState[agent.agent_type]
               const isChecking = Boolean(checking[agent.agent_type])
-              const draft = drafts[agent.agent_type] ?? buildAgentDraft(agent)
+              const enabled = drafts[agent.agent_type]?.enabled ?? agent.enabled
               const allChecks = getAgentChecks(agent, current)
               const summary = summarizeChecks(allChecks)
               const displaySummary: CheckStatus | "unchecked" | "checking" =
-                isChecking ? "checking" : summary
+                isChecking
+                  ? "checking"
+                  : current?.error
+                    ? "fail"
+                    : !current?.result
+                      ? "unchecked"
+                      : summary
               const statusLabel =
                 displaySummary === "unchecked"
                   ? t("status.unchecked")
                   : displaySummary === "checking"
-                    ? "Checking"
+                    ? t("status.checking")
                     : displaySummary.toUpperCase()
-              const statusToneClass = !draft.enabled
+              const statusToneClass = !enabled
                 ? "border-muted-foreground/30 bg-muted/30 text-muted-foreground"
                 : displaySummary === "pass"
                   ? "border-green-500/40 bg-green-500/10 text-green-600 dark:text-green-400"
@@ -8081,7 +8307,7 @@ export function AcpAgentSettings() {
                         <span className="text-sm font-medium truncate">
                           {agent.name}
                         </span>
-                        {draft.enabled && (
+                        {enabled && (
                           <span
                             className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"
                             aria-label={t("status.agentEnabledAria", {
@@ -8153,7 +8379,7 @@ export function AcpAgentSettings() {
                     <Badge variant="outline" className="shrink-0">
                       {selectedAgent.distribution_type}
                     </Badge>
-                    {/* Names the thing codeg actually installs, right next to
+                    {/* Names the thing harness_studio actually installs, right next to
                         the vendor's name — so the split is visible even before
                         anyone reads the preflight card below. */}
                     {selectedAgent.is_acp_adapter && (
@@ -8546,7 +8772,11 @@ export function AcpAgentSettings() {
                         <label className="text-2xs text-muted-foreground">
                           {t("selectModelProvider")}
                         </label>
-                        {selectedModelProviders.length > 0 ? (
+                        {loadingProviders ? (
+                          <p className="text-xs text-muted-foreground">
+                            {t("loadingProviders")}
+                          </p>
+                        ) : selectedModelProviders.length > 0 ? (
                           <Select
                             value={
                               selectedDraft.modelProviderId != null
@@ -8656,9 +8886,16 @@ export function AcpAgentSettings() {
                     {(selectedDraft.codexAuthMode === "api_key" ||
                       selectedDraft.codexAuthMode === "model_provider") && (
                       <div className="space-y-1.5">
-                        <CodexModelListEditor
-                          value={selectedDraft.codexModelList}
-                          onChange={handleCodexModelListChange}
+                        <ProviderModelConfiguration
+                          key={`${selectedAgent.agent_type}:${selectedDraft.codexAuthMode}`}
+                          agentType="codex"
+                          apiUrl={selectedDraft.apiBaseUrl}
+                          apiKey={selectedDraft.apiKey}
+                          providerId={
+                            selectedDraft.modelProviderId ?? undefined
+                          }
+                          codex={selectedDraft.codexModelList}
+                          onCodexChange={handleCodexModelListChange}
                           readOnly={
                             selectedDraft.codexAuthMode === "model_provider"
                           }
@@ -8694,7 +8931,7 @@ export function AcpAgentSettings() {
 
                     {/* `[features].default_mode_request_user_input` — without
                         it codex refuses its own `request_user_input` tool
-                        outside Plan mode, so codeg's question cards never
+                        outside Plan mode, so harness_studio's question cards never
                         appear in an ordinary turn (openai/codex#24750). */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between rounded-md border px-3 py-2">
@@ -8869,7 +9106,7 @@ export function AcpAgentSettings() {
                         <p className="text-3xs text-muted-foreground">
                           {t("codex.sandboxModeHint")}
                         </p>
-                        {/* Sandbox mode is what codeg maps onto the session's
+                        {/* Sandbox mode is what harness_studio maps onto the session's
                             starting approval preset (#442), so it reaches
                             ordinary prompts even though approval_policy does
                             not. Worth stating next to the control that does it. */}
@@ -8991,12 +9228,12 @@ export function AcpAgentSettings() {
                         placeholder={`disable_response_storage = true
 model = "gpt-6-astra"
 model_reasoning_effort = "high"
-model_provider = "codeg"
+model_provider = "harness_studio"
 
 [features]
 responses_websockets_v2 = true
 
-[model_providers.codeg]
+[model_providers.harness_studio]
 base_url = "https://api.openai.com/v1"
 supports_websockets = true`}
                         className="min-h-40 max-h-80 font-mono text-xs"
@@ -9133,7 +9370,11 @@ supports_websockets = true`}
                         <label className="text-2xs text-muted-foreground">
                           {t("selectModelProvider")}
                         </label>
-                        {selectedModelProviders.length > 0 ? (
+                        {loadingProviders ? (
+                          <p className="text-xs text-muted-foreground">
+                            {t("loadingProviders")}
+                          </p>
+                        ) : selectedModelProviders.length > 0 ? (
                           <Select
                             value={
                               selectedDraft.modelProviderId != null
@@ -9165,25 +9406,6 @@ supports_websockets = true`}
                         )}
                       </div>
                     )}
-
-                    <div className="space-y-1.5">
-                      <label className="text-2xs text-muted-foreground">
-                        Model
-                      </label>
-                      <Input
-                        value={selectedDraft.model}
-                        readOnly={
-                          selectedDraft.geminiAuthMode === "model_provider"
-                        }
-                        onChange={(event) => {
-                          handleGeminiFieldChange("model", event.target.value)
-                        }}
-                        placeholder="gemini-3-pro-preview"
-                      />
-                      <p className="text-2xs text-muted-foreground">
-                        {t("modelHintDefault")}
-                      </p>
-                    </div>
 
                     {(selectedDraft.geminiAuthMode === "custom" ||
                       selectedDraft.geminiAuthMode === "model_provider") && (
@@ -9276,6 +9498,24 @@ supports_websockets = true`}
                         </div>
                       </div>
                     )}
+
+                    <ProviderModelConfiguration
+                      key={`gemini:${selectedDraft.geminiAuthMode}`}
+                      agentType="gemini"
+                      apiUrl={selectedDraft.apiBaseUrl}
+                      apiKey={selectedDraft.geminiApiKey}
+                      providerId={selectedDraft.modelProviderId ?? undefined}
+                      readOnly={
+                        selectedDraft.geminiAuthMode === "model_provider"
+                      }
+                      discoveryEnabled={
+                        selectedDraft.geminiAuthMode === "custom"
+                      }
+                      model={selectedDraft.model}
+                      onModelChange={(value) =>
+                        handleGeminiFieldChange("model", value)
+                      }
+                    />
 
                     {(selectedDraft.geminiAuthMode === "vertex_adc" ||
                       selectedDraft.geminiAuthMode ===
@@ -10298,7 +10538,7 @@ supports_websockets = true`}
                               </SelectItem>
                             ))}
                           </SelectGroup>
-                          {/* A provider configured outside codeg (e.g. `cline
+                          {/* A provider configured outside harness_studio (e.g. `cline
                               auth bedrock`) keeps its own row, so opening this
                               panel can't silently retarget the store. */}
                           {!isClineSignInProvider(
@@ -11328,7 +11568,7 @@ supports_websockets = true`}
                     {/* Custom model (BYO endpoint) → [model.<id>] + [models].default.
                         Only shown (and saved) in the `custom` auth method: a model
                         id registers a custom Grok model as the default; the other
-                        methods omit the codeg-managed block. */}
+                        methods omit the harness-studio-managed block. */}
                     {selectedDraft.grokAuthMode === "custom" ? (
                       <div className="space-y-2.5 rounded-md border p-2.5">
                         <div>
@@ -11653,7 +11893,7 @@ supports_websockets = true`}
                     </div>
                   </div>
                 ) : isCustomAgentType(selectedAgent.agent_type) ? (
-                  // A custom agent is driven purely by the ACP protocol: codeg
+                  // A custom agent is driven purely by the ACP protocol: harness_studio
                   // knows nothing about its config file layout or auth model,
                   // so the generic "config management" editor below would be
                   // offering to write a file that may not exist in a format it
@@ -11787,7 +12027,11 @@ supports_websockets = true`}
                           <label className="text-2xs text-muted-foreground">
                             {t("selectModelProvider")}
                           </label>
-                          {selectedModelProviders.length > 0 ? (
+                          {loadingProviders ? (
+                            <p className="text-xs text-muted-foreground">
+                              {t("loadingProviders")}
+                            </p>
+                          ) : selectedModelProviders.length > 0 ? (
                             <Select
                               value={
                                 selectedDraft.modelProviderId != null
@@ -11906,193 +12150,70 @@ supports_websockets = true`}
 
                     {selectedAgent.agent_type === "claude_code" ? (
                       <div className="space-y-2">
-                        <div className="grid gap-3 md:grid-cols-2">
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.mainModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeMainModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
-                              }
-                              onChange={(event) => {
+                        <ProviderModelConfiguration
+                          key={`claude_code:${selectedDraft.claudeAuthMode}`}
+                          agentType="claude_code"
+                          apiUrl={selectedDraft.apiBaseUrl}
+                          apiKey={selectedDraft.apiKey}
+                          providerId={
+                            selectedDraft.modelProviderId ?? undefined
+                          }
+                          readOnly={
+                            selectedDraft.claudeAuthMode === "model_provider"
+                          }
+                          discoveryEnabled={
+                            selectedDraft.claudeAuthMode === "custom"
+                          }
+                          claude={{
+                            main: selectedDraft.claudeMainModel,
+                            reasoning: selectedDraft.claudeReasoningModel,
+                            haiku: selectedDraft.claudeDefaultHaikuModel,
+                            sonnet: selectedDraft.claudeDefaultSonnetModel,
+                            opus: selectedDraft.claudeDefaultOpusModel,
+                            fable: selectedDraft.claudeDefaultFableModel,
+                            sonnetName: selectedDraft.claudeSonnetName,
+                            opusName: selectedDraft.claudeOpusName,
+                            fableName: selectedDraft.claudeFableName,
+                            haikuName: selectedDraft.claudeHaikuName,
+                            subagent: selectedDraft.claudeSubagentModel,
+                            customOption: selectedDraft.claudeCustomModelOption,
+                            customOptionName:
+                              selectedDraft.claudeCustomModelOptionName,
+                            customOptionDescription:
+                              selectedDraft.claudeCustomModelOptionDescription,
+                          }}
+                          onClaudeChange={(next) => {
+                            const fields = {
+                              main: "claudeMainModel",
+                              reasoning: "claudeReasoningModel",
+                              haiku: "claudeDefaultHaikuModel",
+                              sonnet: "claudeDefaultSonnetModel",
+                              opus: "claudeDefaultOpusModel",
+                              fable: "claudeDefaultFableModel",
+                              sonnetName: "claudeSonnetName",
+                              opusName: "claudeOpusName",
+                              fableName: "claudeFableName",
+                              haikuName: "claudeHaikuName",
+                              subagent: "claudeSubagentModel",
+                              customOption: "claudeCustomModelOption",
+                              customOptionName: "claudeCustomModelOptionName",
+                              customOptionDescription:
+                                "claudeCustomModelOptionDescription",
+                            } as const
+                            for (const key of Object.keys(
+                              fields
+                            ) as (keyof typeof fields)[]) {
+                              if (
+                                (next[key] ?? "") !== selectedDraft[fields[key]]
+                              ) {
                                 handleImportantConfigChange(
-                                  "claudeMainModel",
-                                  event.target.value
+                                  fields[key],
+                                  next[key] ?? ""
                                 )
-                              }}
-                              placeholder="claude-sonnet-5-5"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.reasoningModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeReasoningModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
                               }
-                              onChange={(event) => {
-                                handleImportantConfigChange(
-                                  "claudeReasoningModel",
-                                  event.target.value
-                                )
-                              }}
-                              placeholder="claude-opus-5-5"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.haikuDefaultModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeDefaultHaikuModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
-                              }
-                              onChange={(event) => {
-                                handleImportantConfigChange(
-                                  "claudeDefaultHaikuModel",
-                                  event.target.value
-                                )
-                              }}
-                              placeholder="claude-haiku-4-5"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.sonnetDefaultModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeDefaultSonnetModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
-                              }
-                              onChange={(event) => {
-                                handleImportantConfigChange(
-                                  "claudeDefaultSonnetModel",
-                                  event.target.value
-                                )
-                              }}
-                              placeholder="claude-sonnet-5-5"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.opusDefaultModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeDefaultOpusModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
-                              }
-                              onChange={(event) => {
-                                handleImportantConfigChange(
-                                  "claudeDefaultOpusModel",
-                                  event.target.value
-                                )
-                              }}
-                              placeholder="claude-opus-5-5"
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <label className="text-2xs text-muted-foreground">
-                              {t("claude.fableDefaultModel")}
-                            </label>
-                            <Input
-                              value={selectedDraft.claudeDefaultFableModel}
-                              readOnly={
-                                selectedDraft.claudeAuthMode ===
-                                "model_provider"
-                              }
-                              onChange={(event) => {
-                                handleImportantConfigChange(
-                                  "claudeDefaultFableModel",
-                                  event.target.value
-                                )
-                              }}
-                              placeholder="claude-fable-5-1"
-                            />
-                          </div>
-                        </div>
-                        <p className="text-2xs text-muted-foreground">
-                          {t("modelHintDefault")}
-                        </p>
-                        <div className="space-y-2 border-t border-border/60 pt-3">
-                          <div className="grid gap-3 md:grid-cols-2">
-                            <div className="space-y-1.5 md:col-span-2">
-                              <label className="text-2xs text-muted-foreground">
-                                {t("claude.customModelOption")}
-                              </label>
-                              <Input
-                                value={selectedDraft.claudeCustomModelOption}
-                                readOnly={
-                                  selectedDraft.claudeAuthMode ===
-                                  "model_provider"
-                                }
-                                onChange={(event) => {
-                                  handleImportantConfigChange(
-                                    "claudeCustomModelOption",
-                                    event.target.value
-                                  )
-                                }}
-                                placeholder="my-gateway/claude-opus-5-5"
-                              />
-                            </div>
-                            <div className="space-y-1.5">
-                              <label className="text-2xs text-muted-foreground">
-                                {t("claude.customModelOptionName")}
-                              </label>
-                              <Input
-                                value={
-                                  selectedDraft.claudeCustomModelOptionName
-                                }
-                                readOnly={
-                                  selectedDraft.claudeAuthMode ===
-                                  "model_provider"
-                                }
-                                onChange={(event) => {
-                                  handleImportantConfigChange(
-                                    "claudeCustomModelOptionName",
-                                    event.target.value
-                                  )
-                                }}
-                                placeholder="Gateway Opus"
-                              />
-                            </div>
-                            <div className="space-y-1.5">
-                              <label className="text-2xs text-muted-foreground">
-                                {t("claude.customModelOptionDescription")}
-                              </label>
-                              <Input
-                                value={
-                                  selectedDraft.claudeCustomModelOptionDescription
-                                }
-                                readOnly={
-                                  selectedDraft.claudeAuthMode ===
-                                  "model_provider"
-                                }
-                                onChange={(event) => {
-                                  handleImportantConfigChange(
-                                    "claudeCustomModelOptionDescription",
-                                    event.target.value
-                                  )
-                                }}
-                                placeholder="Routed via custom gateway"
-                              />
-                            </div>
-                          </div>
-                          <p className="text-2xs text-muted-foreground">
-                            {t("claude.customModelOptionHint")}
-                          </p>
-                        </div>
+                            }
+                          }}
+                        />
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between rounded-md border px-3 py-2">
                             <label className="text-2xs text-muted-foreground">

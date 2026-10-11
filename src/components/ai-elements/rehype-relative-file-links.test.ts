@@ -184,12 +184,14 @@ describe("the record / restore steps around harden", () => {
     // write any) has nothing to hook onto, and sanitize drops it anyway.
     const node = renderAnchor({
       href: "/abs/a.md",
-      dataCodegRelativeHref: "../x",
-      "data-codeg-relative-href": "../x",
+      dataHarnessStudioRelativeHref: "../x",
+      "data-harness-studio-relative-href": "../x",
     })
     expect(node.properties).toMatchObject({ href: "/abs/a.md" })
-    expect(node.properties).not.toHaveProperty("dataCodegRelativeHref")
-    expect(node.properties).not.toHaveProperty("data-codeg-relative-href")
+    expect(node.properties).not.toHaveProperty("dataHarnessStudioRelativeHref")
+    expect(node.properties).not.toHaveProperty(
+      "data-harness-studio-relative-href"
+    )
   })
 })
 

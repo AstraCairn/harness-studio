@@ -91,11 +91,11 @@ export function parseCodexListFilesTitle(
 /**
  * `_meta` key the backend stamps on codex's `search` command actions
  * (`stamp_codex_search_action` in `acp/connection.rs`). It is the only way the
- * frontend can tell a codex search from another agent's grep once codeg
+ * frontend can tell a codex search from another agent's grep once harness_studio
  * advertises `_meta.terminal_output_delta`: a search that printed nothing then
  * completes as a bare `failed`, with no envelope and so no exit code.
  */
-export const CODEX_SEARCH_ACTION_META_KEY = "codeg.codexSearchAction"
+export const CODEX_SEARCH_ACTION_META_KEY = "harness_studio.codexSearchAction"
 
 export interface CodexCommandEnvelope {
   output: string

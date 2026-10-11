@@ -1,12 +1,12 @@
 //! Spawning an external ACP agent as a child process and connecting to it
 //! over stdio.
 //!
-//! codeg's own copy of the `AcpAgent` transport. It started life as the
-//! `sacp-tokio` crate (vendored with codeg's patches) and moved in-tree when
-//! codeg switched to the official `agent-client-protocol` runtime. That crate
+//! harness_studio's own copy of the `AcpAgent` transport. It started life as the
+//! `sacp-tokio` crate (vendored with harness_studio's patches) and moved in-tree when
+//! harness_studio switched to the official `agent-client-protocol` runtime. That crate
 //! ships an `AcpAgent` too — built on `async-process`; on Unix it starts the
 //! child in its own process group and kills the group on drop — but it has no
-//! room for the rest of what codeg depends on:
+//! room for the rest of what harness_studio depends on:
 //!
 //! * the whole process TREE is killed on drop (`kill_tree`), on every platform
 //!   and including descendants that left the child's process group, so an
@@ -389,7 +389,7 @@ impl AcpAgent {
                     command
                 };
                 for env_var in &stdio.env {
-                    // codeg convention: an empty value means "ensure this var is
+                    // harness_studio convention: an empty value means "ensure this var is
                     // ABSENT from the child" (strip an inherited value) rather
                     // than setting it empty. The child otherwise inherits this
                     // process's environment, so this lets the launch layer
@@ -419,20 +419,19 @@ impl AcpAgent {
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
 
-                let mut child = cmd.spawn().map_err(agent_client_protocol::Error::into_internal_error)?;
+                let mut child = cmd
+                    .spawn()
+                    .map_err(agent_client_protocol::Error::into_internal_error)?;
 
-                let child_stdin = child
-                    .stdin
-                    .take()
-                    .ok_or_else(|| agent_client_protocol::util::internal_error("Failed to open stdin"))?;
-                let child_stdout = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| agent_client_protocol::util::internal_error("Failed to open stdout"))?;
-                let child_stderr = child
-                    .stderr
-                    .take()
-                    .ok_or_else(|| agent_client_protocol::util::internal_error("Failed to open stderr"))?;
+                let child_stdin = child.stdin.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stdin")
+                })?;
+                let child_stdout = child.stdout.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stdout")
+                })?;
+                let child_stderr = child.stderr.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stderr")
+                })?;
 
                 Ok((child_stdin, child_stdout, child_stderr, child))
             }
@@ -587,7 +586,10 @@ fn monitor_child(
 
         // Wait for the child to exit
         let status = guard.wait().await.map_err(|e| {
-            agent_client_protocol::util::internal_error(format!("Failed to wait for process: {}", e))
+            agent_client_protocol::util::internal_error(format!(
+                "Failed to wait for process: {}",
+                e
+            ))
         })?;
 
         if status.success() {
@@ -619,10 +621,10 @@ impl<Counterpart: AcpAgentCounterpartRole> ConnectTo<Counterpart> for AcpAgent {
         self,
         client: impl ConnectTo<Counterpart::Counterpart>,
     ) -> Result<(), agent_client_protocol::Error> {
+        use futures::io::BufReader;
         use futures::AsyncBufReadExt;
         use futures::AsyncWriteExt;
         use futures::StreamExt;
-        use futures::io::BufReader;
 
         let (child_stdin, child_stdout, child_stderr, child) = self.spawn_process()?;
 
@@ -654,11 +656,8 @@ impl<Counterpart: AcpAgentCounterpartRole> ConnectTo<Counterpart> for AcpAgent {
                     }
                     // Always collect for error reporting
                     if !collected.is_empty() {
-                        truncated |= append_limited_utf8(
-                            &mut collected,
-                            "\n",
-                            MAX_STDERR_CAPTURE_BYTES,
-                        );
+                        truncated |=
+                            append_limited_utf8(&mut collected, "\n", MAX_STDERR_CAPTURE_BYTES);
                     }
                     truncated |=
                         append_limited_utf8(&mut collected, &line, MAX_STDERR_CAPTURE_BYTES);
@@ -720,10 +719,8 @@ impl<Counterpart: AcpAgentCounterpartRole> ConnectTo<Counterpart> for AcpAgent {
 
         // Race the protocol against child process exit
         // If the child exits early (e.g., with an error), we return that error
-        let protocol_future = ConnectTo::<Counterpart>::connect_to(
-            Lines::new(outgoing_sink, incoming_lines),
-            client,
-        );
+        let protocol_future =
+            ConnectTo::<Counterpart>::connect_to(Lines::new(outgoing_sink, incoming_lines), client);
 
         tokio::select! {
             result = protocol_future => result,
@@ -746,7 +743,9 @@ impl AcpAgent {
         let args: Vec<String> = args.into_iter().map(|s| s.to_string()).collect();
 
         if args.is_empty() {
-            return Err(agent_client_protocol::util::internal_error("Arguments cannot be empty"));
+            return Err(agent_client_protocol::util::internal_error(
+                "Arguments cannot be empty",
+            ));
         }
 
         let mut env = vec![];
@@ -779,11 +778,7 @@ impl AcpAgent {
             .to_string();
 
         Ok(AcpAgent {
-            server: McpServer::Stdio(
-                McpServerStdio::new(name, command)
-                    .args(cmd_args)
-                    .env(env),
-            ),
+            server: McpServer::Stdio(McpServerStdio::new(name, command).args(cmd_args).env(env)),
             debug_callback: None,
             current_dir: None,
             spawn_callback: None,
@@ -859,8 +854,9 @@ mod tests {
     /// keeps a Windows process handle open, which is exactly what stops the OS
     /// from reusing the pid there.
     #[cfg(unix)]
-    fn counting_callback(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Arc<dyn Fn() + Send + Sync>
-    {
+    fn counting_callback(
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Arc<dyn Fn() + Send + Sync> {
         let calls = Arc::clone(calls);
         Arc::new(move || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1009,7 +1005,7 @@ mod tests {
         // before that point would hit the default disposition and the test would
         // "fail" for a reason it isn't testing.
         let ready = std::env::temp_dir().join(format!(
-            "codeg-agent-process-trap-ready-{}-{:p}",
+            "harness-studio-agent-process-trap-ready-{}-{:p}",
             std::process::id(),
             &calls
         ));
@@ -1091,7 +1087,7 @@ mod tests {
         assert!(is_windows_unc_path(r"\\?\UNC\server\share\repo"));
         assert!(!is_windows_unc_path(r"C:\Users\user\repo"));
         assert!(!is_windows_unc_path(r"\\?\C:\Users\user\repo"));
-        assert!(!is_windows_unc_path(r"\\.\pipe\codeg"));
+        assert!(!is_windows_unc_path(r"\\.\pipe\harness_studio"));
     }
 
     #[test]
@@ -1236,8 +1232,7 @@ mod tests {
             .with_current_dir(&dir);
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let out = rt.block_on(async {
-            let (_stdin, mut stdout, _stderr, mut child) =
-                agent.spawn_process().expect("spawn");
+            let (_stdin, mut stdout, _stderr, mut child) = agent.spawn_process().expect("spawn");
             let mut out = String::new();
             stdout.read_to_string(&mut out).await.expect("read stdout");
             let _ = child.wait().await;

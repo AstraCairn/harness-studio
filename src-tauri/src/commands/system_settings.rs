@@ -9,14 +9,14 @@ use crate::app_error::AppCommandError;
 use crate::db::service::app_metadata_service;
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
+use crate::models::{
+    AvailableTerminalShells, SystemLanguageSettings, SystemProxySettings, SystemTerminalSettings,
+    TerminalShellOption,
+};
 #[cfg(feature = "tauri-runtime")]
 use crate::models::{
     CloseWindowBehavior, SystemAutostartSettings, SystemCloseBehaviorSettings,
     SystemCloseBehaviorSettingsView, SystemRenderingSettings,
-};
-use crate::models::{
-    AvailableTerminalShells, SystemLanguageSettings, SystemProxySettings, SystemTerminalSettings,
-    TerminalShellOption,
 };
 use crate::network::proxy;
 #[cfg(feature = "tauri-runtime")]
@@ -130,12 +130,12 @@ pub(crate) async fn load_system_language_settings(
 /// a shell before installing it.
 ///
 /// **This is a probe, not the spawn itself**, and the two can disagree on
-/// Windows. A PATH lookup here searches the PATH of codeg's own process, while
+/// Windows. A PATH lookup here searches the PATH of harness_studio's own process, while
 /// the built-in terminal spawns through `portable-pty`, whose `CommandBuilder`
 /// rebuilds PATH from the registry (HKLM + HKCU `Environment`) and so sees a
-/// PATH edited — or a shell installed — after codeg started. Both answer "which
+/// PATH edited — or a shell installed — after harness_studio started. Both answer "which
 /// `pwsh.exe`", and they differ only when those two PATHs name different
-/// directories; what codeg passes to either spawner is the stored string
+/// directories; what harness_studio passes to either spawner is the stored string
 /// itself, which no resolution here can change.
 fn resolve_shell_path(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -190,7 +190,7 @@ fn shell_exists(value: &str) -> bool {
 /// ([`resolve_shell`]). Anything else is the user's own choice, resolved to a
 /// concrete path when the host can find it (see [`resolve_shell_path`] for what
 /// that probe can and cannot promise) and echoed verbatim when it cannot: a
-/// shell that isn't installed is still what codeg would try to spawn, and
+/// shell that isn't installed is still what harness_studio would try to spawn, and
 /// saying so beats reporting a shell the user did not pick — the picker badges
 /// it "not installed" alongside.
 ///
@@ -201,7 +201,10 @@ fn shell_exists(value: &str) -> bool {
 /// with launches that predate this setting). So the "system default" row is the
 /// one case where this line can name a shell an agent's command would not use.
 pub(crate) fn resolve_effective_shell(default_shell: Option<&str>) -> String {
-    match default_shell.map(str::trim).filter(|value| !value.is_empty()) {
+    match default_shell
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         None => resolve_shell(),
         Some(selected) => resolve_shell_path(selected).unwrap_or_else(|| selected.to_string()),
     }
@@ -338,7 +341,7 @@ pub async fn apply_persisted_terminal_settings(
 pub(crate) async fn set_system_terminal_settings_core(
     conn: &DatabaseConnection,
     config: &TerminalShellRuntimeConfig,
-    emitter: &crate::web::event_bridge::EventEmitter,
+    emitter: &crate::events::EventEmitter,
     settings: SystemTerminalSettings,
 ) -> Result<SystemTerminalSettings, AppCommandError> {
     let normalized = normalize_terminal_settings(settings);
@@ -357,11 +360,7 @@ pub(crate) async fn set_system_terminal_settings_core(
     // connection rather than the running one.
     crate::acp::connection::set_force_command_color(normalized.colorize_command_output);
     config.set(normalized.default_shell.clone()).await;
-    crate::web::event_bridge::emit_event(
-        emitter,
-        TERMINAL_SETTINGS_UPDATED_EVENT,
-        normalized.clone(),
-    );
+    crate::events::emit_event(emitter, TERMINAL_SETTINGS_UPDATED_EVENT, normalized.clone());
 
     Ok(normalized)
 }
@@ -386,8 +385,7 @@ static CLOSE_BEHAVIOR_CACHE: std::sync::atomic::AtomicU8 =
 /// while the dialog is up, and every click re-enters `CloseRequested` — without
 /// this the user stacks a dialog per click and has to dismiss all of them.
 #[cfg(feature = "tauri-runtime")]
-static CLOSE_PROMPT_OPEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static CLOSE_PROMPT_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// When the outstanding claim was taken, so an unanswered one can expire.
 #[cfg(feature = "tauri-runtime")]
@@ -461,7 +459,8 @@ pub(crate) fn store_close_behavior_cache(behavior: CloseWindowBehavior) {
 pub(crate) async fn load_system_close_behavior_settings(
     conn: &DatabaseConnection,
 ) -> SystemCloseBehaviorSettings {
-    let raw = match app_metadata_service::get_value(conn, SYSTEM_CLOSE_BEHAVIOR_SETTINGS_KEY).await {
+    let raw = match app_metadata_service::get_value(conn, SYSTEM_CLOSE_BEHAVIOR_SETTINGS_KEY).await
+    {
         Ok(Some(raw)) => raw,
         Ok(None) => return SystemCloseBehaviorSettings::default(),
         Err(err) => {
@@ -768,12 +767,8 @@ pub async fn update_system_language_settings(
         .await
         .map_err(AppCommandError::from)?;
 
-    let emitter = crate::web::event_bridge::EventEmitter::Tauri(app);
-    crate::web::event_bridge::emit_event(
-        &emitter,
-        LANGUAGE_SETTINGS_UPDATED_EVENT,
-        settings.clone(),
-    );
+    let emitter = crate::events::EventEmitter::Tauri(app);
+    crate::events::emit_event(&emitter, LANGUAGE_SETTINGS_UPDATED_EVENT, settings.clone());
 
     Ok(settings)
 }
@@ -787,7 +782,7 @@ pub async fn update_system_terminal_settings(
     manager: State<'_, ConnectionManager>,
 ) -> Result<SystemTerminalSettings, AppCommandError> {
     let config = manager.terminal_shell_config();
-    let emitter = crate::web::event_bridge::EventEmitter::Tauri(app);
+    let emitter = crate::events::EventEmitter::Tauri(app);
     set_system_terminal_settings_core(&db.conn, &config, &emitter, settings).await
 }
 
@@ -1056,7 +1051,7 @@ mod autostart_tests {
 mod tests {
     use super::*;
     use crate::db::test_helpers::fresh_in_memory_db;
-    use crate::web::event_bridge::EventEmitter;
+    use crate::events::EventEmitter;
     use std::collections::BTreeMap;
 
     /// Every terminal-settings save writes `FORCE_COMMAND_COLOR`, a PROCESS
@@ -1143,7 +1138,7 @@ mod tests {
 
     /// A scheme-less address is what a user actually types, and what used to
     /// reach `HTTP_PROXY` verbatim — killing every npm-based agent install with
-    /// `ERR_INVALID_URL` while codeg's own reqwest calls kept working.
+    /// `ERR_INVALID_URL` while harness_studio's own reqwest calls kept working.
     #[test]
     fn scheme_less_proxy_addresses_gain_an_http_scheme() {
         assert_eq!(normalized_url("127.0.0.1:7890"), "http://127.0.0.1:7890");
@@ -1161,7 +1156,10 @@ mod tests {
         // An IPv6 literal keeps its brackets — without them the address is
         // indistinguishable from a host and a port.
         assert_eq!(normalized_url("[::1]:7890"), "http://[::1]:7890");
-        assert_eq!(normalized_url("  127.0.0.1:7890  "), "http://127.0.0.1:7890");
+        assert_eq!(
+            normalized_url("  127.0.0.1:7890  "),
+            "http://127.0.0.1:7890"
+        );
     }
 
     /// The repaired value is the user's own string with a prefix, never the
@@ -1174,7 +1172,10 @@ mod tests {
             normalized_url("proxy.corp.com:8080/gateway"),
             "http://proxy.corp.com:8080/gateway"
         );
-        assert_eq!(normalized_url("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(
+            normalized_url("http://127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
     }
 
     /// Re-running normalization over its own output must be a no-op: the value
@@ -1289,7 +1290,10 @@ mod tests {
         for blank in ["", " , ;\n", "，、 "] {
             let normalized =
                 normalize_proxy_settings(enabled_proxy_bypassing(blank)).expect("blank is valid");
-            assert_eq!(normalized.no_proxy, None, "{blank:?} leaves nothing to store");
+            assert_eq!(
+                normalized.no_proxy, None,
+                "{blank:?} leaves nothing to store"
+            );
         }
     }
 
@@ -1581,7 +1585,7 @@ mod tests {
             "{reported} should be resolved to a path the user can recognize"
         );
 
-        // Not installed is still what codeg would try to spawn — echoing it
+        // Not installed is still what harness_studio would try to spawn — echoing it
         // back is what lets the user see their own typo. Trimmed, because that
         // is what `normalize_terminal_settings` stored.
         assert_eq!(

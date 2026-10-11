@@ -5,21 +5,21 @@
 // What it does:
 //   1. Resolves the target triple — `--target <triple>` arg, or
 //      `TAURI_TARGET_TRIPLE` env, or the host's `rustc -vV` host triple.
-//   2. Runs `cargo build --release --no-default-features`, with the feature
-//      each binary target requires, for each sidecar bin (`codeg-mcp`,
-//      `codeg-computer-helper`) for that triple from `src-tauri/`.
+//   2. Runs `cargo build --profile <dev|release> --no-default-features`, with the feature
+//      each binary target requires, for each sidecar bin (`harness-studio-mcp`,
+//      `harness-studio-computer-helper`) for that triple from `src-tauri/`.
 //   3. Copies each produced binary to
 //      `src-tauri/binaries/<bin>-<triple>{.exe}` so Tauri's externalBin
 //      bundler picks it up under its bare name at install time.
 //   4. For a macOS target, also wraps the helper in an app of its own,
-//      `src-tauri/binaries/codeg-computer-helper.app`, which the bundle
-//      carries as `Contents/Helpers/codeg-computer-helper.app` (see
+//      `src-tauri/binaries/harness-studio-computer-helper.app`, which the bundle
+//      carries as `Contents/Helpers/harness-studio-computer-helper.app` (see
 //      `tauri.macos.conf.json`). macOS charges an executable's permissions to
-//      the app bundle it sits in: a helper beside codeg in `Contents/MacOS/`
-//      would hold codeg's — every agent's shell's — and none of its own.
+//      the app bundle it sits in: a helper beside harness_studio in `Contents/MacOS/`
+//      would hold harness_studio's — every agent's shell's — and none of its own.
 //
-// `codeg-computer-helper` takes its trust anchors from the environment at
-// compile time (`CODEG_COMPUTER_PEER_REQUIREMENT`): the release workflow sets
+// `harness-studio-computer-helper` takes its trust anchors from the environment at
+// compile time (`HARNESS_STUDIO_COMPUTER_PEER_REQUIREMENT`): the release workflow sets
 // it for the macOS builds, and a local build without it is a development
 // helper that says so. Nothing here sets or defaults it.
 //
@@ -28,9 +28,9 @@
 //     the matrix triple rather than rebuilding for the host.
 //   - Local `pnpm tauri dev` / `pnpm tauri build` invoke it without args and
 //     get a host-triple build, so the externalBin lookup still finds a file.
-//   - Skippable: set `CODEG_SKIP_SIDECAR=1` when iterating on the frontend
+//   - Skippable: set `HARNESS_STUDIO_SKIP_SIDECAR=1` when iterating on the frontend
 //     and you don't care about delegation or computer use: a development
-//     codeg refuses a computer helper built from other sources than its own,
+//     harness_studio refuses a computer helper built from other sources than its own,
 //     so after a change under `src-tauri/src/computer/` run this script once
 //     (it is what rebuilds the helper) and restart `pnpm tauri dev`.
 //
@@ -44,7 +44,6 @@ import {
   mkdirSync,
   chmodSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
@@ -56,10 +55,10 @@ const SRC_TAURI = resolve(SCRIPT_DIR, "..")
 const BINARIES_DIR = join(SRC_TAURI, "binaries")
 // Every sidecar in `bundle.externalBin`, in the order they are built. (On
 // macOS the helper is bundled as an app instead; see `stageHelperApp`.)
-const BIN_NAMES = ["codeg-mcp", "codeg-computer-helper"]
+const BIN_NAMES = ["harness-studio-mcp", "harness-studio-computer-helper"]
 // The features their binary targets require (Cargo.toml).
 const FEATURES = "mcp-bin,computer-helper"
-const HELPER = "codeg-computer-helper"
+const HELPER = "harness-studio-computer-helper"
 const HELPER_APP = join(BINARIES_DIR, `${HELPER}.app`)
 
 function log(msg) {
@@ -72,16 +71,33 @@ function die(msg) {
 }
 
 function parseArgs(argv) {
-  const args = { target: null }
+  const args = { target: null, profile: "release" }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === "--target" && argv[i + 1]) {
       args.target = argv[++i]
     } else if (a.startsWith("--target=")) {
       args.target = a.slice("--target=".length)
+    } else if (a === "--profile" && argv[i + 1]) {
+      args.profile = argv[++i]
+    } else if (a.startsWith("--profile=")) {
+      args.profile = a.slice("--profile=".length)
+    } else {
+      die(`unknown or incomplete argument: ${a}`)
     }
   }
+  if (!["dev", "release"].includes(args.profile)) {
+    die("--profile must be dev or release")
+  }
   return args
+}
+
+function copyIfChanged(source, dest) {
+  if (existsSync(dest) && readFileSync(source).equals(readFileSync(dest))) {
+    return false
+  }
+  copyFileSync(source, dest)
+  return true
 }
 
 function resolveHostTriple() {
@@ -95,8 +111,8 @@ function resolveHostTriple() {
   }
 }
 
-// The helper as an app: its Info.plist (identifier `app.codeg.computer-helper`,
-// no Dock icon), its executable, codeg's icon. Sealed ad hoc, so a bundle
+// The helper as an app: its Info.plist (identifier `com.harnessstudio.computer-helper`,
+// no Dock icon), its executable, harness_studio's icon. Sealed ad hoc, so a bundle
 // signed around it accepts it; release.yml signs it again with the Developer
 // ID before `tauri build`.
 function stageHelperApp(built) {
@@ -107,18 +123,25 @@ function stageHelperApp(built) {
     join(SRC_TAURI, "macos", `${HELPER}.plist`),
     "utf8"
   ).replaceAll("{{version}}", version)
-  rmSync(HELPER_APP, { recursive: true, force: true })
   const contents = join(HELPER_APP, "Contents")
   mkdirSync(join(contents, "MacOS"), { recursive: true })
   mkdirSync(join(contents, "Resources"), { recursive: true })
-  writeFileSync(join(contents, "Info.plist"), plist)
+  const plistPath = join(contents, "Info.plist")
+  let changed =
+    !existsSync(plistPath) || readFileSync(plistPath, "utf8") !== plist
+  if (changed) writeFileSync(plistPath, plist)
   const exe = join(contents, "MacOS", HELPER)
-  copyFileSync(built, exe)
+  changed = copyIfChanged(built, exe) || changed
   chmodSync(exe, 0o755)
-  copyFileSync(
-    join(SRC_TAURI, "icons", "icon.icns"),
-    join(contents, "Resources", "icon.icns")
-  )
+  changed =
+    copyIfChanged(
+      join(SRC_TAURI, "icons", "icon.icns"),
+      join(contents, "Resources", "icon.icns")
+    ) || changed
+  if (!changed) {
+    log(`helper app unchanged at ${HELPER_APP}`)
+    return
+  }
   if (process.platform === "darwin") {
     execFileSync("codesign", ["--force", "--sign", "-", HELPER_APP], {
       stdio: "inherit",
@@ -130,8 +153,8 @@ function stageHelperApp(built) {
 }
 
 function main() {
-  if (process.env.CODEG_SKIP_SIDECAR === "1") {
-    log("CODEG_SKIP_SIDECAR=1 — skipping sidecar preparation")
+  if (process.env.HARNESS_STUDIO_SKIP_SIDECAR === "1") {
+    log("HARNESS_STUDIO_SKIP_SIDECAR=1 — skipping sidecar preparation")
     log(
       "computer use refuses a helper older than src-tauri/src/computer/; " +
         "run `pnpm tauri:prepare-sidecars` after changing it"
@@ -139,7 +162,7 @@ function main() {
     return
   }
 
-  const { target: cliTarget } = parseArgs(process.argv.slice(2))
+  const { target: cliTarget, profile } = parseArgs(process.argv.slice(2))
   const target =
     cliTarget || process.env.TAURI_TARGET_TRIPLE || resolveHostTriple()
   const isWindows = target.includes("windows")
@@ -147,7 +170,7 @@ function main() {
 
   log(`target triple: ${target}`)
   log(
-    `building ${BIN_NAMES.join(", ")} (--release --no-default-features --features ${FEATURES})`
+    `building ${BIN_NAMES.join(", ")} (--profile ${profile} --no-default-features --features ${FEATURES})`
   )
 
   // cargo build needs to run from src-tauri so it resolves the local manifest
@@ -161,7 +184,8 @@ function main() {
     "cargo",
     [
       "build",
-      "--release",
+      "--profile",
+      profile,
       ...BIN_NAMES.flatMap((name) => ["--bin", name]),
       "--no-default-features",
       "--features",
@@ -174,18 +198,24 @@ function main() {
 
   mkdirSync(BINARIES_DIR, { recursive: true })
   for (const name of BIN_NAMES) {
-    const built = join(SRC_TAURI, "target", target, "release", `${name}${ext}`)
+    const built = join(
+      SRC_TAURI,
+      "target",
+      target,
+      profile === "dev" ? "debug" : "release",
+      `${name}${ext}`
+    )
     if (!existsSync(built)) {
       die(`expected ${built} after cargo build, but it does not exist`)
     }
     const dest = join(BINARIES_DIR, `${name}-${target}${ext}`)
-    copyFileSync(built, dest)
+    const changed = copyIfChanged(built, dest)
     if (!isWindows) {
       // copyFileSync preserves modes on POSIX, but be explicit for tarball
       // sources that may strip the +x bit.
       chmodSync(dest, 0o755)
     }
-    log(`sidecar staged at ${dest}`)
+    log(`sidecar ${changed ? "staged" : "unchanged"} at ${dest}`)
     if (name === HELPER && target.includes("apple-darwin")) {
       stageHelperApp(built)
     }

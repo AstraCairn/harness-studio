@@ -303,10 +303,7 @@ fn pack_sqlite_store(
         }
         Err(reason) => {
             let _ = std::fs::remove_file(&snap);
-            tracing::error!(
-                "[BACKUP] {} not archived: {reason}",
-                live_db.display()
-            );
+            tracing::error!("[BACKUP] {} not archived: {reason}", live_db.display());
             degraded.push(DegradedSqlite {
                 agent: agent.to_string(),
                 archive_path: entry_name.to_string(),
@@ -454,9 +451,7 @@ fn recover_and_page_copy(copy_db: &Path, dest: &Path) -> Result<(), rusqlite::Er
 
 /// Scan a (plaintext) backup ZIP for external entries whose live target already
 /// exists, so the UI can surface conflicts before any write.
-pub fn scan_external_conflicts(
-    zip_path: &Path,
-) -> Result<Vec<ExternalConflict>, AppCommandError> {
+pub fn scan_external_conflicts(zip_path: &Path) -> Result<Vec<ExternalConflict>, AppCommandError> {
     scan_external_conflicts_with_sources(zip_path, &external_transcript_sources())
 }
 
@@ -533,7 +528,12 @@ pub fn restore_external_from_staging(
     policy: ConflictPolicy,
     cancel: &CancellationToken,
 ) -> Result<ExternalRestoreReport, AppCommandError> {
-    restore_external_with_sources(staged_external, &external_transcript_sources(), policy, cancel)
+    restore_external_with_sources(
+        staged_external,
+        &external_transcript_sources(),
+        policy,
+        cancel,
+    )
 }
 
 fn restore_external_with_sources(
@@ -548,8 +548,9 @@ fn restore_external_with_sources(
         if cancel.is_cancelled() {
             return Err(cancelled_error());
         }
-        let entry = entry
-            .map_err(|e| AppCommandError::io_error("Walk staged transcripts").with_detail(e.to_string()))?;
+        let entry = entry.map_err(|e| {
+            AppCommandError::io_error("Walk staged transcripts").with_detail(e.to_string())
+        })?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -636,7 +637,11 @@ fn restore_one(
     // parent is a symlink — otherwise `create_dir_all`/rename would follow it
     // and write outside the agent's tree.
     if !parent_chain_is_safe(base, parent) {
-        tracing::warn!("[RESTORE] external: symlinked parent under {}, skipping {}", base.display(), target.display());
+        tracing::warn!(
+            "[RESTORE] external: symlinked parent under {}, skipping {}",
+            base.display(),
+            target.display()
+        );
         return FileOutcome::Failed;
     }
     if let Err(e) = std::fs::create_dir_all(parent) {
@@ -661,17 +666,25 @@ fn restore_one(
             // race. On a copy failure, remove the partial file we just created
             // so no half-written transcript is left at the live path.
             match OpenOptions::new().write(true).create_new(true).open(target) {
-                Ok(mut out) => match File::open(src).and_then(|mut i| std::io::copy(&mut i, &mut out)) {
-                    Ok(_) => FileOutcome::Written,
-                    Err(e) => {
-                        tracing::error!("[RESTORE] external: write {} failed: {e}", target.display());
-                        let _ = std::fs::remove_file(target);
-                        FileOutcome::Failed
+                Ok(mut out) => {
+                    match File::open(src).and_then(|mut i| std::io::copy(&mut i, &mut out)) {
+                        Ok(_) => FileOutcome::Written,
+                        Err(e) => {
+                            tracing::error!(
+                                "[RESTORE] external: write {} failed: {e}",
+                                target.display()
+                            );
+                            let _ = std::fs::remove_file(target);
+                            FileOutcome::Failed
+                        }
                     }
-                },
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => FileOutcome::Skipped,
                 Err(e) => {
-                    tracing::error!("[RESTORE] external: create {} failed: {e}", target.display());
+                    tracing::error!(
+                        "[RESTORE] external: create {} failed: {e}",
+                        target.display()
+                    );
                     FileOutcome::Failed
                 }
             }
@@ -680,7 +693,10 @@ fn restore_one(
             // Write to a same-dir temp file, then publish by rename so the final
             // path never holds a partially-written file. The temp is cleaned up
             // on any failure.
-            let tmp = parent.join(format!(".codeg-ext-{}.part", uuid::Uuid::new_v4().simple()));
+            let tmp = parent.join(format!(
+                ".harness-studio-ext-{}.part",
+                uuid::Uuid::new_v4().simple()
+            ));
             let write = (|| -> std::io::Result<()> {
                 let mut out = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
                 let mut input = File::open(src)?;
@@ -688,7 +704,10 @@ fn restore_one(
                 Ok(())
             })();
             if let Err(e) = write {
-                tracing::error!("[RESTORE] external: stage temp for {} failed: {e}", target.display());
+                tracing::error!(
+                    "[RESTORE] external: stage temp for {} failed: {e}",
+                    target.display()
+                );
                 let _ = std::fs::remove_file(&tmp);
                 return FileOutcome::Failed;
             }
@@ -698,7 +717,10 @@ fn restore_one(
                 let _ = std::fs::remove_file(target);
             }
             if let Err(e) = std::fs::rename(&tmp, target) {
-                tracing::error!("[RESTORE] external: publish {} failed: {e}", target.display());
+                tracing::error!(
+                    "[RESTORE] external: publish {} failed: {e}",
+                    target.display()
+                );
                 let _ = std::fs::remove_file(&tmp);
                 return FileOutcome::Failed;
             }
@@ -729,7 +751,10 @@ fn restore_one(
 /// `MoveFileEx` are ordered, journalled NTFS metadata transactions, so the
 /// barrier is compiled out.
 fn publish_sqlite(src: &Path, target: &Path, parent: &Path) -> FileOutcome {
-    let tmp = parent.join(format!(".codeg-ext-{}.part", uuid::Uuid::new_v4().simple()));
+    let tmp = parent.join(format!(
+        ".harness-studio-ext-{}.part",
+        uuid::Uuid::new_v4().simple()
+    ));
     // 1. The replacement is fully on disk before anything live is touched.
     let staged = (|| -> std::io::Result<()> {
         let mut out = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
@@ -760,7 +785,10 @@ fn publish_sqlite(src: &Path, target: &Path, parent: &Path) -> FileOutcome {
             Ok(()) => dismantled = true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                tracing::error!("[RESTORE] external: remove {} failed: {e}", victim.display());
+                tracing::error!(
+                    "[RESTORE] external: remove {} failed: {e}",
+                    victim.display()
+                );
                 return fail_publication(&tmp, target, dismantled);
             }
         }
@@ -781,7 +809,10 @@ fn publish_sqlite(src: &Path, target: &Path, parent: &Path) -> FileOutcome {
     // 5. Single rename — the archive holds exactly one file per store, so
     //    there is no multi-file publication to be interrupted halfway.
     if let Err(e) = std::fs::rename(&tmp, target) {
-        tracing::error!("[RESTORE] external: publish {} failed: {e}", target.display());
+        tracing::error!(
+            "[RESTORE] external: publish {} failed: {e}",
+            target.display()
+        );
         return fail_publication(&tmp, target, dismantled);
     }
     // Past the point of no return: the new database is in place, so a failure
@@ -986,7 +1017,8 @@ mod tests {
         assert_eq!(base, store.root);
         assert_eq!(target, store.root.join("objects").join("aa").join(&hex));
         assert!(
-            map_external_to_target("external/deepseek-attachments/tmp/staged", store_only).is_none()
+            map_external_to_target("external/deepseek-attachments/tmp/staged", store_only)
+                .is_none()
         );
         assert!(map_external_to_target(
             "external/deepseek-attachments/request-images/aa/bb",
@@ -1049,13 +1081,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // SkipExisting: conflict reported + untouched; fresh file restored.
-        let report = restore_external_with_sources(
-            &staged,
-            &sources,
-            ConflictPolicy::SkipExisting,
-            &cancel,
-        )
-        .unwrap();
+        let report =
+            restore_external_with_sources(&staged, &sources, ConflictPolicy::SkipExisting, &cancel)
+                .unwrap();
         assert_eq!(report.skipped_conflicts.len(), 1);
         assert!(report.skipped_conflicts[0].ends_with("exists.jsonl"));
         assert_eq!(
@@ -1224,7 +1252,7 @@ mod tests {
         let manifest = b
             .finish(crate::commands::backup::manifest::BackupManifest {
                 format_version: 1,
-                kind: "codeg-backup".to_string(),
+                kind: "harness-studio-backup".to_string(),
                 created_at: String::new(),
                 app_version: String::new(),
                 latest_migration: String::new(),
@@ -1330,7 +1358,7 @@ mod tests {
         assert_eq!(snap_rowids, source_rowids);
     }
 
-    /// Backing up must not write into a store codeg does not own — not the
+    /// Backing up must not write into a store harness_studio does not own — not the
     /// database, and not a `-wal`/`-shm` created as a side effect of opening
     /// it for writing.
     #[cfg(unix)]
@@ -1562,7 +1590,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!sidecar_of(&live_db, "-wal").exists(), "the wal was removed");
+        assert!(
+            !sidecar_of(&live_db, "-wal").exists(),
+            "the wal was removed"
+        );
         let preserved: Vec<PathBuf> = std::fs::read_dir(&live_dir)
             .unwrap()
             .filter_map(|e| e.ok())

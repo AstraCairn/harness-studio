@@ -35,8 +35,8 @@ use std::sync::Arc;
 
 use crate::acp::manager::ConnectionManager;
 use crate::acp::types::{AcpEvent, DelegationResultSummary};
+use crate::events::emit_with_state;
 use crate::models::AgentType;
-use crate::web::event_bridge::emit_with_state;
 
 /// Capability the broker uses to publish `AcpEvent::DelegationCompleted`
 /// against the parent connection's event stream.

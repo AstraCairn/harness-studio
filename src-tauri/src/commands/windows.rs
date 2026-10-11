@@ -825,10 +825,7 @@ pub async fn open_import_sessions_window(
             );
             let target_path = format!("/{route}");
             let target_json = serde_json::to_string(&target_path).map_err(|e| {
-                AppCommandError::window(
-                    "Failed to build import navigation target",
-                    e.to_string(),
-                )
+                AppCommandError::window("Failed to build import navigation target", e.to_string())
             })?;
             existing
                 .eval(format!("window.location.replace({target_json});"))
@@ -1084,8 +1081,8 @@ pub async fn cleanup_dangling_merge(app: &AppHandle, merge_window_label: &str) {
             .output()
             .await;
 
-        let emitter = crate::web::event_bridge::EventEmitter::Tauri(app.clone());
-        crate::web::event_bridge::emit_event(
+        let emitter = crate::events::EventEmitter::Tauri(app.clone());
+        crate::events::emit_event(
             &emitter,
             "folder://merge-aborted",
             serde_json::json!({ "folder_id": folder_id }),
@@ -1391,7 +1388,7 @@ pub async fn open_pet_window(
 
     let url = WebviewUrl::App(format!("pet?petId={pet_id}").into());
     let mut builder = WebviewWindowBuilder::new(&app, PET_WINDOW_LABEL, url)
-        .title("codeg pet")
+        .title("harness studio pet")
         .inner_size(PET_BASE_WIDTH * scale, PET_BASE_HEIGHT * scale)
         .min_inner_size(PET_BASE_WIDTH * 0.5, PET_BASE_HEIGHT * 0.5)
         .max_inner_size(PET_BASE_WIDTH * 3.0, PET_BASE_HEIGHT * 3.0)
@@ -1724,7 +1721,7 @@ fn open_pet_panel_window(app: &AppHandle) -> Result<(), AppCommandError> {
 
     let url = WebviewUrl::App("pet-panel".into());
     let builder = WebviewWindowBuilder::new(app, PET_PANEL_LABEL, url)
-        .title("codeg sessions")
+        .title("harness_studio sessions")
         .inner_size(PET_PANEL_WIDTH, PET_PANEL_DEFAULT_HEIGHT)
         .position(panel_x, panel_y)
         .resizable(false)
@@ -1771,7 +1768,16 @@ pub async fn resize_pet_panel(app: AppHandle, height: f64) -> Result<(), AppComm
     let panel_h = height.clamp(PET_PANEL_MIN_HEIGHT, max_h);
 
     let (panel_x, panel_y) = compute_pet_panel_origin(
-        px, py, pw, ph, mon_x, mon_y, mon_w, mon_h, PET_PANEL_WIDTH, panel_h,
+        px,
+        py,
+        pw,
+        ph,
+        mon_x,
+        mon_y,
+        mon_w,
+        mon_h,
+        PET_PANEL_WIDTH,
+        panel_h,
     );
 
     // Size before reposition so the re-anchor uses the final height. Errors are
@@ -1788,7 +1794,7 @@ pub async fn resize_pet_panel(app: AppHandle, height: f64) -> Result<(), AppComm
 /// conversation. Uses an event (not a URL reload) so the in-memory tab/session
 /// state survives — `PetFocusBridge` in the main window calls `openTab`.
 ///
-/// Only the pet panel calls this. A `codeg://` OS deep link cannot: the emit
+/// Only the pet panel calls this. A `harnessstudio://` OS deep link cannot: the emit
 /// reaches only webviews that have *already* registered a JS listener, which
 /// on a cold start is none of them — see `deep_link::PENDING_FOCUS` for the
 /// handoff that path uses instead.
@@ -2014,7 +2020,7 @@ fn load_macos_tray_template_icon() -> Result<tauri::image::Image<'static>, Strin
 pub const TRAY_MENU_ID_PREFIX: &str = "tray:";
 pub const TRAY_MENU_ID_SHOW: &str = "tray:show";
 pub const TRAY_MENU_ID_QUIT: &str = "tray:quit";
-pub const TRAY_ICON_ID: &str = "codeg-tray";
+pub const TRAY_ICON_ID: &str = "harness-studio-tray";
 
 /// True after `install_tray_icon` returns `Ok`. The hide-on-close path
 /// in `lib.rs` consults this so we don't strand the user on systems
@@ -2250,10 +2256,7 @@ pub(crate) fn with_macos_fullscreen_drained(
 /// Exit native fullscreen and wait until the Space is gone, then run `then`
 /// on the main thread.
 #[cfg(target_os = "macos")]
-fn drain_macos_fullscreen_then(
-    window: tauri::WebviewWindow,
-    then: impl FnOnce() + Send + 'static,
-) {
+fn drain_macos_fullscreen_then(window: tauri::WebviewWindow, then: impl FnOnce() + Send + 'static) {
     let Some(generation) = claim_macos_fullscreen_drain() else {
         return;
     };
@@ -2370,43 +2373,43 @@ fn tray_labels_for(locale: crate::models::system::AppLocale) -> TrayLabels {
     match locale {
         AppLocale::ZhCn => TrayLabels {
             show_workspace: "显示工作台",
-            quit: "退出 Codeg",
+            quit: "退出 harness studio",
         },
         AppLocale::ZhTw => TrayLabels {
             show_workspace: "顯示工作臺",
-            quit: "退出 Codeg",
+            quit: "退出 harness studio",
         },
         AppLocale::Ja => TrayLabels {
             show_workspace: "ワークスペースを表示",
-            quit: "Codeg を終了",
+            quit: "harness studio を終了",
         },
         AppLocale::Ko => TrayLabels {
             show_workspace: "워크스페이스 표시",
-            quit: "Codeg 종료",
+            quit: "harness studio 종료",
         },
         AppLocale::Es => TrayLabels {
             show_workspace: "Mostrar el área de trabajo",
-            quit: "Salir de Codeg",
+            quit: "Salir de harness studio",
         },
         AppLocale::De => TrayLabels {
             show_workspace: "Arbeitsbereich anzeigen",
-            quit: "Codeg beenden",
+            quit: "harness studio beenden",
         },
         AppLocale::Fr => TrayLabels {
             show_workspace: "Afficher l'espace de travail",
-            quit: "Quitter Codeg",
+            quit: "Quitter harness studio",
         },
         AppLocale::Pt => TrayLabels {
             show_workspace: "Mostrar área de trabalho",
-            quit: "Sair do Codeg",
+            quit: "Sair do harness studio",
         },
         AppLocale::Ar => TrayLabels {
             show_workspace: "إظهار مساحة العمل",
-            quit: "إنهاء Codeg",
+            quit: "إنهاء harness studio",
         },
         AppLocale::En => TrayLabels {
             show_workspace: "Show Workspace",
-            quit: "Quit Codeg",
+            quit: "Quit harness studio",
         },
     }
 }
@@ -2439,7 +2442,7 @@ pub fn install_tray_icon(
         .build()?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
-        .tooltip("Codeg")
+        .tooltip("harness studio")
         .menu(&menu)
         // `false` is required for `on_tray_icon_event::Click` to fire on
         // every platform we ship: the default `true` causes the OS to
@@ -2560,7 +2563,10 @@ mod owner_window_tests {
         state.set_owner("settings".to_string(), "main".to_string());
         state.set_owner("settings".to_string(), "remote-workspace-3".to_string());
 
-        assert_eq!(state.take_owner("settings").as_deref(), Some("remote-workspace-3"));
+        assert_eq!(
+            state.take_owner("settings").as_deref(),
+            Some("remote-workspace-3")
+        );
     }
 
     // Same hand-back-once contract for the shared map, which stash, push,
@@ -2585,7 +2591,10 @@ mod owner_window_tests {
         state.set_owner("import-sessions".to_string(), "main".to_string());
 
         assert_eq!(state.take_owner("stash-7").as_deref(), Some("main"));
-        assert_eq!(state.take_owner("push-7").as_deref(), Some("remote-workspace-3"));
+        assert_eq!(
+            state.take_owner("push-7").as_deref(),
+            Some("remote-workspace-3")
+        );
         assert_eq!(state.take_owner("project-boot").as_deref(), Some("main"));
         assert_eq!(state.take_owner("import-sessions").as_deref(), Some("main"));
     }
@@ -2613,7 +2622,10 @@ mod owner_window_tests {
         state.set_owner("stash-7".to_string(), "main".to_string());
         state.set_owner("stash-7".to_string(), "remote-workspace-3".to_string());
 
-        assert_eq!(state.take_owner("stash-7").as_deref(), Some("remote-workspace-3"));
+        assert_eq!(
+            state.take_owner("stash-7").as_deref(),
+            Some("remote-workspace-3")
+        );
     }
 }
 
@@ -2646,7 +2658,11 @@ mod pet_panel_geometry_tests {
     fn places_above_and_aligns_right_edge() {
         // Pet low on screen: the panel sits above it, gap included.
         let (x, y) = origin(1000.0, 900.0, 380.0);
-        assert_eq!(y, 900.0 - 380.0 - PET_PANEL_GAP, "panel bottom hugs pet top");
+        assert_eq!(
+            y,
+            900.0 - 380.0 - PET_PANEL_GAP,
+            "panel bottom hugs pet top"
+        );
         // Right edges align: panel_x = pet_right - panel_w.
         assert_eq!(x, (1000.0 + PET_W) - PET_PANEL_WIDTH);
     }
@@ -2712,8 +2728,8 @@ mod settings_route_tests {
     /// to a real route. `general` is the one that looks redundant and is not:
     /// the fallback below it is Appearance, so a caller wanting the General
     /// page must be able to name it and land there. `collaboration` is where
-    /// the codeg-mcp tool switches live in full, and it is what the status-bar
-    /// codeg-mcp popover links to; `computer-use` is what the Computer use
+    /// the harness-studio-mcp tool switches live in full, and it is what the status-bar
+    /// harness-studio-mcp popover links to; `computer-use` is what the Computer use
     /// popover links to.
     #[test]
     fn every_named_settings_section_resolves_to_its_own_route() {

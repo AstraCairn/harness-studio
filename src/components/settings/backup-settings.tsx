@@ -275,7 +275,12 @@ export function BackupSettings({ pane }: { pane: DataSyncPane }) {
     const { open } = await import("@tauri-apps/plugin-dialog")
     const picked = await open({
       multiple: false,
-      filters: [{ name: "Codeg backup", extensions: ["codegbak", "zip"] }],
+      filters: [
+        {
+          name: "harness studio backup",
+          extensions: ["harness_studiobak", "zip"],
+        },
+      ],
     })
     if (typeof picked !== "string") return
     releasePrepared(restoreSource?.sourceId)
@@ -640,7 +645,7 @@ export function BackupSettings({ pane }: { pane: DataSyncPane }) {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".codegbak,.zip,application/zip"
+              accept=".harness_studiobak,.zip,application/zip"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]

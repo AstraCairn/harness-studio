@@ -202,7 +202,7 @@ pub struct CustomAgentDef {
     /// User declaration that this agent reads the shared `.agents/skills`
     /// store (`~/.agents/skills` plus project-local `.agents/skills`) — the
     /// cross-agent convention OpenCode, Gemini, Cline, Codex, pi, and Cursor
-    /// already follow. codeg cannot detect where an arbitrary ACP agent loads
+    /// already follow. harness_studio cannot detect where an arbitrary ACP agent loads
     /// skills from, so this stays off until the user turns it on; together
     /// with [`Self::skills_dir`] it is the gate that puts the agent into
     /// every skills matrix (see `skill_storage_spec`).
@@ -230,17 +230,20 @@ pub struct CustomAgentDef {
     pub version_probe: Option<String>,
     /// User declaration that the agent accepts MCP servers over the ACP wire
     /// (`session/new`'s `mcpServers`) — which, for a custom agent, means the
-    /// built-in codeg-mcp companion (delegation, live feedback, task tools).
+    /// built-in harness-studio-mcp companion (delegation, live feedback, task tools).
     ///
     /// Not every ACP agent does: some reject any entry in that field and fail
-    /// session creation outright, so a custom agent that codeg cannot connect
+    /// session creation outright, so a custom agent that harness_studio cannot connect
     /// to at all is turned off here (OpenClaw is the built-in precedent — see
     /// [`AcpAgentMeta::supports_mcp`], the single gate both feed).
     ///
     /// Defaults ON, and is skipped when serializing at that default, so
     /// definitions stored before this field existed keep both their behaviour
     /// and their fingerprint.
-    #[serde(default = "default_supports_mcp", skip_serializing_if = "is_default_supports_mcp")]
+    #[serde(
+        default = "default_supports_mcp",
+        skip_serializing_if = "is_default_supports_mcp"
+    )]
     pub supports_mcp: bool,
 }
 
@@ -361,7 +364,7 @@ impl std::error::Error for CustomAgentError {}
 /// Whether `s` is usable as ONE directory name.
 ///
 /// The version label becomes a path segment of the binary cache
-/// (`binary_cache::binary_dir`), which codeg also *deletes* when reinstalling —
+/// (`binary_cache::binary_dir`), which harness_studio also *deletes* when reinstalling —
 /// so a definition must not be able to steer it out of the cache. Mirrors
 /// `acp_transcript::safe_component`, and deliberately rejects a Windows drive
 /// or alternate-data-stream prefix (`C:`, `f:s`) too, which `Path::is_absolute`
@@ -552,7 +555,7 @@ pub fn build_meta(def: &CustomAgentDef) -> Result<AcpAgentMeta, CustomAgentError
     Ok(AcpAgentMeta {
         agent_type,
         // MCP is forwarded over the ACP wire (`session/new`'s `mcpServers`) —
-        // for a custom agent, the codeg-mcp companion is the whole of it. On
+        // for a custom agent, the harness-studio-mcp companion is the whole of it. On
         // by default; the user turns it off for an agent that rejects server
         // entries and fails to connect (see `CustomAgentDef::supports_mcp`).
         // Built-ins declare the same flag as a constant, where OpenClaw is the
@@ -641,7 +644,7 @@ fn build_binary_distribution(
         Some(BinaryDirEntry {
             unix: intern(&unix),
             windows: intern(&windows),
-            // The ACP registry has no field for this, and codeg cannot know
+            // The ACP registry has no field for this, and harness_studio cannot know
             // which files an arbitrary agent's entry execs — so a custom
             // agent's tree is validated by its entry alone.
             required_siblings: crate::acp::registry::PlatformFiles::NONE,
@@ -958,10 +961,16 @@ mod tests {
 
     #[test]
     fn derives_command_names_from_package_specs() {
-        assert_eq!(derive_command_name("@qwen-code/qwen-code@0.21.0"), "qwen-code");
+        assert_eq!(
+            derive_command_name("@qwen-code/qwen-code@0.21.0"),
+            "qwen-code"
+        );
         assert_eq!(derive_command_name("@github/copilot@1.0.75"), "copilot");
         assert_eq!(derive_command_name("cline@3.0.46"), "cline");
-        assert_eq!(derive_command_name("fast-agent-acp==0.9.24"), "fast-agent-acp");
+        assert_eq!(
+            derive_command_name("fast-agent-acp==0.9.24"),
+            "fast-agent-acp"
+        );
         assert_eq!(
             derive_command_name("hermes-agent[acp,mcp]==0.19.0"),
             "hermes-agent"
@@ -1037,7 +1046,10 @@ mod tests {
 
         let mut empty_name = npx_def("qwen-code");
         empty_name.name = "   ".into();
-        assert_eq!(build_meta(&empty_name).unwrap_err(), CustomAgentError::EmptyName);
+        assert_eq!(
+            build_meta(&empty_name).unwrap_err(),
+            CustomAgentError::EmptyName
+        );
 
         let mut wrong_channel = npx_def("qwen-code");
         wrong_channel.distribution_kind = CustomDistributionKind::Uvx;
@@ -1126,9 +1138,7 @@ mod tests {
     fn nested_archive_entry_switches_to_dir_tree_extraction() {
         let meta = build_meta(&binary_def("dist-package/agent", None)).expect("valid");
         match meta.distribution {
-            AgentDistribution::Binary {
-                cmd, dir_entry, ..
-            } => {
+            AgentDistribution::Binary { cmd, dir_entry, .. } => {
                 assert_eq!(cmd, "agent");
                 let entry = dir_entry.expect("nested entry must extract the whole tree");
                 assert_eq!(entry.unix, "dist-package/agent");
@@ -1195,7 +1205,13 @@ mod tests {
             );
         }
         // The registry's real spellings still work.
-        for ok in ["./goose", "goose", "dist-package/cursor-agent", "amp-acp.exe", ""] {
+        for ok in [
+            "./goose",
+            "goose",
+            "dist-package/cursor-agent",
+            "amp-acp.exe",
+            "",
+        ] {
             let def = binary_def(ok, None);
             assert!(
                 validate(&def).is_ok(),
@@ -1318,7 +1334,10 @@ mod tests {
         // Re-hydrating an unchanged definition must reuse the SAME leak.
         assert!(hydrate(std::slice::from_ref(&def)).is_empty());
         let second = get("hydrate-test-agent").expect("still registered");
-        assert!(std::ptr::eq(first, second), "unchanged def must not re-leak");
+        assert!(
+            std::ptr::eq(first, second),
+            "unchanged def must not re-leak"
+        );
 
         // Hydrating an empty set unregisters everything.
         assert!(hydrate(&[]).is_empty());
@@ -1355,7 +1374,10 @@ mod tests {
         // An unregistered (deleted) id reads as all-off — a phantom column
         // must not survive its agent.
         assert!(hydrate(&[]).is_empty());
-        assert_eq!(skills_decl("skills-flag-agent"), CustomSkillsDecl::default());
+        assert_eq!(
+            skills_decl("skills-flag-agent"),
+            CustomSkillsDecl::default()
+        );
     }
 
     #[test]
@@ -1392,7 +1414,7 @@ mod tests {
         let _guard = hydrate_guard();
         let mut def = npx_def("mcp-flag-agent");
         // On unless the user says otherwise: this is the gate
-        // `connection.rs` reads to decide whether codeg-mcp goes out on
+        // `connection.rs` reads to decide whether harness-studio-mcp goes out on
         // `session/new`.
         assert!(build_meta(&def).expect("valid").supports_mcp);
 

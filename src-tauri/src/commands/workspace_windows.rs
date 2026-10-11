@@ -1,4 +1,4 @@
-//! Reopening the workspace windows that were open when codeg last quit.
+//! Reopening the workspace windows that were open when harness_studio last quit.
 //!
 //! A workspace window is the local `main` window or a remote workspace window
 //! (`remote-workspace-{id}`, at most one per saved remote connection). The
@@ -154,7 +154,7 @@ struct RestorePlan {
 
 /// `remembered` is the stored list; `connection_exists` weeds out the remote
 /// connections deleted since. `local_requested` is a launch that asked for the
-/// local workspace itself (a `codeg://` link on the command line), and
+/// local workspace itself (a `harnessstudio://` link on the command line), and
 /// `local_can_hide` whether `main` can be hidden at all this launch — where it
 /// cannot, a hidden `main` would have nothing to bring it back.
 fn plan_restore(
@@ -941,12 +941,7 @@ mod tests {
         assert!(restore.show_local());
         assert!(restore.plan.remotes.is_empty());
         assert_eq!(restore.plan.front, LOCAL);
-        let names: Vec<&str> = restore
-            .connections
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["two", "one"]);
+        assert!(restore.connections.is_empty());
 
         // A connection deleted before the next launch is not reopened.
         remote_workspace_connection_service::delete(&db.conn, one.id)

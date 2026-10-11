@@ -156,7 +156,7 @@ fn file_name_of(path: &Path) -> String {
 
 /// Where downloads land: the OS download folder, else `~/Downloads`. Not
 /// configurable in this pass, and deliberately NOT inside the app's data
-/// directory — a downloaded file belongs to the user, not to codeg.
+/// directory — a downloaded file belongs to the user, not to harness_studio.
 pub fn downloads_dir() -> PathBuf {
     if let Some(dir) = dirs::download_dir() {
         return dir;
@@ -471,15 +471,23 @@ mod tests {
         downloads.push(record("dl-3", "https://example.com/a"));
 
         let done = downloads
-            .finish("https://example.com/a", true, Some(PathBuf::from("/tmp/z.bin")))
+            .finish(
+                "https://example.com/a",
+                true,
+                Some(PathBuf::from("/tmp/z.bin")),
+            )
             .unwrap();
         assert_eq!(done.id, "dl-1");
         assert_eq!(done.state, DownloadState::Completed);
         assert_eq!(done.file_name, "z.bin");
-        let again = downloads.finish("https://example.com/a", false, None).unwrap();
+        let again = downloads
+            .finish("https://example.com/a", false, None)
+            .unwrap();
         assert_eq!(again.id, "dl-3");
         assert_eq!(again.state, DownloadState::Failed);
-        assert!(downloads.finish("https://example.com/a", true, None).is_none());
+        assert!(downloads
+            .finish("https://example.com/a", true, None)
+            .is_none());
         // A failed download keeps the path it was going to be written to.
         assert_eq!(again.path, "/tmp/dl-3.bin");
 

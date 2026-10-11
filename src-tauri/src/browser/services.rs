@@ -1,4 +1,4 @@
-//! The local servers codeg has seen start, and telling the workspace about a
+//! The local servers harness_studio has seen start, and telling the workspace about a
 //! new one.
 //!
 //! `service_url` reads an address out of terminal output; everything here is
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use super::service_url::{ServiceCandidate, ServiceScanner};
 use super::types::{DetectedService, ServiceSource, SERVICE_DETECTED_EVENT};
-use crate::web::event_bridge::{emit_event, EventEmitter};
+use crate::events::{emit_event, EventEmitter};
 
 /// How long one connection attempt waits. Loopback either answers at once or
 /// refuses at once; this only has to cover a server mid-`accept` backlog.
@@ -224,7 +224,10 @@ impl ServiceRegistry {
             .partition(|(_, alive)| *alive);
         self.forget(
             owner_window,
-            &dead.into_iter().map(|(service, _)| service).collect::<Vec<_>>(),
+            &dead
+                .into_iter()
+                .map(|(service, _)| service)
+                .collect::<Vec<_>>(),
         );
         live.into_iter().map(|(service, _)| service).collect()
     }
@@ -402,8 +405,16 @@ mod tests {
         drop(dead);
 
         let registry = ServiceRegistry::new();
-        registry.record(service(&format!("http://127.0.0.1:{live_port}"), "t1", "main"));
-        registry.record(service(&format!("http://127.0.0.1:{dead_port}"), "t2", "main"));
+        registry.record(service(
+            &format!("http://127.0.0.1:{live_port}"),
+            "t1",
+            "main",
+        ));
+        registry.record(service(
+            &format!("http://127.0.0.1:{dead_port}"),
+            "t2",
+            "main",
+        ));
 
         let live = registry.list_live("main");
         assert_eq!(live.len(), 1);

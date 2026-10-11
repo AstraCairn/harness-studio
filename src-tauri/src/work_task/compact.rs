@@ -16,7 +16,7 @@ use crate::models::agent::AgentType;
 
 /// Slash-command names that mean "compact this session", most preferred first.
 /// Matched against what the live session actually advertises, so an agent that
-/// spells it `/compress` is handled without codeg knowing that agent by name.
+/// spells it `/compress` is handled without harness_studio knowing that agent by name.
 const COMPACTION_COMMAND_NAMES: &[&str] = &["compact", "compress", "summarize", "summarise"];
 
 /// The compact command for an agent that advertises no matching slash command.
@@ -203,7 +203,10 @@ mod tests {
 
     #[test]
     fn a_transcript_only_counts_for_the_session_actually_connected() {
-        assert!(transcript_describes_live_session(Some("sess-a"), Some("sess-a")));
+        assert!(transcript_describes_live_session(
+            Some("sess-a"),
+            Some("sess-a")
+        ));
         // The row still names the session the launch asked to resume while the
         // connection is holding a fresh one — measuring the first and
         // compacting the second is the failure this guard exists for.

@@ -7,25 +7,23 @@ use crate::acp::manager::ConnectionManager;
 use crate::acp::InternalEventBus;
 use crate::chat_channel::manager::ChatChannelManager;
 use crate::db::AppDatabase;
+use crate::events::{EventBroadcaster, EventEmitter};
 use crate::pet_state_mapper::PetStateHandle;
 use crate::terminal::manager::TerminalManager;
-use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
-use crate::web::WebServerState;
 use crate::workspace_transfer::WorkspaceTransferManager;
 
 pub struct AppState {
     pub db: AppDatabase,
     pub connection_manager: ConnectionManager,
     pub terminal_manager: TerminalManager,
-    pub event_broadcaster: Arc<WebEventBroadcaster>,
+    pub event_broadcaster: Arc<EventBroadcaster>,
     /// Process-wide bus for typed `Arc<EventEnvelope>` delivery to
     /// in-process consumers (lifecycle, pet state mapper, chat-channel
     /// subscribers). Distinct from `event_broadcaster`, which carries
-    /// JSON-shaped `WebEvent`s for transport-bound delivery.
+    /// JSON-shaped `AppEvent`s for transport-bound delivery.
     pub acp_event_bus: Arc<InternalEventBus>,
     pub emitter: EventEmitter,
     pub data_dir: PathBuf,
-    pub web_server_state: WebServerState,
     pub chat_channel_manager: ChatChannelManager,
     pub workspace_transfer: Arc<WorkspaceTransferManager>,
     /// Latest ambient `PetState` written by `pet_state_subscriber_task`.
@@ -39,10 +37,10 @@ pub struct AppState {
     pub delegation_broker: Arc<DelegationBroker>,
     /// Per-launch ephemeral tokens identifying parent ACP connections.
     /// Registered when `load_mcp_servers_for_agent` injects the
-    /// `codeg-mcp` MCP entry, revoked on parent teardown.
+    /// `harness-studio-mcp` MCP entry, revoked on parent teardown.
     pub delegation_tokens: Arc<TokenRegistry>,
     /// Absolute path of the UDS / named pipe the companion connects to.
-    /// PID-scoped so multiple codeg processes on the same host don't fight.
+    /// PID-scoped so multiple harness_studio processes on the same host don't fight.
     pub delegation_socket_path: PathBuf,
     /// Hot-swappable live-feedback (`check_user_feedback`) enable flag. Shared
     /// with the `DelegationInjection` so MCP injection reads it, and updated by
@@ -81,8 +79,8 @@ pub struct AppState {
     /// when the group is switched off. Carried in both runtimes for the same
     /// reason as `browser_tools_config`: one setting, one popover.
     pub computer_tools_config: crate::acp::computer_tools::ComputerToolsRuntimeConfig,
-    /// codeg-server's computer service, where the person who runs it has let
-    /// it share the screen it runs on (`CODEG_COMPUTER_USE`) — set once,
+    /// harness-studio-server's computer service, where the person who runs it has let
+    /// it share the screen it runs on (`HARNESS_STUDIO_COMPUTER_USE`) — set once,
     /// after the persisted settings are applied. Never set in the desktop
     /// app's web service: its screen is shared from the desktop window.
     pub computer_service: std::sync::OnceLock<Arc<crate::commands::computer::ComputerService>>,
@@ -119,7 +117,7 @@ pub fn default_chat_channel_manager() -> ChatChannelManager {
 }
 
 /// Build the delegation broker + token registry + per-process UDS socket
-/// path. Shared between codeg-server bootstrap and the Tauri `setup` block
+/// path. Shared between harness-studio-server bootstrap and the Tauri `setup` block
 /// so both modes apply identical depth limit + timeout defaults.
 ///
 /// The listener task is _not_ spawned here — callers spawn it after they
@@ -166,10 +164,9 @@ pub fn build_delegation_stack(
     }) as Arc<dyn ConnectionSpawner>;
     let depth_lookup =
         Arc::new(DbDepthLookup { db: db_arc.clone() }) as Arc<dyn ConversationDepthLookup>;
-    let agent_availability = Arc::new(crate::acp::connection::DbAgentAvailabilityLookup {
-        db: db_arc.clone(),
-    })
-        as Arc<dyn crate::acp::connection::AgentAvailabilityLookup>;
+    let agent_availability =
+        Arc::new(crate::acp::connection::DbAgentAvailabilityLookup { db: db_arc.clone() })
+            as Arc<dyn crate::acp::connection::AgentAvailabilityLookup>;
     let status_lookup = Arc::new(DbChildStatusLookup { db: db_arc }) as Arc<dyn ChildStatusLookup>;
     let meta_writer = Arc::new(ConnectionManagerMetaWriter {
         manager: cm_arc.clone(),
@@ -219,13 +216,21 @@ pub fn build_delegation_stack(
     });
 
     (
-        broker, tokens, socket_path, feedback, ask, sessions, authoring, browser, computer,
+        broker,
+        tokens,
+        socket_path,
+        feedback,
+        ask,
+        sessions,
+        authoring,
+        browser,
+        computer,
     )
 }
 
 impl AppState {
     /// Test-only constructor: build an `AppState` wired to an in-memory
-    /// database and a `WebOnly` event emitter. Suitable for axum-test driven
+    /// database and a `Local` event emitter. Suitable for axum-test driven
     /// HTTP integration tests where no Tauri runtime is available.
     ///
     /// `data_dir` is a temp directory; handlers that touch it must use
@@ -233,12 +238,12 @@ impl AppState {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_test(db: crate::db::AppDatabase, data_dir: PathBuf) -> Self {
         use crate::acp::{EventBusMetrics, InternalEventBus};
-        use crate::web::event_bridge::WebEventBroadcaster;
+        use crate::events::EventBroadcaster;
 
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let metrics = Arc::new(EventBusMetrics::default());
         let acp_event_bus = Arc::new(InternalEventBus::new(metrics));
-        let emitter = EventEmitter::web_only(broadcaster.clone(), acp_event_bus.clone());
+        let emitter = EventEmitter::local(broadcaster.clone(), acp_event_bus.clone());
 
         let connection_manager = default_connection_manager();
         let (
@@ -261,7 +266,6 @@ impl AppState {
             acp_event_bus,
             emitter,
             data_dir,
-            web_server_state: crate::web::WebServerState::new(),
             chat_channel_manager: default_chat_channel_manager(),
             workspace_transfer: Arc::new(
                 crate::workspace_transfer::WorkspaceTransferManager::new_for_tests(

@@ -40,7 +40,7 @@ fn system_tag_regex() -> &'static Regex {
 /// (`lib/background-agent.ts`) splits on it and renders a lifecycle card;
 /// anything else renders the preview verbatim, so the prefix must never occur
 /// in organic tool output.
-pub(crate) const BACKGROUND_TASK_MARKER: &str = "[[codeg-background-task]]";
+pub(crate) const BACKGROUND_TASK_MARKER: &str = "[[harness-studio-background-task]]";
 
 /// Cap for the folded `<result>` markdown carried on the lifecycle marker —
 /// generous for a sub-agent summary, bounded against a pathological one. Also
@@ -219,10 +219,9 @@ enum PendingCommandVerdict {
 /// The stripping requirement excludes the `<local-command-caveat>` the CLI
 /// writes around local commands — same submission, but it instructs nothing.
 fn is_same_submission_injection(value: &serde_json::Value, prompt_id: Option<&str>) -> bool {
-    let (Some(command_prompt_id), Some(record_prompt_id)) = (
-        prompt_id,
-        value.get("promptId").and_then(|p| p.as_str()),
-    ) else {
+    let (Some(command_prompt_id), Some(record_prompt_id)) =
+        (prompt_id, value.get("promptId").and_then(|p| p.as_str()))
+    else {
         return false;
     };
     if command_prompt_id != record_prompt_id || !is_meta_message(value) {
@@ -339,9 +338,9 @@ fn pending_command_verdict(
                 .and_then(|c| c.as_array())
                 .is_some_and(|blocks| {
                     !blocks.is_empty()
-                        && blocks.iter().all(|b| {
-                            b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                        })
+                        && blocks
+                            .iter()
+                            .all(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                 });
             if tool_results_only || extract_user_content(value).is_empty() {
                 PendingCommandVerdict::Wait
@@ -520,7 +519,7 @@ fn push_goal_marker(messages: &mut Vec<UnifiedMessage>, goal: &PendingGoal) -> O
         duration_ms: None,
         model: None,
         completed_at: Some(goal.timestamp),
-    agent_message_id: None,
+        agent_message_id: None,
     });
     Some(marker.objective)
 }
@@ -930,9 +929,8 @@ fn compaction_post_tokens(turn: &MessageTurn) -> Option<u64> {
 /// usage.
 fn latest_claude_context_window_used_tokens(turns: &[MessageTurn]) -> Option<u64> {
     turns.iter().rev().find_map(|turn| {
-        compaction_post_tokens(turn).or_else(|| super::latest_turn_prompt_usage_tokens(
-            std::slice::from_ref(turn),
-        ))
+        compaction_post_tokens(turn)
+            .or_else(|| super::latest_turn_prompt_usage_tokens(std::slice::from_ref(turn)))
     })
 }
 
@@ -1235,7 +1233,6 @@ fn last_record_timestamp(path: &Path) -> Option<DateTime<Utc>> {
 }
 
 impl ClaudeParser {
-
     fn parse_jsonl_summary(
         &self,
         path: &PathBuf,
@@ -1854,7 +1851,7 @@ impl ClaudeRecordAccumulator {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     },
                     prompt_id,
                 ));
@@ -1878,26 +1875,15 @@ impl ClaudeRecordAccumulator {
                     .and_then(|c| c.as_str())
                 {
                     if raw.trim_start().starts_with("<task-notification>") {
-                        if let Some(task_id) =
-                            capture_tag(task_notification_task_id_regex(), raw)
-                        {
+                        if let Some(task_id) = capture_tag(task_notification_task_id_regex(), raw) {
                             background_notifications.insert(
                                 task_id,
                                 BackgroundNotification {
-                                    status: capture_tag(
-                                        task_notification_status_regex(),
-                                        raw,
-                                    )
-                                    .unwrap_or_else(|| "completed".to_string()),
-                                    summary: capture_tag(
-                                        task_notification_summary_regex(),
-                                        raw,
-                                    ),
-                                    result: capture_tag(
-                                        task_notification_result_regex(),
-                                        raw,
-                                    )
-                                    .map(|r| truncate_str(&r, BACKGROUND_RESULT_MAX_CHARS)),
+                                    status: capture_tag(task_notification_status_regex(), raw)
+                                        .unwrap_or_else(|| "completed".to_string()),
+                                    summary: capture_tag(task_notification_summary_regex(), raw),
+                                    result: capture_tag(task_notification_result_regex(), raw)
+                                        .map(|r| truncate_str(&r, BACKGROUND_RESULT_MAX_CHARS)),
                                 },
                             );
                         }
@@ -1988,17 +1974,14 @@ impl ClaudeRecordAccumulator {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                         {
-                            if let Some(ack_tool_use_id) =
-                                content.iter().find_map(|b| match b {
-                                    ContentBlock::ToolResult {
-                                        tool_use_id: Some(id),
-                                        ..
-                                    } => Some(id.clone()),
-                                    _ => None,
-                                })
-                            {
-                                background_acks
-                                    .insert(ack_tool_use_id, task_id.to_string());
+                            if let Some(ack_tool_use_id) = content.iter().find_map(|b| match b {
+                                ContentBlock::ToolResult {
+                                    tool_use_id: Some(id),
+                                    ..
+                                } => Some(id.clone()),
+                                _ => None,
+                            }) {
+                                background_acks.insert(ack_tool_use_id, task_id.to_string());
                             }
                         }
                     }
@@ -2017,8 +2000,7 @@ impl ClaudeRecordAccumulator {
                                 let subagent_path =
                                     subagent_dir.join(format!("agent-{}.jsonl", agent_id));
                                 if subagent_path.exists() {
-                                    stats.tool_calls =
-                                        parse_subagent_tool_calls(&subagent_path).0;
+                                    stats.tool_calls = parse_subagent_tool_calls(&subagent_path).0;
                                 }
                             }
                         }
@@ -2044,7 +2026,7 @@ impl ClaudeRecordAccumulator {
                     duration_ms: None,
                     model: None,
                     completed_at: Some(timestamp),
-                agent_message_id: None,
+                    agent_message_id: None,
                 });
             }
             "assistant" => {
@@ -2292,7 +2274,7 @@ impl ClaudeRecordAccumulator {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
             }
@@ -2413,7 +2395,7 @@ impl ClaudeRecordAccumulator {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
             }
@@ -2428,7 +2410,7 @@ impl ClaudeRecordAccumulator {
     /// `<task-notification>`:
     ///
     /// ```text
-    /// [[codeg-background-task]]{"task_id":…,"status":…,"summary":…,"result":…}
+    /// [[harness-studio-background-task]]{"task_id":…,"status":…,"summary":…,"result":…}
     /// ```
     ///
     /// `status` is null while no notification was observed — the frontend
@@ -3219,7 +3201,7 @@ fn parse_subagent_tool_calls(
 /// The frame is model-directed provenance: it tells the MODEL that the text
 /// below is a subagent's words and carries no user authority. Over ACP,
 /// `claude-agent-acp` 0.81.0 strips it (`unwrapHandbackFrame`) before the
-/// report reaches a client — but codeg's history path parses the CLI's own
+/// report reaches a client — but harness_studio's history path parses the CLI's own
 /// JSONL, where the frame is still sitting on the tool_result, so without this
 /// every subagent card in history opens with the whole paragraph and shows the
 /// report indented two spaces underneath.
@@ -3406,7 +3388,7 @@ pub(crate) fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else {
@@ -3419,7 +3401,7 @@ pub(crate) fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         }
@@ -3508,7 +3490,9 @@ mod tests {
         let text = handback(&[], &["real report", HANDBACK_HEADER, "still the report"]);
         assert_eq!(
             unwrap_handback_frame(&text).as_deref(),
-            Some(&*format!("real report\n{HANDBACK_HEADER}\nstill the report"))
+            Some(&*format!(
+                "real report\n{HANDBACK_HEADER}\nstill the report"
+            ))
         );
     }
 
@@ -3519,7 +3503,10 @@ mod tests {
         assert_eq!(unwrap_handback_frame("  ordinary indented output"), None);
         assert_eq!(unwrap_handback_frame(HANDBACK_HEADER), None);
         let item = json!({"type": "tool_result", "content": "plain result"});
-        assert_eq!(extract_tool_result_text(&item).as_deref(), Some("plain result"));
+        assert_eq!(
+            extract_tool_result_text(&item).as_deref(),
+            Some("plain result")
+        );
     }
 
     #[test]
@@ -3910,7 +3897,7 @@ mod tests {
     }
 
     #[test]
-    /// The user typed `/compact`; the divider is what it produced. Live, codeg
+    /// The user typed `/compact`; the divider is what it produced. Live, harness_studio
     /// echoes the prompt above the divider — so history has to as well, and at
     /// the same place, which is NOT where the CLI wrote the echo.
     fn the_compact_prompt_is_emitted_above_the_divider_it_caused() {
@@ -4062,7 +4049,10 @@ mod tests {
     /// one of them mid-body keeps it.
     #[test]
     fn continuation_summary_text_strips_only_the_framing() {
-        assert_eq!(continuation_summary_text(CONTINUATION), CONTINUATION_SUMMARY);
+        assert_eq!(
+            continuation_summary_text(CONTINUATION),
+            CONTINUATION_SUMMARY
+        );
 
         let quoting = CONTINUATION.replace(
             "   - None.",
@@ -4396,10 +4386,8 @@ mod tests {
         let settled = &previews.iter().find(|(id, _)| id == "toolu_01").unwrap().1;
         assert!(settled.starts_with(BACKGROUND_TASK_MARKER));
         assert!(!settled.contains("never quote"));
-        let payload: serde_json::Value = serde_json::from_str(
-            settled.strip_prefix(BACKGROUND_TASK_MARKER).unwrap(),
-        )
-        .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(settled.strip_prefix(BACKGROUND_TASK_MARKER).unwrap()).unwrap();
         assert_eq!(payload["task_id"], "abc123");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["summary"], "Agent \"Run pnpm build\" finished");
@@ -4408,10 +4396,8 @@ mod tests {
         // Unsettled: marker present, status null (frontend must NOT claim
         // "running" from the transcript alone — CC's zombie trap).
         let unsettled = &previews.iter().find(|(id, _)| id == "toolu_02").unwrap().1;
-        let payload: serde_json::Value = serde_json::from_str(
-            unsettled.strip_prefix(BACKGROUND_TASK_MARKER).unwrap(),
-        )
-        .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(unsettled.strip_prefix(BACKGROUND_TASK_MARKER).unwrap()).unwrap();
         assert_eq!(payload["task_id"], "nores99");
         assert!(payload["status"].is_null());
     }
@@ -4435,10 +4421,7 @@ mod tests {
     fn write_clear_jsonl(path: &Path, lines: &[&str]) {
         std::fs::write(
             path,
-            lines
-                .iter()
-                .map(|l| format!("{l}\n"))
-                .collect::<String>(),
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
         )
         .unwrap();
     }
@@ -4641,7 +4624,7 @@ mod tests {
                 duration_ms: None,
                 model: None,
                 completed_at: None,
-            agent_message_id: None,
+                agent_message_id: None,
             },
             MessageTurn {
                 id: "turn-1".to_string(),
@@ -4657,7 +4640,7 @@ mod tests {
                 duration_ms: None,
                 model: None,
                 completed_at: None,
-            agent_message_id: None,
+                agent_message_id: None,
             },
         ];
 
@@ -4670,7 +4653,7 @@ mod tests {
     #[test]
     fn parse_detail_sets_claude_context_window_stats() {
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-parser-{}.jsonl",
+            "harness-studio-claude-parser-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -4732,7 +4715,7 @@ mod tests {
     #[test]
     fn parse_prefers_ai_title_over_first_user_message() {
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-aititle-{}.jsonl",
+            "harness-studio-claude-aititle-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -4790,7 +4773,7 @@ mod tests {
     #[test]
     fn parse_falls_back_to_user_message_when_ai_title_empty() {
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-aititle-empty-{}.jsonl",
+            "harness-studio-claude-aititle-empty-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -4842,8 +4825,10 @@ mod tests {
         tag: &str,
         lines: &[serde_json::Value],
     ) -> (Option<String>, Option<String>) {
-        let path =
-            std::env::temp_dir().join(format!("codeg-claude-{tag}-{}.jsonl", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "harness-studio-claude-{tag}-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
         for line in lines {
             writeln!(file, "{line}").expect("write line");
@@ -4957,7 +4942,7 @@ mod tests {
         // The record carries a timestamp and a sessionId, so it must stay a
         // metadata line — never a visible turn or a counted message.
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-customtitle-turn-{}.jsonl",
+            "harness-studio-claude-customtitle-turn-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -4999,7 +4984,7 @@ mod tests {
         // finished, i.e. the assistant event timestamp itself (or the
         // turn_duration system event's timestamp ≈ same instant).
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-completed-{}.jsonl",
+            "harness-studio-claude-completed-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -5087,7 +5072,7 @@ mod tests {
     #[test]
     fn synthetic_assistant_excluded_from_detail() {
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-synthetic-{}.jsonl",
+            "harness-studio-claude-synthetic-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -5207,7 +5192,7 @@ mod tests {
 
     fn parse_lines_into_detail(lines: &[String]) -> crate::models::ConversationDetail {
         let path = std::env::temp_dir().join(format!(
-            "codeg-claude-usage-{}.jsonl",
+            "harness-studio-claude-usage-{}.jsonl",
             uuid::Uuid::new_v4()
         ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
@@ -5225,7 +5210,7 @@ mod tests {
         detail
     }
 
-    /// The fork point codeg sends must be the id the ADAPTER would look up.
+    /// The fork point harness_studio sends must be the id the ADAPTER would look up.
     /// claude-agent-acp's `messageIdForGrouping` takes the API message id when
     /// the record has one, so an assistant turn must carry that — not the
     /// record uuid `MessageTurn::id`-adjacent code uses everywhere else.
@@ -5251,7 +5236,7 @@ mod tests {
     }
 
     /// `messageIdForGrouping` falls back to the record uuid when the message
-    /// carries no id, and so must codeg — otherwise those turns would silently
+    /// carries no id, and so must harness_studio — otherwise those turns would silently
     /// lose their fork point.
     #[test]
     fn assistant_turns_fall_back_to_the_record_uuid() {
@@ -5281,7 +5266,9 @@ mod tests {
             .iter()
             .filter_map(|t| t.usage.as_ref())
             .map(|u| {
-                u.input_tokens + u.output_tokens + u.cache_creation_input_tokens
+                u.input_tokens
+                    + u.output_tokens
+                    + u.cache_creation_input_tokens
                     + u.cache_read_input_tokens
             })
             .sum()
@@ -5715,8 +5702,10 @@ mod tests {
             })
             .to_string()
         };
-        let detail =
-            parse_lines_into_detail(&[line("a1", "2026-03-01T10:00:00Z"), line("a2", "2026-03-01T10:00:01Z")]);
+        let detail = parse_lines_into_detail(&[
+            line("a1", "2026-03-01T10:00:00Z"),
+            line("a2", "2026-03-01T10:00:01Z"),
+        ]);
         assert_eq!(total_usage_tokens(&detail), 30);
     }
 
@@ -5726,7 +5715,10 @@ mod tests {
         lines: &[String],
         subagents: &[(&str, Vec<String>)],
     ) -> crate::models::ConversationDetail {
-        let stem = std::env::temp_dir().join(format!("codeg-claude-sub-{}", uuid::Uuid::new_v4()));
+        let stem = std::env::temp_dir().join(format!(
+            "harness-studio-claude-sub-{}",
+            uuid::Uuid::new_v4()
+        ));
         let path = stem.with_extension("jsonl");
         let mut file = fs::File::create(&path).expect("create session jsonl");
         for line in lines {
@@ -5818,7 +5810,12 @@ mod tests {
             &session_launching("abc", 1),
             &[(
                 "abc",
-                vec![subagent_line("s1", "msg_sub", "2026-03-01T10:02:00Z", 7_000)],
+                vec![subagent_line(
+                    "s1",
+                    "msg_sub",
+                    "2026-03-01T10:02:00Z",
+                    7_000,
+                )],
             )],
         );
         assert_eq!(total_usage_tokens(&detail), 8_000);
@@ -5832,7 +5829,12 @@ mod tests {
             &session_launching("abc", 3),
             &[(
                 "abc",
-                vec![subagent_line("s1", "msg_sub", "2026-03-01T10:02:00Z", 7_000)],
+                vec![subagent_line(
+                    "s1",
+                    "msg_sub",
+                    "2026-03-01T10:02:00Z",
+                    7_000,
+                )],
             )],
         );
         assert_eq!(total_usage_tokens(&detail), 8_000);
@@ -5847,7 +5849,12 @@ mod tests {
             &session_launching("abc", 0),
             &[(
                 "orphan",
-                vec![subagent_line("s1", "msg_sub", "2026-03-01T10:02:00Z", 7_000)],
+                vec![subagent_line(
+                    "s1",
+                    "msg_sub",
+                    "2026-03-01T10:02:00Z",
+                    7_000,
+                )],
             )],
         );
         assert_eq!(total_usage_tokens(&detail), 8_000);
@@ -5874,7 +5881,12 @@ mod tests {
             )],
             &[(
                 "abc",
-                vec![subagent_line("s1", "msg_sub", "2026-03-01T10:02:00Z", 900_000)],
+                vec![subagent_line(
+                    "s1",
+                    "msg_sub",
+                    "2026-03-01T10:02:00Z",
+                    900_000,
+                )],
             )],
         );
         let stats = detail.session_stats.expect("session stats");
@@ -5887,15 +5899,13 @@ mod tests {
     fn sub_agent_spend_lands_on_the_turn_that_was_running_when_it_started() {
         // A session working across midnight must not report a sub-agent's
         // tokens on whichever day the session happened to end.
-        let mut lines = vec![
-            assistant_block_line(
-                "a1",
-                "msg_before",
-                "2026-03-01T23:00:00Z",
-                json!({"type": "tool_use", "id": "tu1", "name": "Task", "input": {}}),
-                json!({"input_tokens": 10, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}),
-            ),
-        ];
+        let mut lines = vec![assistant_block_line(
+            "a1",
+            "msg_before",
+            "2026-03-01T23:00:00Z",
+            json!({"type": "tool_use", "id": "tu1", "name": "Task", "input": {}}),
+            json!({"input_tokens": 10, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}),
+        )];
         lines.push(assistant_block_line(
             "a2",
             "msg_after",
@@ -5908,7 +5918,12 @@ mod tests {
             &lines,
             &[(
                 "abc",
-                vec![subagent_line("s1", "msg_sub", "2026-03-01T23:10:00Z", 5_000)],
+                vec![subagent_line(
+                    "s1",
+                    "msg_sub",
+                    "2026-03-01T23:10:00Z",
+                    5_000,
+                )],
             )],
         );
         let carrying: Vec<_> = detail
@@ -5924,7 +5939,9 @@ mod tests {
             .collect();
         assert_eq!(total_usage_tokens(&detail), 5_030);
         assert!(
-            carrying.iter().any(|(ts, n)| ts.starts_with("2026-03-01") && *n == 5_010),
+            carrying
+                .iter()
+                .any(|(ts, n)| ts.starts_with("2026-03-01") && *n == 5_010),
             "sub-agent spend belongs to the turn that launched it, got {carrying:?}"
         );
     }
@@ -6007,8 +6024,10 @@ mod tests {
 
     #[test]
     fn slash_command_keeps_user_turn_between_assistant_turns() {
-        let path =
-            std::env::temp_dir().join(format!("codeg-claude-slash-{}.jsonl", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "harness-studio-claude-slash-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
         let mut file = fs::File::create(&path).expect("create temp jsonl");
         // Client command /model: followed by stdout, no model turn -> stays hidden
         writeln!(
@@ -6208,9 +6227,10 @@ mod tests {
         ));
         // The hook instruction is addressed to the model, not spoken by the
         // user — it must stay out of the transcript.
-        assert!(!turns.iter().any(|t| t.blocks.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("Stop hook"))
-        )));
+        assert!(!turns.iter().any(|t| t
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("Stop hook")))));
 
         // Mid-turn (the model is still thinking, no assistant record yet): the
         // hook injection alone must already resolve it, because the transcript
@@ -6706,7 +6726,10 @@ mod tests {
         acc.finalize_background_lifecycle();
         let cards = goal_cards(&group_into_turns(acc.messages));
         assert_eq!(
-            cards.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            cards
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
             vec!["create_goal", "update_goal"]
         );
         assert_eq!(cards[1].1["status"], "complete");
@@ -6924,9 +6947,10 @@ mod tests {
         acc.finalize_background_lifecycle();
         let turns = group_into_turns(acc.messages);
         assert!(
-            !turns.iter().any(|t| t.blocks.iter().any(
-                |b| matches!(b, ContentBlock::Text { text } if text.contains("/model"))
-            )),
+            !turns.iter().any(|t| t
+                .blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("/model")))),
             "the cron owns that reply — the command must not claim its prompt slot"
         );
     }
@@ -6969,9 +6993,10 @@ mod tests {
         }
         acc.finalize_background_lifecycle();
         let turns = group_into_turns(acc.messages);
-        assert!(!turns.iter().any(|t| t.blocks.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("/model"))
-        )));
+        assert!(!turns.iter().any(|t| t
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("/model")))));
     }
 
     /// A client-only command stays hidden even when the CLI writes several
@@ -7015,9 +7040,10 @@ mod tests {
         let turns = group_into_turns(acc.messages);
         let roles: Vec<_> = turns.iter().map(role_name).collect();
         assert_eq!(roles, vec!["user", "assistant"]);
-        assert!(!turns.iter().any(|t| t.blocks.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("/model"))
-        )));
+        assert!(!turns.iter().any(|t| t
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("/model")))));
     }
 
     #[test]

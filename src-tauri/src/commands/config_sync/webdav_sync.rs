@@ -47,7 +47,7 @@ pub const CONFIG_SYNC_STATE_KEY: &str = "config_sync_state";
 /// Remote layout version, independent of the snapshot's `schemaVersion`.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-pub const DEFAULT_REMOTE_DIR: &str = "codeg";
+pub const DEFAULT_REMOTE_DIR: &str = "harness_studio";
 pub const DEFAULT_PROFILE: &str = "default";
 pub const DEFAULT_INTERVAL_MINUTES: u32 = 5;
 /// A day. Not a real limit, just a guard against a value that would overflow
@@ -366,7 +366,8 @@ async fn migrate_legacy_password(conn: &DatabaseConnection, password: &str) {
     match serde_json::to_string(&value) {
         Ok(serialized) => {
             if let Err(err) =
-                app_metadata_service::upsert_value(conn, CONFIG_SYNC_SETTINGS_KEY, &serialized).await
+                app_metadata_service::upsert_value(conn, CONFIG_SYNC_SETTINGS_KEY, &serialized)
+                    .await
             {
                 // The keyring copy is authoritative from here on, so the stale
                 // plaintext is redundant rather than load-bearing — but it is
@@ -398,10 +399,7 @@ pub async fn save_settings_core(
     // usable keyring at all: a setting that needs no credential no longer
     // fails because a credential could not be reached.
     let new_password = input.password.clone().filter(|value| !value.is_empty());
-    let new_passphrase = input
-        .passphrase
-        .clone()
-        .filter(|value| !value.is_empty());
+    let new_passphrase = input.passphrase.clone().filter(|value| !value.is_empty());
     let keeps_account = same_account(&existing, &input.server_url, &input.username);
 
     let merged = merge_settings(&existing, input)?;
@@ -512,9 +510,7 @@ pub fn merge_settings(
         remote_dir,
         profile,
         auto_sync: input.auto_sync,
-        interval_minutes: input
-            .interval_minutes
-            .clamp(1, MAX_INTERVAL_MINUTES),
+        interval_minutes: input.interval_minutes.clamp(1, MAX_INTERVAL_MINUTES),
     })
 }
 
@@ -561,8 +557,16 @@ pub async fn save_state(conn: &DatabaseConnection, state: &ConfigSyncState) {
 
 /// `{remoteDir}/v1/{profile}` — the directory the two files live in.
 pub fn remote_dir_path(settings: &ConfigSyncSettings) -> Result<String, AppCommandError> {
-    let dir = normalize_segment(Some(settings.remote_dir.clone()), DEFAULT_REMOTE_DIR, DEFAULT_REMOTE_DIR)?;
-    let profile = normalize_segment(Some(settings.profile.clone()), DEFAULT_PROFILE, DEFAULT_PROFILE)?;
+    let dir = normalize_segment(
+        Some(settings.remote_dir.clone()),
+        DEFAULT_REMOTE_DIR,
+        DEFAULT_REMOTE_DIR,
+    )?;
+    let profile = normalize_segment(
+        Some(settings.profile.clone()),
+        DEFAULT_PROFILE,
+        DEFAULT_PROFILE,
+    )?;
     Ok(format!("{dir}/v{PROTOCOL_VERSION}/{profile}"))
 }
 
@@ -815,7 +819,7 @@ mod tests {
             password: Some("app-password".to_string()),
             passphrase: None,
             encrypt: false,
-            remote_dir: Some("codeg".to_string()),
+            remote_dir: Some("harness_studio".to_string()),
             profile: Some("work".to_string()),
             auto_sync: true,
             interval_minutes: 5,
@@ -1038,7 +1042,7 @@ mod tests {
         app_metadata_service::upsert_value(
             &db.conn,
             CONFIG_SYNC_SETTINGS_KEY,
-            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"codeg","profile":"work","autoSync":true,"intervalMinutes":5}"#,
+            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"harness_studio","profile":"work","autoSync":true,"intervalMinutes":5}"#,
         )
         .await
         .expect("seed legacy row");
@@ -1074,7 +1078,7 @@ mod tests {
         app_metadata_service::upsert_value(
             &db.conn,
             CONFIG_SYNC_SETTINGS_KEY,
-            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"codeg","profile":"work","autoSync":true,"intervalMinutes":5}"#,
+            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"harness_studio","profile":"work","autoSync":true,"intervalMinutes":5}"#,
         )
         .await
         .expect("seed half-migrated row");
@@ -1111,7 +1115,7 @@ mod tests {
         app_metadata_service::upsert_value(
             &db.conn,
             CONFIG_SYNC_SETTINGS_KEY,
-            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"codeg","profile":"work","autoSync":true,"intervalMinutes":5,"futureField":"written by a newer build"}"#,
+            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"legacy-secret","remoteDir":"harness_studio","profile":"work","autoSync":true,"intervalMinutes":5,"futureField":"written by a newer build"}"#,
         )
         .await
         .expect("seed a row this build does not fully understand");
@@ -1122,7 +1126,10 @@ mod tests {
             .await
             .expect("read row")
             .expect("row exists");
-        assert!(!row.contains("legacy-secret"), "the password must be gone: {row}");
+        assert!(
+            !row.contains("legacy-secret"),
+            "the password must be gone: {row}"
+        );
         assert!(
             row.contains("written by a newer build"),
             "the migration overwrote a field it does not own: {row}"
@@ -1148,7 +1155,9 @@ mod tests {
         credentials::store(SNAPSHOT_PASSPHRASE, "hunter2").expect("seed");
         // Establish the account first, so the save below is not an account
         // change (which deliberately DOES erase the password).
-        save_settings_core(&db.conn, input()).await.expect("seed settings");
+        save_settings_core(&db.conn, input())
+            .await
+            .expect("seed settings");
 
         {
             let _unreadable = credentials::unreadable_store();
@@ -1236,7 +1245,7 @@ mod tests {
         app_metadata_service::upsert_value(
             &db.conn,
             CONFIG_SYNC_SETTINGS_KEY,
-            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"outdated","remoteDir":"codeg","profile":"work","autoSync":true,"intervalMinutes":5}"#,
+            r#"{"enabled":true,"serverUrl":"https://dav.example.com/dav","username":"alice","password":"outdated","remoteDir":"harness_studio","profile":"work","autoSync":true,"intervalMinutes":5}"#,
         )
         .await
         .expect("seed row");
@@ -1463,7 +1472,9 @@ mod tests {
         let db = fresh_in_memory_db().await;
         let state = ConfigSyncState {
             last_uploaded_sha256: Some("abc".to_string()),
-            last_uploaded_target: Some("https://dav.example.com/dav\u{0}codeg\u{0}work".to_string()),
+            last_uploaded_target: Some(
+                "https://dav.example.com/dav\u{0}harness_studio\u{0}work".to_string(),
+            ),
             last_sync_at: Some("2026-01-01T00:00:00Z".to_string()),
             last_error: None,
         };

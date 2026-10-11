@@ -4,7 +4,7 @@
 //! almost verbatim. Science skills (curated from
 //! K-Dense-AI/scientific-agent-skills) are bundled into the binary via
 //! `include_dir!` and, on startup, extracted into the same central store as
-//! experts — `~/.codeg/skills/<id>/`. Users enable a science skill for any ACP
+//! experts — `~/.harnessstudio/skills/<id>/`. Users enable a science skill for any ACP
 //! agent by symlinking (or Windows-junctioning) the agent's skill dir into the
 //! central copy.
 //!
@@ -135,7 +135,7 @@ pub struct InstallReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Manifest {
     #[serde(default)]
-    codeg_version: String,
+    harness_studio_version: String,
     #[serde(default)]
     installed_at: String,
     #[serde(default)]
@@ -160,7 +160,7 @@ fn mutation_lock() -> &'static Mutex<()> {
 }
 
 // ─── Paths ──────────────────────────────────────────────────────────────
-// The central store is shared with experts (`~/.codeg/skills/`); only the
+// The central store is shared with experts (`~/.harnessstudio/skills/`); only the
 // manifest file differs, so the two sources never clobber each other's state.
 
 fn manifest_path() -> PathBuf {
@@ -245,7 +245,11 @@ fn load_bundled_metadata_inner() -> Result<Vec<ScienceMetadata>, ScienceError> {
             bundled_hash,
         });
     }
-    out.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then_with(|| a.id.cmp(&b.id)));
+    out.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Ok(out)
 }
 
@@ -305,7 +309,9 @@ fn hash_disk_directory(path: &Path) -> Result<String, ScienceError> {
     for (rel_path, contents) in files {
         let logical = format!(
             "skills/{}/{}",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default(),
             rel_path
         );
         hasher.update(logical.as_bytes());
@@ -404,7 +410,7 @@ fn ensure_central_science_installed_blocking() -> InstallReport {
         }
     }
 
-    manifest.codeg_version = env!("CARGO_PKG_VERSION").to_string();
+    manifest.harness_studio_version = env!("CARGO_PKG_VERSION").to_string();
     manifest.installed_at = Utc::now().to_rfc3339();
     if let Err(e) = save_manifest(&manifest) {
         report.errors.push(format!("save manifest: {e}"));
@@ -651,7 +657,8 @@ fn link_one_locked(
     skill_id: &str,
     agent_type: AgentType,
 ) -> Result<ExpertInstallStatus, ScienceError> {
-    let skill_id = validate_skill_id(skill_id).map_err(|e| ScienceError::Metadata(e.to_string()))?;
+    let skill_id =
+        validate_skill_id(skill_id).map_err(|e| ScienceError::Metadata(e.to_string()))?;
     let _ = find_metadata(&skill_id)?;
     let central = science_central_path(&skill_id);
     if !central.exists() {
@@ -672,7 +679,7 @@ fn link_one_locked(
         }
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             match classify_link(&link_path, &central) {
-                ExpertLinkState::LinkedToCodeg => {
+                ExpertLinkState::LinkedToHarnessStudio => {
                     // Idempotent success.
                 }
                 ExpertLinkState::BlockedByRealDirectory => {
@@ -733,7 +740,8 @@ pub async fn science_unlink_from_agent(
 /// Remove one science skill's link from one agent's skill dirs. **Assumes the
 /// mutation lock is already held** (see `link_one_locked`).
 fn unlink_one_locked(skill_id: &str, agent_type: AgentType) -> Result<(), ScienceError> {
-    let skill_id = validate_skill_id(skill_id).map_err(|e| ScienceError::Metadata(e.to_string()))?;
+    let skill_id =
+        validate_skill_id(skill_id).map_err(|e| ScienceError::Metadata(e.to_string()))?;
 
     // Scan ALL global dirs for this agent to handle shared-dir agents — most
     // built-ins also point at the cross-agent `~/.agents/skills/` store, so the
@@ -752,7 +760,7 @@ fn unlink_one_locked(skill_id: &str, agent_type: AgentType) -> Result<(), Scienc
         let state = classify_link(&candidate, &central);
         if matches!(
             state,
-            ExpertLinkState::LinkedToCodeg | ExpertLinkState::Broken
+            ExpertLinkState::LinkedToHarnessStudio | ExpertLinkState::Broken
         ) {
             remove_skill_entry(&candidate).map_err(|e| {
                 ScienceError::Io(format!("remove link {}: {e}", candidate.display()))
@@ -829,8 +837,7 @@ pub async fn science_list_all_install_statuses() -> Result<Vec<ExpertInstallStat
                 Err(_) => continue,
             };
             let state = classify_link(&link_path, &expected);
-            let target_path =
-                read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
+            let target_path = read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
             out.push(ExpertInstallStatus {
                 expert_id: meta.id.clone(),
                 agent_type: agent,
@@ -936,12 +943,12 @@ mod tests {
     async fn apply_links_does_not_deadlock() {
         let ops = vec![
             LinkOp {
-                expert_id: "zzz-codeg-science-batch-absent-aaa".into(),
+                expert_id: "zzz-harness-studio-science-batch-absent-aaa".into(),
                 agent_type: AgentType::ClaudeCode,
                 enable: false,
             },
             LinkOp {
-                expert_id: "zzz-codeg-science-batch-absent-bbb".into(),
+                expert_id: "zzz-harness-studio-science-batch-absent-bbb".into(),
                 agent_type: AgentType::Codex,
                 enable: false,
             },
@@ -958,7 +965,7 @@ mod tests {
     async fn apply_links_collects_per_op_results_without_aborting() {
         let ops = vec![
             LinkOp {
-                expert_id: "zzz-codeg-science-batch-absent".into(),
+                expert_id: "zzz-harness-studio-science-batch-absent".into(),
                 agent_type: AgentType::ClaudeCode,
                 enable: false,
             },
@@ -1050,7 +1057,10 @@ mod tests {
         // (they share the central store). Curation guarantees this; assert it.
         let science_ids: std::collections::HashSet<_> =
             bundled_metadata().iter().map(|m| m.id.as_str()).collect();
-        assert!(!science_ids.is_empty(), "science bundle should be non-empty");
+        assert!(
+            !science_ids.is_empty(),
+            "science bundle should be non-empty"
+        );
         // A representative experts id must not appear among science ids.
         assert!(!science_ids.contains("brainstorming"));
         assert!(!science_ids.contains("writing-plans"));

@@ -151,7 +151,7 @@ fn is_exec_busy(err: &std::io::Error) -> bool {
 /// exec fails with `ETXTBSY` while *any* process holds the target file open for
 /// writing, so a multi-threaded process that writes an executable and then runs
 /// it races itself. Rust opens files `O_CLOEXEC`, but `CLOEXEC` only takes
-/// effect at exec: a `fork()` on another thread — codeg forks constantly, for
+/// effect at exec: a `fork()` on another thread — harness_studio forks constantly, for
 /// git, agents, and other terminals — copies the fd table while the write
 /// descriptor is still open, and that inherited copy keeps the file busy until
 /// the forked child reaches its own exec. An agent that writes `build.sh` and
@@ -564,7 +564,7 @@ pub(crate) fn prepend_to_path(dir: &std::path::Path) {
     std::env::set_var("PATH", new_path);
 }
 
-/// Return the user-local npm prefix directory (`~/.codeg/npm-global/`).
+/// Return the user-local npm prefix directory (`~/.harnessstudio/npm-global/`).
 ///
 /// Used as a fallback when `npm install -g` fails with EACCES because the
 /// system global prefix (e.g. `/usr/local/lib/node_modules/`) is not writable.
@@ -664,8 +664,7 @@ mod tests {
         // `next_line()` loop would abort here and drop "third"; this must not.
         let data = b"first\n\xff\xfe garbage\nthird\n".to_vec();
         let mut seen: Vec<String> = Vec::new();
-        let collected =
-            collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
+        let collected = collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
 
         assert_eq!(seen.len(), 3, "all three lines emitted: {seen:?}");
         assert_eq!(seen[0], "first");
@@ -685,8 +684,7 @@ mod tests {
         // newline is still emitted (then EOF stops the loop).
         let data = b"a\r\nb\r\nno-newline".to_vec();
         let mut seen: Vec<String> = Vec::new();
-        let collected =
-            collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
+        let collected = collect_lines_lossy(Cursor::new(data), |l| seen.push(l.to_string())).await;
 
         assert_eq!(seen, vec!["a", "b", "no-newline"]);
         assert_eq!(collected, "a\nb\nno-newline");
@@ -696,8 +694,7 @@ mod tests {
     async fn collect_lines_lossy_empty_input_yields_nothing() {
         let mut seen: Vec<String> = Vec::new();
         let collected =
-            collect_lines_lossy(Cursor::new(Vec::<u8>::new()), |l| seen.push(l.to_string()))
-                .await;
+            collect_lines_lossy(Cursor::new(Vec::<u8>::new()), |l| seen.push(l.to_string())).await;
 
         assert!(seen.is_empty());
         assert!(collected.is_empty());

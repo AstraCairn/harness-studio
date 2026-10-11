@@ -1,10 +1,10 @@
 //! Windows shim on top of WebView2 (`webview2-com` + the `windows` crate).
 //!
 //! The helper script and the primitive it posts through live in a CDP
-//! **isolated world** named `codeg`:
+//! **isolated world** named `harness_studio`:
 //! `Page.addScriptToEvaluateOnNewDocument {worldName}` injects the helper into
 //! that world for every document of every frame, and
-//! `Runtime.addBinding {executionContextName}` puts `__codegSend` there — a
+//! `Runtime.addBinding {executionContextName}` puts `__harnessStudioSend` there — a
 //! separate JavaScript global over the same DOM, invisible to page scripts and
 //! immune to their prototype tampering, exactly like macOS's `WKContentWorld`.
 //! Unlike macOS the world needs no prefix script: the binding *is* the send
@@ -37,28 +37,27 @@ use tauri::{Url, WebviewWindow};
 use tauri_runtime_wry::wry::{self, WebViewExtWindows};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Controller, ICoreWebView2DevToolsProtocolEventReceivedEventArgs2,
-    ICoreWebView2DevToolsProtocolEventReceiver, ICoreWebView2Environment15,
-    ICoreWebView2Find, ICoreWebView2Frame, ICoreWebView2Frame2, ICoreWebView2Frame7,
-    ICoreWebView2PermissionRequestedEventArgs3,
-    ICoreWebView2Settings2, ICoreWebView2_28, ICoreWebView2_4,
-    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG,
-    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
-    COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS,
-    COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
-    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, COREWEBVIEW2_WEB_ERROR_STATUS,
+    ICoreWebView2DevToolsProtocolEventReceiver, ICoreWebView2Environment15, ICoreWebView2Find,
+    ICoreWebView2Frame, ICoreWebView2Frame2, ICoreWebView2Frame7,
+    ICoreWebView2PermissionRequestedEventArgs3, ICoreWebView2Settings2, ICoreWebView2_28,
+    ICoreWebView2_4, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT,
+    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG, COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC, COREWEBVIEW2_PERMISSION_KIND,
+    COREWEBVIEW2_PERMISSION_KIND_MULTIPLE_AUTOMATIC_DOWNLOADS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_WEB_ERROR_STATUS,
     COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT,
     COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED,
     COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID,
     COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED,
     COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS,
     COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED,
-    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED,
-    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
 };
 use webview2_com::{
     take_pwstr, CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
-    DevToolsProtocolEventReceivedEventHandler, FindStartCompletedHandler, FrameChildFrameCreatedEventHandler,
-    FrameCreatedEventHandler, FrameNavigationStartingEventHandler, NavigationCompletedEventHandler,
+    DevToolsProtocolEventReceivedEventHandler, FindStartCompletedHandler,
+    FrameChildFrameCreatedEventHandler, FrameCreatedEventHandler,
+    FrameNavigationStartingEventHandler, NavigationCompletedEventHandler,
     NavigationStartingEventHandler, PermissionRequestedEventHandler,
     WebResourceRequestedEventHandler, WindowCloseRequestedEventHandler,
 };
@@ -66,7 +65,7 @@ use windows::core::{Interface, BOOL, HSTRING, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::Com::{IStream, STREAM_SEEK_SET};
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass, SHCreateMemStream,
+    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SHCreateMemStream, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, SetWindowPos, SIZE_MINIMIZED, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER,
@@ -84,10 +83,10 @@ pub use super::{NavigationEvent, NavigationSink, PageCloseSink};
 
 /// Name of the isolated world the helper and the binding live in. Must match
 /// nothing a page can name: CDP worlds are addressed by this string alone.
-pub const WORLD_NAME: &str = "codeg";
+pub const WORLD_NAME: &str = "harness_studio";
 /// The function `Runtime.addBinding` exposes in that world; the helper's send
 /// primitive (`src/browser-injected/helper.js` looks for exactly this name).
-pub const BINDING_NAME: &str = "__codegSend";
+pub const BINDING_NAME: &str = "__harnessStudioSend";
 
 /// Whether a subframe may navigate to this address — the same decision the
 /// main frame's navigation handler makes, asked for a frame WebView2 would
@@ -98,9 +97,8 @@ pub type FrameNavigationSink = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync
 /// from, and whether the engine considers the request user-initiated).
 /// `false` refuses. Answered by the host so the engine keeps its own prompt
 /// — drawn inside the page's rectangle, in nobody's design language, and
-/// invisible to codeg — out of an embedded tab.
-pub type DownloadPermissionSink =
-    std::sync::Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
+/// invisible to harness_studio — out of an embedded tab.
+pub type DownloadPermissionSink = std::sync::Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
 
 /// A page-world execution context: the frame it belongs to and the origin
 /// the engine reported for it (`None` when opaque).
@@ -137,7 +135,7 @@ struct SurfaceState {
     /// — still on the empty document it was created with — from one the ENGINE
     /// navigated before the host could inject anything (see `needs_world`).
     committed: Cell<bool>,
-    /// `codeg`-world execution contexts: which frame each is for, by the CDP
+    /// `harness_studio`-world execution contexts: which frame each is for, by the CDP
     /// session that reported it and the id it has there. Ids are handed out per
     /// renderer and start over in each, so the id alone does not name a context
     /// — and this map is what decides whether a message came from the main
@@ -156,7 +154,7 @@ struct SurfaceState {
     recovering: Cell<bool>,
     recheck: Cell<bool>,
     /// `Runtime.addBinding` has been registered, so a world built from here on
-    /// will have `__codegSend` in it. Until then there is nothing to build one
+    /// will have `__harnessStudioSend` in it. Until then there is nothing to build one
     /// WITH: the helper would find no send primitive and give up, and the empty
     /// world it left behind is one nothing would ever build again.
     binding_ready: Cell<bool>,
@@ -311,7 +309,7 @@ pub fn debug_view(webview: &wry::WebView) -> Value {
 // The page ↔ host channel, over CDP
 // ---------------------------------------------------------------------------
 
-/// Install the helper in the `codeg` isolated world and the binding it posts
+/// Install the helper in the `harness_studio` isolated world and the binding it posts
 /// through. Every step is awaited: the caller navigates only once this
 /// returns, so no document can load before the world is ready. `Ok(true)` —
 /// there is no page-world fallback on Windows, a failure is reported as one.
@@ -430,15 +428,14 @@ fn call_async(
     let name = HSTRING::from(method);
     let params = HSTRING::from(params);
     let method = method.to_string();
-    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(
-        move |result, json| {
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, json| {
             match result {
                 Ok(()) => done(Ok(json)),
                 Err(err) => done(Err(format!("{method} failed: {err}"))),
             }
             Ok(())
-        },
-    ));
+        }));
     // SAFETY: main thread, live webview; WebView2 owns the handler until it
     // has called it.
     unsafe { webview.CallDevToolsProtocolMethod(&name, &params, &handler) }
@@ -504,8 +501,10 @@ fn on_event(key: usize, event: &str, session: &str, raw: &str) {
     // A console line the size of a novel is cut to a few kilobytes further
     // on; the one cost it could still impose is parsing it here, on the
     // main thread, so it is not parsed.
-    if matches!(event, "Runtime.consoleAPICalled" | "Runtime.exceptionThrown")
-        && raw.len() > console::CDP_MAX_EVENT_BYTES
+    if matches!(
+        event,
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+    ) && raw.len() > console::CDP_MAX_EVENT_BYTES
     {
         tracing::debug!("[browser] dropped a {} byte console event", raw.len());
         return;
@@ -545,7 +544,7 @@ fn on_event(key: usize, event: &str, session: &str, raw: &str) {
                 return;
             };
             let mut contexts = state.contexts.borrow_mut();
-            // A frame holds one `codeg` world at a time, so an older entry
+            // A frame holds one `harness_studio` world at a time, so an older entry
             // naming this frame is a context that is already gone — its
             // document was replaced, or the renderer that owed us its
             // `executionContextDestroyed` went away without sending one. It is
@@ -600,8 +599,8 @@ fn on_event(key: usize, event: &str, session: &str, raw: &str) {
             let Some(PageContext { frame, origin }) = located else {
                 return;
             };
-            let main_frame = session.is_empty()
-                && state.main_frame.borrow().as_deref() == Some(frame.as_str());
+            let main_frame =
+                session.is_empty() && state.main_frame.borrow().as_deref() == Some(frame.as_str());
             let at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -679,7 +678,7 @@ fn on_event(key: usize, event: &str, session: &str, raw: &str) {
     }
 }
 
-/// Build the `codeg` world for a document the injection did not reach and run
+/// Build the `harness_studio` world for a document the injection did not reach and run
 /// the helper in it.
 ///
 /// `Page.addScriptToEvaluateOnNewDocument` only covers documents whose
@@ -688,7 +687,7 @@ fn on_event(key: usize, event: &str, session: &str, raw: &str) {
 /// over — so that one document would have no channel for its whole life, and
 /// a popup is exactly where the address bar and the gesture ring are needed.
 /// `Page.createIsolatedWorld` makes the same named world for a frame that
-/// exists; the binding is registered by world NAME, so `__codegSend` is in it
+/// exists; the binding is registered by world NAME, so `__harnessStudioSend` is in it
 /// and the helper finds what it expects.
 fn recover_world(webview: &ICoreWebView2, key: usize) {
     let Some(surface) = state(key) else {
@@ -718,9 +717,7 @@ fn recover_world(webview: &ICoreWebView2, key: usize) {
                 None => false,
             };
             let context = answer.ok().and_then(|json| {
-                serde_json::from_str::<Value>(&json)
-                    .ok()?["executionContextId"]
-                    .as_i64()
+                serde_json::from_str::<Value>(&json).ok()?["executionContextId"].as_i64()
             });
             if let Some(context) = context {
                 tracing::debug!("[browser] page channel recovered in context {context}");
@@ -798,7 +795,7 @@ fn ensure_world(webview: &ICoreWebView2, key: usize, again: bool) {
     recover_world(webview, key);
 }
 
-/// The `codeg` world of the main frame, once the helper has run there.
+/// The `harness_studio` world of the main frame, once the helper has run there.
 ///
 /// The page's own session only: `Runtime.evaluate` here goes to that session,
 /// and a context belonging to another one could not be addressed by it anyway.
@@ -808,12 +805,10 @@ fn main_world_context(state: &SurfaceState) -> Option<i64> {
         .contexts
         .borrow()
         .iter()
-        .find_map(|((session, id), frame)| {
-            (session.is_empty() && *frame == main).then_some(*id)
-        })
+        .find_map(|((session, id), frame)| (session.is_empty() && *frame == main).then_some(*id))
 }
 
-/// Evaluate `expression` in the `codeg` world of the main frame. The result
+/// Evaluate `expression` in the `harness_studio` world of the main frame. The result
 /// arrives as the JSON string `{"ok":true,"value":…}` or
 /// `{"ok":false,"error":…}` — the same envelope macOS produces, built inside
 /// the page so no platform value conversion is needed.
@@ -883,7 +878,12 @@ pub fn dispatch_pointer(
     let webview2 = core(webview);
     let steps = match gesture {
         PointerGesture::Move { x, y } => vec![mouse_event("mouseMoved", x, y, "none", 0)],
-        PointerGesture::Click { x, y, button, count } => {
+        PointerGesture::Click {
+            x,
+            y,
+            button,
+            count,
+        } => {
             let name = match button {
                 PointerButton::Left => "left",
                 PointerButton::Right => "right",
@@ -921,17 +921,22 @@ fn run_input_steps(
         return;
     };
     let next = webview.clone();
-    let issued = call_async(&webview, "Input.dispatchMouseEvent", &params, move |answer| {
-        match answer {
-            Ok(_) => run_input_steps(next, steps, done),
-            Err(error) => done(Err(PointerFailure {
-                // Step 0 is the move; a button event has reached the page
-                // only once a later step has run.
-                delivered: index > 0,
-                error,
-            })),
-        }
-    });
+    let issued = call_async(
+        &webview,
+        "Input.dispatchMouseEvent",
+        &params,
+        move |answer| {
+            match answer {
+                Ok(_) => run_input_steps(next, steps, done),
+                Err(error) => done(Err(PointerFailure {
+                    // Step 0 is the move; a button event has reached the page
+                    // only once a later step has run.
+                    delivered: index > 0,
+                    error,
+                })),
+            }
+        },
+    );
     if let Err(err) = issued {
         tracing::warn!("[browser] Input.dispatchMouseEvent could not be issued: {err}");
     }
@@ -1091,7 +1096,7 @@ fn match_count(find: &ICoreWebView2Find) -> i32 {
 /// Highlight the next (or previous) occurrence of `query`, the way Ctrl+F does
 /// in Edge: the engine owns the search and the selection, so this never
 /// touches the DOM and cannot be observed or broken by the page. Its own find
-/// bar stays suppressed — codeg draws that. `callback` gets whether anything
+/// bar stays suppressed — harness_studio draws that. `callback` gets whether anything
 /// matched.
 pub fn find_string(
     webview: &wry::WebView,
@@ -1194,7 +1199,8 @@ fn default_user_agent(state: &SurfaceState, settings: &ICoreWebView2Settings2) -
 /// changed.
 fn apply_user_agent(webview: &ICoreWebView2, key: usize, url: &Url) {
     // SAFETY: main thread, live webview.
-    let Ok(settings) = (unsafe { webview.Settings() }).and_then(|s| s.cast::<ICoreWebView2Settings2>())
+    let Ok(settings) =
+        (unsafe { webview.Settings() }).and_then(|s| s.cast::<ICoreWebView2Settings2>())
     else {
         return;
     };
@@ -1306,7 +1312,9 @@ pub fn install_navigation_hooks(
     *state.navigation.borrow_mut() = Some(navigation);
     // Read the engine's own identity before anything can override it.
     // SAFETY: main thread, live webview.
-    if let Ok(settings) = (unsafe { webview2.Settings() }).and_then(|s| s.cast::<ICoreWebView2Settings2>()) {
+    if let Ok(settings) =
+        (unsafe { webview2.Settings() }).and_then(|s| s.cast::<ICoreWebView2Settings2>())
+    {
         default_user_agent(&state, &settings);
     }
 
@@ -1365,7 +1373,7 @@ pub fn install_navigation_hooks(
     // The second download from the same page raises a permission request, and
     // until it is answered the engine draws its own bubble over the page and
     // holds `DownloadStarting` back — so a user who clicked would see nothing
-    // happen and codeg would have no idea there was anything to show. Only
+    // happen and harness_studio would have no idea there was anything to show. Only
     // this one kind is taken over: a camera or a microphone is the user's to
     // grant, and the engine's prompt is the right place to do it.
     // SAFETY: main thread, live webview; the handler is owned by it.
@@ -1604,7 +1612,11 @@ fn on_navigation_completed(
     // The navigation that replaced it owns the flag, the address, and the
     // identity set for where IT is going; the one on its way out may not take
     // any of them back.
-    if state.navigation_id.get().is_some_and(|id| id != navigation_id) {
+    if state
+        .navigation_id
+        .get()
+        .is_some_and(|id| id != navigation_id)
+    {
         tracing::debug!("[browser] navigation {navigation_id} was superseded ({status:?})");
         return;
     }
@@ -1932,11 +1944,7 @@ mod tests {
         assert!(!surface.spoke_as_main_frame_in(3, "S-2"));
         assert_eq!(main_world_context(&state_of(surface.key)), Some(3));
         // Its renderer goes; the page's context 3 is not the one destroyed.
-        surface.session_event(
-            "Runtime.executionContextsCleared",
-            "S-2",
-            json!({}),
-        );
+        surface.session_event("Runtime.executionContextsCleared", "S-2", json!({}));
         assert!(surface.spoke_as_main_frame(3));
         // And when the page's own goes, the id is nobody's.
         surface.event(
@@ -2003,7 +2011,11 @@ mod tests {
         assert!(needs_world(&state, Some("https://example.com/popup"), true));
         // That look is still not a way around the binding.
         state.binding_ready.set(false);
-        assert!(!needs_world(&state, Some("https://example.com/popup"), true));
+        assert!(!needs_world(
+            &state,
+            Some("https://example.com/popup"),
+            true
+        ));
     }
 
     /// The engine's statuses, by kind — and the one that is NOT a page failure.

@@ -104,9 +104,7 @@ impl ListenerIdentity {
     /// typed, rather than the path they never look at.
     pub fn display_name(&self) -> Option<&str> {
         let program = self.program.as_deref()?;
-        program
-            .rsplit(['/', '\\'])
-            .find(|part| !part.is_empty())
+        program.rsplit(['/', '\\']).find(|part| !part.is_empty())
     }
 }
 
@@ -196,9 +194,7 @@ pub fn summarize_tab(state: &BrowserTabState) -> Option<AgentTabSummary> {
         tab_id: state.tab_id.clone(),
         origin: state.origin.clone(),
         level,
-        title: level
-            .allows(GrantLevel::Read)
-            .then(|| state.title.clone()),
+        title: level.allows(GrantLevel::Read).then(|| state.title.clone()),
     })
 }
 
@@ -337,10 +333,10 @@ pub enum NotGrantable {
     /// navigation could be compared against, so a grant made now could never
     /// be revoked for leaving.
     NoOrigin,
-    /// A document guest (`codeg-doc:`). It shows a local file — usually one
+    /// A document guest (`harness-studio-doc:`). It shows a local file — usually one
     /// the agent wrote — under an origin that is minted per document and
-    /// spelled differently on every platform (`codeg-doc://doc-<token>/…`
-    /// under WebKit, `http://codeg-doc.doc-<token>/…` under WebView2), so
+    /// spelled differently on every platform (`harness-studio-doc://doc-<token>/…`
+    /// under WebKit, `http://harness-studio-doc.doc-<token>/…` under WebView2), so
     /// there is no stable origin to bind to. There is also no need: the file
     /// is on disk, where the agent reads it directly and without a browser
     /// in between.
@@ -484,7 +480,11 @@ pub fn revoke_if_replaced(
 /// grant, never widen one.
 pub fn revoke_if_departed(state: &mut BrowserTabState) -> Option<AgentGrant> {
     let origin = state.origin.as_deref();
-    if state.agent_grant.as_ref().is_some_and(|g| !g.covers(origin)) {
+    if state
+        .agent_grant
+        .as_ref()
+        .is_some_and(|g| !g.covers(origin))
+    {
         state.agent_grant.take()
     } else {
         None
@@ -502,7 +502,7 @@ pub fn revoke_if_departed(state: &mut BrowserTabState) -> Option<AgentGrant> {
 pub const AGENT_BUNDLE: &str = include_str!("js/agent.bundle.js");
 
 /// Name the bundle publishes in the isolated world.
-pub const AGENT_GLOBAL: &str = "__codegAgent";
+pub const AGENT_GLOBAL: &str = "__harnessStudioAgent";
 
 /// What a caller asks a snapshot for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -587,7 +587,7 @@ pub fn epoch(generation: u64, nav_epoch: u64) -> String {
 /// would be an object, so it cannot be mistaken for one.
 pub const ENGINE_ABSENT: &str = "absent";
 
-/// `JSON.stringify(__codegAgent.snapshot({…}))`.
+/// `JSON.stringify(__harnessStudioAgent.snapshot({…}))`.
 ///
 /// `epoch` is the host's, from [`epoch`]; `request` is the caller's. Both go
 /// in through `serde_json`, so neither can break out of the expression. An
@@ -672,9 +672,13 @@ pub enum ActionKind {
     },
     /// Press a key — `"Enter"`, `"a"`, `"Control+Shift+k"` — on the element,
     /// or on whatever has focus when the request names none.
-    Press { key: String },
+    Press {
+        key: String,
+    },
     /// Choose options of a `<select>`, by value or by label.
-    Select { values: Vec<String> },
+    Select {
+        values: Vec<String>,
+    },
 }
 
 impl ActionKind {
@@ -829,7 +833,7 @@ pub fn ref_is_current(generation: &str, epoch: &str) -> bool {
     quoted_nav == nav_epoch && quoted_tab == tab_generation
 }
 
-/// `JSON.stringify(__codegAgent.act(generation, ref, action))`, or
+/// `JSON.stringify(__harnessStudioAgent.act(generation, ref, action))`, or
 /// [`ENGINE_ABSENT`] when the engine is not in this document — which for an
 /// action means no snapshot was ever taken here, so whatever ref the caller
 /// holds is from another document and is stale.
@@ -847,7 +851,7 @@ pub fn act_call(request: &ActionRequest) -> String {
     )
 }
 
-/// `JSON.stringify(__codegAgent.locate(generation, ref))`: where a pointer
+/// `JSON.stringify(__harnessStudioAgent.locate(generation, ref))`: where a pointer
 /// would have to land, for a platform that delivers its own.
 pub fn locate_call(generation: &str, target: &str) -> String {
     format!(
@@ -900,7 +904,7 @@ pub struct ViewportAnswer {
     pub viewport: SnapshotViewport,
 }
 
-/// `JSON.stringify(__codegAgent.rectOf(generation, ref))`: the element's
+/// `JSON.stringify(__harnessStudioAgent.rectOf(generation, ref))`: the element's
 /// visible box, for a capture cropped to it. [`ENGINE_ABSENT`] when no
 /// snapshot was ever taken in this document, which makes the ref stale.
 pub fn rect_call(generation: &str, target: &str) -> String {
@@ -1017,7 +1021,10 @@ mod tests {
         assert_eq!(blank.level, GrantLevel::None);
 
         assert_eq!(
-            summarize_tab(&tab(Some("https://codeg-doc.localhost"), TabKind::Document)),
+            summarize_tab(&tab(
+                Some("https://harness-studio-doc.localhost"),
+                TabKind::Document
+            )),
             None
         );
     }
@@ -1039,11 +1046,14 @@ mod tests {
         // A document guest is refused even though its origin looks like one
         // on this platform, because on the next platform it does not.
         assert_eq!(
-            grantable_origin(&tab(Some("https://codeg-doc.localhost"), TabKind::Document)),
+            grantable_origin(&tab(
+                Some("https://harness-studio-doc.localhost"),
+                TabKind::Document
+            )),
             Err(NotGrantable::DocumentGuest)
         );
         assert_eq!(
-            grantable_origin(&tab(Some("codeg-doc://abc"), TabKind::Page)),
+            grantable_origin(&tab(Some("harness-studio-doc://abc"), TabKind::Page)),
             Err(NotGrantable::NoOrigin)
         );
     }
@@ -1062,7 +1072,10 @@ mod tests {
 
         // Same level, same origin: nothing happened, and in particular the
         // clock the audit surface shows did not restart.
-        assert_eq!(apply_grant(&mut state, GrantLevel::Read, 200, None), Ok(None));
+        assert_eq!(
+            apply_grant(&mut state, GrantLevel::Read, 200, None),
+            Ok(None)
+        );
         assert_eq!(state.agent_grant.as_ref().unwrap().granted_at, 100);
 
         // A different level is a decision, and dates from when it was made.
@@ -1101,7 +1114,10 @@ mod tests {
         );
         assert!(blank.agent_grant.is_none());
 
-        let mut guest = tab(Some("https://codeg-doc.localhost"), TabKind::Document);
+        let mut guest = tab(
+            Some("https://harness-studio-doc.localhost"),
+            TabKind::Document,
+        );
         assert_eq!(
             apply_grant(&mut guest, GrantLevel::Control, 1, None),
             Err(NotGrantable::DocumentGuest)
@@ -1217,7 +1233,11 @@ mod tests {
     fn a_probe_of_one_address_does_not_judge_a_grant_on_another() {
         let mut state = shared_localhost(Some(serving("/usr/local/bin/node", "/p")));
         assert_eq!(
-            revoke_if_replaced(&mut state, "http://localhost:4000", &serving("/other", "/q")),
+            revoke_if_replaced(
+                &mut state,
+                "http://localhost:4000",
+                &serving("/other", "/q")
+            ),
             None
         );
         assert!(state.agent_grant.is_some());
@@ -1264,7 +1284,10 @@ mod tests {
         assert_eq!(refreshed, None, "a button already on announces nothing");
         let grant = state.agent_grant.as_ref().expect("a grant");
         assert_eq!(grant.granted_at, 100);
-        assert_eq!(grant.listener, Some(serving("/usr/bin/python3", "/home/dev")));
+        assert_eq!(
+            grant.listener,
+            Some(serving("/usr/bin/python3", "/home/dev"))
+        );
     }
 
     #[test]
@@ -1334,12 +1357,17 @@ mod tests {
 
     #[test]
     fn the_expression_probes_before_it_calls() {
-        let js = probe_and_snapshot(&SnapshotRequest { max_chars: Some(2000) }, "7.2");
-        assert!(js.starts_with("typeof globalThis.__codegAgent === 'undefined'"));
+        let js = probe_and_snapshot(
+            &SnapshotRequest {
+                max_chars: Some(2000),
+            },
+            "7.2",
+        );
+        assert!(js.starts_with("typeof globalThis.__harnessStudioAgent === 'undefined'"));
         assert!(js.contains(r#""absent""#));
         assert!(js.contains(r#""epoch":"7.2""#));
         assert!(js.contains(r#""maxChars":2000"#));
-        assert!(js.contains("JSON.stringify(globalThis.__codegAgent.snapshot("));
+        assert!(js.contains("JSON.stringify(globalThis.__harnessStudioAgent.snapshot("));
     }
 
     /// No cap is no cap: the option is absent rather than zero, which the
@@ -1360,8 +1388,11 @@ mod tests {
     fn the_installing_form_is_one_expression_ending_in_the_call() {
         let js = install_and_snapshot(&SnapshotRequest::default(), "1.0");
         assert!(js.starts_with("(function(){\n"));
-        assert!(js.ends_with(";})()"), "must be an immediately invoked expression");
-        assert!(js.contains(";return JSON.stringify(globalThis.__codegAgent.snapshot("));
+        assert!(
+            js.ends_with(";})()"),
+            "must be an immediately invoked expression"
+        );
+        assert!(js.contains(";return JSON.stringify(globalThis.__harnessStudioAgent.snapshot("));
         // The bundle goes in whole, and it is a program: statements at the
         // top, no trailing expression of its own to be confused with ours.
         assert!(js.contains(AGENT_BUNDLE));
@@ -1413,7 +1444,8 @@ mod tests {
             },
         };
         let call = act_call(&request);
-        assert!(call.starts_with("typeof globalThis.__codegAgent === 'undefined' ? \"absent\" :"));
+        assert!(call
+            .starts_with("typeof globalThis.__harnessStudioAgent === 'undefined' ? \"absent\" :"));
         assert!(call.contains(".act(\"k9x2.3.1\", \"e7\", {"));
         assert!(call.contains("\"kind\":\"type\""));
         assert!(call.contains("\"submit\":true"));
@@ -1423,13 +1455,16 @@ mod tests {
         let keyless = ActionRequest {
             generation: "g".into(),
             target: None,
-            action: ActionKind::Press { key: "Enter".into() },
+            action: ActionKind::Press {
+                key: "Enter".into(),
+            },
         };
-        assert!(act_call(&keyless).contains(".act(\"g\", null, {\"kind\":\"press\",\"key\":\"Enter\"}))"));
+        assert!(act_call(&keyless)
+            .contains(".act(\"g\", null, {\"kind\":\"press\",\"key\":\"Enter\"}))"));
 
         let locate = locate_call("g", "e1");
         assert!(locate.contains(".locate(\"g\", \"e1\"))"));
-        assert!(locate.starts_with("typeof globalThis.__codegAgent === 'undefined'"));
+        assert!(locate.starts_with("typeof globalThis.__harnessStudioAgent === 'undefined'"));
     }
 
     /// The wire shapes both sides agree on: kebab-case kinds and errors, the
@@ -1454,12 +1489,14 @@ mod tests {
             values: vec!["l".into()],
         })
         .unwrap();
-        assert_eq!(select, serde_json::json!({ "kind": "select", "values": ["l"] }));
+        assert_eq!(
+            select,
+            serde_json::json!({ "kind": "select", "values": ["l"] })
+        );
 
-        let request: ActionRequest = serde_json::from_str(
-            r#"{"generation":"g.1.0","ref":"e3","action":{"kind":"hover"}}"#,
-        )
-        .unwrap();
+        let request: ActionRequest =
+            serde_json::from_str(r#"{"generation":"g.1.0","ref":"e3","action":{"kind":"hover"}}"#)
+                .unwrap();
         assert_eq!(request.target.as_deref(), Some("e3"));
         assert_eq!(request.action, ActionKind::Hover);
         let request: ActionRequest =
@@ -1474,7 +1511,15 @@ mod tests {
         assert_eq!(refused.error, Some(ActionError::Obscured));
         // Every error the world can name has to deserialize, or a refusal
         // reads as an unreadable answer.
-        for slug in ["stale", "not-visible", "obscured", "not-editable", "no-option", "disabled", "unsupported"] {
+        for slug in [
+            "stale",
+            "not-visible",
+            "obscured",
+            "not-editable",
+            "no-option",
+            "disabled",
+            "unsupported",
+        ] {
             let answer: WorldAnswer = serde_json::from_str(&format!(
                 r#"{{"ok":false,"url":"http://x/","error":"{slug}","detail":"d"}}"#
             ))
@@ -1493,7 +1538,10 @@ mod tests {
         .unwrap();
         // No `scrolled` key at all for an action that did not scroll, rather
         // than a null one: every action but a key press is in this shape.
-        assert_eq!(outcome, serde_json::json!({ "fidelity": "trusted", "url": "http://x/" }));
+        assert_eq!(
+            outcome,
+            serde_json::json!({ "fidelity": "trusted", "url": "http://x/" })
+        );
         let scrolled: WorldAnswer = serde_json::from_str(
             r#"{"ok":true,"url":"http://x/","scrolled":{"by":700,"top":700,"max":2900}}"#,
         )

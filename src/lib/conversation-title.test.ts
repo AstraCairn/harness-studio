@@ -38,17 +38,17 @@ describe("formatConversationTitle", () => {
     ).toBe("compare a.ts and b.ts")
   })
 
-  it("reduces session/commit/agent links (codeg:// uris) to their label", () => {
+  it("reduces session/commit/agent links (harnessstudio:// uris) to their label", () => {
     expect(
-      formatConversationTitle("[My chat](codeg://session/codex_abc)")
+      formatConversationTitle("[My chat](harnessstudio://session/codex_abc)")
     ).toBe("My chat")
     expect(
-      formatConversationTitle("[abc1234](codeg://commit/%2Frepo@abc)")
+      formatConversationTitle("[abc1234](harnessstudio://commit/%2Frepo@abc)")
     ).toBe("abc1234")
     // An agent reference keeps the `@` — it lives inside the bracket text.
-    expect(formatConversationTitle("[@Codex](codeg://agent/codex)")).toBe(
-      "@Codex"
-    )
+    expect(
+      formatConversationTitle("[@Codex](harnessstudio://agent/codex)")
+    ).toBe("@Codex")
   })
 
   it("does not touch invocation tokens that are not links", () => {

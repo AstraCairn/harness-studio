@@ -2,7 +2,7 @@
 //!
 //! Mid-turn an agent can ask the user one or more multiple-choice questions and
 //! BLOCK until the user answers — the `ask_user_question` MCP tool exposed by
-//! `codeg-mcp`. Unlike live-feedback ([`crate::acp::feedback`]), which is a
+//! `harness-studio-mcp`. Unlike live-feedback ([`crate::acp::feedback`]), which is a
 //! non-blocking pull the user pushes into, a question PAUSES the agent's tool
 //! call: the questions render as an interactive card above the conversation
 //! input box (driven by [`crate::acp::session_state::SessionState`], in-memory
@@ -27,13 +27,13 @@
 
 use std::sync::Arc;
 
+use agent_client_protocol::schema::v1::{
+    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
+    ElicitationScope, MultiSelectItems, StringPropertySchema,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use agent_client_protocol::schema::v1::{
-    CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
-    ElicitationContentValue, ElicitationMode, ElicitationPropertySchema, ElicitationScope,
-    MultiSelectItems, StringPropertySchema,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ pub struct QuestionSpec {
     /// The choices (0..=[`MAX_OPTIONS`]). Empty means free-text: the card
     /// renders only its always-present "Other" input (codex `request_user_input`
     /// and MCP-server elicitations both ask open questions this way; the
-    /// codeg-mcp ask tool still requires [`MIN_OPTIONS`] at its own parse
+    /// harness-studio-mcp ask tool still requires [`MIN_OPTIONS`] at its own parse
     /// layer).
     pub options: Vec<QuestionOption>,
     /// True when the answer is a secret (codex `request_user_input` marks API
@@ -339,7 +339,7 @@ pub fn validate_specs(specs: &[QuestionSpec]) -> Result<(), String> {
                 "questions[{qi}] `header` exceeds {MAX_HEADER_CHARS} characters"
             ));
         }
-        // Unlike `parse_questions` (the codeg-mcp tool contract, which keeps
+        // Unlike `parse_questions` (the harness-studio-mcp tool contract, which keeps
         // its [`MIN_OPTIONS`] floor), typed specs allow 0..=[`MAX_OPTIONS`]:
         // a question with no options is a legal free-text ask — the card
         // renders its always-present "Other" input alone (codex elicitation
@@ -352,7 +352,9 @@ pub fn validate_specs(specs: &[QuestionSpec]) -> Result<(), String> {
         let mut seen_labels = std::collections::HashSet::new();
         for (oi, o) in q.options.iter().enumerate() {
             if o.label.trim().is_empty() {
-                return Err(format!("questions[{qi}].options[{oi}] has an empty `label`"));
+                return Err(format!(
+                    "questions[{qi}].options[{oi}] has an empty `label`"
+                ));
             }
             if o.label.chars().count() > MAX_QUESTION_TEXT_CHARS {
                 return Err(format!(
@@ -442,7 +444,7 @@ pub fn build_outcome(questions: &[QuestionSpec], answer: &QuestionAnswer) -> Que
     }
 }
 
-/// Some native asks carry NO `header` (the short category chip codeg renders):
+/// Some native asks carry NO `header` (the short category chip harness_studio renders):
 /// grok's `ask_user_question` tool and pi's extension-UI `select` both send bare
 /// question text. Synthesize one from the leading characters, bounded to
 /// [`MAX_HEADER_CHARS`]. Always returns a non-empty, in-bounds string so
@@ -457,13 +459,13 @@ pub(crate) fn synthesize_header(question: &str) -> String {
     }
 }
 
-/// Convert grok's native `_x.ai/ask_user_question` ext-request params into codeg
+/// Convert grok's native `_x.ai/ask_user_question` ext-request params into harness_studio
 /// [`QuestionSpec`]s, so grok's own questions render in the SAME interactive card
-/// as the `codeg-mcp` ask tool (grok emits an ACP ext request and blocks on the
-/// reply; if codeg doesn't answer it, grok falls back to inert fire-and-forget
+/// as the `harness-studio-mcp` ask tool (grok emits an ACP ext request and blocks on the
+/// reply; if harness_studio doesn't answer it, grok falls back to inert fire-and-forget
 /// rendering — see the connection handler). Grok's wire shape per question is
 /// `{question, options:[{label, description}], multiSelect}` — no `header`, which
-/// we synthesize. Counts are clamped to codeg's bounds because
+/// we synthesize. Counts are clamped to harness_studio's bounds because
 /// [`crate::acp::manager::ConnectionManager::register_question`] re-runs
 /// [`validate_specs`] and would otherwise decline the whole ask: more than
 /// [`MAX_QUESTIONS`] questions or [`MAX_OPTIONS`] options are truncated (logged,
@@ -581,7 +583,7 @@ pub struct PiSelectAsk {
 
 /// Recognize a `session/request_permission` that is really pi asking the user a
 /// multiple-choice question, and convert it into a [`QuestionSpec`] so it renders
-/// in the SAME interactive card as the codeg-mcp ask tool.
+/// in the SAME interactive card as the harness-studio-mcp ask tool.
 ///
 /// pi has no dedicated question channel: `ctx.ui.select` from an extension
 /// becomes an `extension_ui_request`, which pi-acp translates into a permission
@@ -679,29 +681,29 @@ pub fn pi_select_option_id(outcome: &QuestionOutcome, ask: &PiSelectAsk) -> Opti
         .map(|(_, option_id)| option_id.clone())
 }
 
-/// True when a host's name for a tool is codeg's OWN `ask_user_question`
+/// True when a host's name for a tool is harness_studio's OWN `ask_user_question`
 /// companion tool, in whatever spelling the host composed it
-/// (`mcp__codeg-mcp__ask_user_question` from claude-agent-acp,
-/// `codeg-mcp/ask_user_question`, `codeg-mcp: ask_user_question`, …). Separators
+/// (`mcp__harness-studio-mcp__ask_user_question` from claude-agent-acp,
+/// `harness-studio-mcp/ask_user_question`, `harness-studio-mcp: ask_user_question`, …). Separators
 /// are folded and case is ignored, so only the two identifying words matter.
 ///
-/// BOTH halves have to be present — the server name codeg itself injects
-/// (`codeg-mcp`, see `acp::connection::inject_codeg_mcp`) AND the tool name.
+/// BOTH halves have to be present — the server name harness_studio itself injects
+/// (`harness-studio-mcp`, see `acp::connection::inject_harness_studio_mcp`) AND the tool name.
 /// The frontend can afford a bare `*ask_user_question` suffix rule because a
 /// wrong match there only picks a nicer card; this one unlocks an AUTO-APPROVAL
 /// of a blocked `session/request_permission`, and a third-party MCP server's
-/// similarly named tool is the user's to approve, not codeg's.
+/// similarly named tool is the user's to approve, not harness_studio's.
 ///
-/// Auto-approving codeg's own ask tool is not a permission being skipped: the
+/// Auto-approving harness_studio's own ask tool is not a permission being skipped: the
 /// tool's entire effect is to put the interactive question card on screen and
 /// block until the user answers it. The consent IS the next dialog, so gating it
 /// behind a generic "run this tool?" card asks the user to approve being asked.
-pub fn is_codeg_ask_tool_name(name: &str) -> bool {
+pub fn is_harness_studio_ask_tool_name(name: &str) -> bool {
     let normalized = name
         .trim()
         .to_ascii_lowercase()
         .replace(['-', ' ', '.', '/', ':'], "_");
-    normalized.ends_with("ask_user_question") && normalized.contains("codeg_mcp")
+    normalized.ends_with("ask_user_question") && normalized.contains("harness_studio_mcp")
 }
 
 /// Serialize a resolved [`QuestionOutcome`] into grok's `AskUserQuestionExtResponse`
@@ -876,7 +878,7 @@ pub const ELICITATION_DECLINE_OPTION_ID: &str = "__decline";
 /// ask card: an MCP tool-call approval (`_meta.codex_approval_kind ==
 /// "mcp_tool_call"`) or a message-only confirm (a form with no renderable
 /// fields). Routing these through the permission flow keeps MCP approvals
-/// looking exactly like they did before codeg advertised `elicitation.form`
+/// looking exactly like they did before harness_studio advertised `elicitation.form`
 /// (codex-acp then used `session/request_permission` with the same options).
 pub struct ElicitationApproval {
     /// The human prompt ("Allow tool call?" / the MCP server's message).
@@ -917,7 +919,10 @@ fn is_other_companion(id: &str) -> bool {
     let Some(pos) = id.rfind("__other") else {
         return false;
     };
-    pos > 0 && id[pos + "__other".len()..].chars().all(|c| c.is_ascii_digit())
+    pos > 0
+        && id[pos + "__other".len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
 }
 
 /// True when the raw schema property carries codex's own companion marker, the
@@ -956,7 +961,7 @@ fn codex_companion_role(raw: &Value, id: &str) -> Option<CodexUserInputShape> {
 /// actual question would never be displayed at all.
 ///
 /// The connection pins this at `initialize` from the RUNNING adapter's
-/// `agentInfo.version` (`SessionState::codex_user_input_shape`) — codeg's pin is
+/// `agentInfo.version` (`SessionState::codex_user_input_shape`) — harness_studio's pin is
 /// 1.12.0, but launch may resolve an older PATH install or a custom pinned
 /// version, and both are supported configurations.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -975,7 +980,7 @@ pub enum CodexUserInputShape {
 ///
 /// The identity has to come from the connection, not from the payload. `_meta`
 /// is an OPEN namespace: the ACP spec tells implementations to make no
-/// assumptions about keys they do not own, and this parser is shared — codeg
+/// assumptions about keys they do not own, and this parser is shared — harness_studio
 /// advertises `elicitation.form` to DeepSeek as well as Codex, and EITHER
 /// adapter also forwards arbitrary MCP-server forms through it. Deciding "this
 /// is codex" from `_meta.codex.*` in the request would let a third party, by
@@ -1047,17 +1052,14 @@ fn codex_property_meta<'a>(raw: &'a Value, id: &str) -> Option<&'a Value> {
 ///      question.
 ///   3. The pinned adapter's shape, which is 1.12.0's — the last resort for an
 ///      undatable form from an unidentified adapter, and the likeliest truth
-///      since the pin is what codeg launches.
+///      since the pin is what harness_studio launches.
 fn codex_form_shape(raw: &Value, peer: ElicitationPeer) -> Option<CodexUserInputShape> {
     // Identity first, and unconditionally: a non-codex peer gets the generic
     // reading no matter what its `_meta` says.
     let ElicitationPeer::Codex(running) = peer else {
         return None;
     };
-    let properties = raw
-        .get("requestedSchema")?
-        .get("properties")?
-        .as_object()?;
+    let properties = raw.get("requestedSchema")?.get("properties")?.as_object()?;
     let mut is_codex_form = false;
     let mut companion_shape = None;
     for id in properties.keys() {
@@ -1065,8 +1067,8 @@ fn codex_form_shape(raw: &Value, peer: ElicitationPeer) -> Option<CodexUserInput
             companion_shape = Some(shape);
             continue;
         }
-        is_codex_form |= codex_property_meta(raw, id)
-            .is_some_and(|codex| codex.get("isOther").is_some());
+        is_codex_form |=
+            codex_property_meta(raw, id).is_some_and(|codex| codex.get("isOther").is_some());
     }
     if !is_codex_form && companion_shape.is_none() {
         return None;
@@ -1081,14 +1083,14 @@ fn codex_form_shape(raw: &Value, peer: ElicitationPeer) -> Option<CodexUserInput
 /// The synthetic choice codex-acp 1.12.0–2.0.x appends to an `isOther`
 /// question's `oneOf`, verbatim — label and description both.
 ///
-/// codex-acp 2.1.0 (#570) stopped appending it for AIR clients — and codeg is
+/// codex-acp 2.1.0 (#570) stopped appending it for AIR clients — and harness_studio is
 /// one, by advertising `_meta.jetbrains.air` at all — in favour of the
 /// AIR custom answer (see [`build_elicitation_response`]). So against the pin
 /// this filter never fires; it stays for the older adapters a custom pin or a
 /// PATH install can still launch, which keep injecting the option for every
 /// client.
 ///
-/// codeg's card already offers a free-text "Other" input on every question and
+/// harness_studio's card already offers a free-text "Other" input on every question and
 /// writes it to the MAIN field, while the note field this option points at is
 /// skipped as a companion. So the option is a dead end here: picking it sends
 /// codex the bare string "None of the above" and no elaboration.
@@ -1168,7 +1170,7 @@ fn is_codex_synthetic_other_choice(raw: &Value, id: &str, label: &str, value: &s
 /// agent namespace so every AskUserQuestion bridge can be recognized the same
 /// way; its own companion fields are named `question_<n>_custom`, which
 /// [`is_other_companion`]'s `__other` heuristic does not match. Reading the
-/// marker means codeg keeps collapsing the companion into the card's built-in
+/// marker means harness_studio keeps collapsing the companion into the card's built-in
 /// "Other" input no matter which adapter produced the form.
 ///
 /// claude-agent-acp 0.82.0 moved the marker to
@@ -1228,7 +1230,7 @@ fn is_mcp_tool_call_approval(raw: &Value) -> bool {
 ///   * MCP tool-call approvals (`_meta.codex_approval_kind`) → [`ElicitationApproval`]
 ///     with the persist choices (`once`/`session`/`always`) + Decline — the
 ///     permission card, exactly like the pre-capability `request_permission`
-///     fallback. This includes approvals for codeg-mcp's OWN tools in
+///     fallback. This includes approvals for harness-studio-mcp's OWN tools in
 ///     consent-requiring permission modes, so declining them here would break
 ///     ask/delegation for codex outright.
 ///   * Forms with no renderable fields (message-only MCP confirms) →
@@ -1248,18 +1250,15 @@ fn is_mcp_tool_call_approval(raw: &Value) -> bool {
 /// then dates the form from its own markers and falls back to the pinned
 /// adapter's shape.
 ///
-/// Counts are clamped to codeg's bounds because
+/// Counts are clamped to harness_studio's bounds because
 /// [`crate::acp::manager::ConnectionManager::register_question`] re-runs
 /// [`validate_specs`]. Errors only on non-form / undeserializable requests,
 /// which the connection handler turns into a graceful decline.
-pub fn classify_elicitation(
-    raw: &Value,
-    peer: ElicitationPeer,
-) -> Result<ElicitationPlan, String> {
+pub fn classify_elicitation(raw: &Value, peer: ElicitationPeer) -> Result<ElicitationPlan, String> {
     let req: CreateElicitationRequest = serde_json::from_value(raw.clone())
         .map_err(|e| format!("unparseable elicitation request: {e}"))?;
     let ElicitationMode::Form(form) = &req.mode else {
-        // codeg only advertises `elicitation.form` — URL mode goes down
+        // harness_studio only advertises `elicitation.form` — URL mode goes down
         // codex-acp's `request_permission` fallback and never reaches here.
         return Err("elicitation is not form mode".to_string());
     };
@@ -1354,7 +1353,11 @@ fn approval_from_form(
                 label: if c.label.trim().is_empty() {
                     value.to_string()
                 } else {
-                    c.label.trim().chars().take(MAX_QUESTION_TEXT_CHARS).collect()
+                    c.label
+                        .trim()
+                        .chars()
+                        .take(MAX_QUESTION_TEXT_CHARS)
+                        .collect()
                 },
                 kind: if value == "once" {
                     "allow_once"
@@ -1593,7 +1596,7 @@ fn parse_bool_answer(v: &str) -> Option<bool> {
 /// `["None of the above", "user_note: <text>"]` (≤2.0.x passed the text through
 /// as the answer itself). The reloaded rollout therefore carries that pair, and
 /// the frontend's `parseCodexAnswers` decodes it back to the text the user
-/// typed, so the live card and the reloaded one agree. If codeg ever advertises
+/// typed, so the live card and the reloaded one agree. If harness_studio ever advertises
 /// `elicitation.form` to an agent that requires the answer under the companion
 /// key instead (claude-agent-acp reads `question_<n>_custom` separately), this
 /// has to route the free-text answer there using the marker's `questionId`.
@@ -1617,7 +1620,13 @@ pub fn build_elicitation_response(
         let mapped: Vec<String> = item
             .selected
             .iter()
-            .map(|l| field.value_by_label.get(l).cloned().unwrap_or_else(|| l.clone()))
+            .map(|l| {
+                field
+                    .value_by_label
+                    .get(l)
+                    .cloned()
+                    .unwrap_or_else(|| l.clone())
+            })
             .collect();
         let value = match field.kind {
             ElicitationFieldKind::Text => match mapped.into_iter().next() {
@@ -1701,7 +1710,7 @@ pub fn elicitation_cancel_response() -> CreateElicitationResponse {
 }
 
 /// Build the `raw_input` (questions) for the in-stream `AskQuestionResultCard`
-/// codeg synthesizes for a native ask that resolves out-of-band rather than as a
+/// harness_studio synthesizes for a native ask that resolves out-of-band rather than as a
 /// completed stream tool_call. Three callers: grok (answers over the
 /// `_x.ai/ask_user_question` ext round-trip — `handle_grok_ask_user_question`),
 /// codex `request_user_input` (answers over the `elicitation/create` round-trip
@@ -1734,7 +1743,7 @@ pub fn grok_result_card_input(specs: &[QuestionSpec]) -> Value {
 }
 
 /// Build the `raw_output` (`{answers, declined}` envelope) for the in-stream
-/// `AskQuestionResultCard` — the codeg-mcp `structuredContent` shape the frontend
+/// `AskQuestionResultCard` — the harness-studio-mcp `structuredContent` shape the frontend
 /// already parses (`parseAskQuestionOutcome`). Emits `header:""` to match
 /// [`grok_result_card_input`] (see its docs). Companion to [`grok_result_card_input`].
 pub fn grok_result_card_output(outcome: &QuestionOutcome) -> Value {
@@ -1755,7 +1764,7 @@ pub fn grok_result_card_output(outcome: &QuestionOutcome) -> Value {
 
 /// The hot-swappable feature config read at MCP injection time. Kept tiny and
 /// separate from `FeedbackConfig` / `DelegationConfig` so the three features
-/// toggle independently — `codeg-mcp` is injected when ANY is enabled, and each
+/// toggle independently — `harness-studio-mcp` is injected when ANY is enabled, and each
 /// tool is listed only when its own feature is on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuestionConfig {
@@ -1870,7 +1879,11 @@ mod tests {
         assert_eq!(q.specs[0].header, "Approach");
         assert!(!q.specs[0].multi_select);
         assert!(!q.specs[0].is_secret);
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental", "Rewrite"]);
         assert_eq!(q.fields[0].kind, ElicitationFieldKind::Text);
         // The elicitation's toolCallId rides along so the connection handler can
@@ -1927,7 +1940,11 @@ mod tests {
             q.specs[0].header, "Approach",
             "…and the short tab label in `description`"
         );
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(
             labels,
             ["Incremental", "Rewrite"],
@@ -1961,7 +1978,11 @@ mod tests {
             json!(["q1"]),
         );
         let q = expect_questions(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental", "None of the above"]);
     }
 
@@ -2024,7 +2045,11 @@ mod tests {
 
         // Running ≥1.12.0 — `title` is the question.
         let q = expect_questions(
-            classify_elicitation(&raw, ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle))).unwrap(),
+            classify_elicitation(
+                &raw,
+                ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle)),
+            )
+            .unwrap(),
         );
         assert_eq!(q.specs[0].question, "Which approach should I take?");
         assert_eq!(q.specs[0].header, "Approach");
@@ -2032,7 +2057,11 @@ mod tests {
         // Running ≤1.11.0 — the old reading, even though no marker dates the
         // form. A custom pin is a supported configuration.
         let q = expect_questions(
-            classify_elicitation(&raw, ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInDescription))).unwrap(),
+            classify_elicitation(
+                &raw,
+                ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInDescription)),
+            )
+            .unwrap(),
         );
         assert_eq!(q.specs[0].question, "Approach");
         // …and the question text lands in the header slot, where the
@@ -2074,7 +2103,11 @@ mod tests {
             json!([]),
         );
         let q = expect_questions(
-            classify_elicitation(&raw, ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle))).unwrap(),
+            classify_elicitation(
+                &raw,
+                ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle)),
+            )
+            .unwrap(),
         );
         assert_eq!(q.specs[0].question, "Approach", "running version wins");
         // …and with no running version, the marker dates it the old way.
@@ -2113,7 +2146,11 @@ mod tests {
             ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInDescription)),
         ] {
             let q = expect_questions(classify_elicitation(&raw, peer).unwrap());
-            let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+            let labels: Vec<_> = q.specs[0]
+                .options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect();
             assert_eq!(
                 labels,
                 ["Incremental", "None of the above"],
@@ -2125,7 +2162,7 @@ mod tests {
     /// The gate is the PEER, not the payload. `_meta` is an open namespace, so
     /// a non-codex speaker — DeepSeek, or any MCP server whose form either
     /// adapter relays — can carry a `codex` block of its own meaning. If that
-    /// were enough to unlock the codex fixups, a third party could make codeg
+    /// were enough to unlock the codex fixups, a third party could make harness_studio
     /// hide one of its fields (the companion skip), read its questions upside
     /// down (the orientation flip) and delete one of its options (the synthetic
     /// filter). None of those may fire on `ElicitationPeer::Other`.
@@ -2171,7 +2208,11 @@ mod tests {
         );
         assert_eq!(q.specs[0].question, "Which approach should I take?");
         assert_eq!(q.specs[0].header, "Approach");
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental", "None of the above"]);
 
         // The identical payload from codex: companion skipped, 1.12 orientation,
@@ -2186,7 +2227,11 @@ mod tests {
         );
         assert_eq!(q.specs.len(), 1);
         assert_eq!(q.specs[0].question, "Approach");
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental"]);
     }
 
@@ -2231,7 +2276,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(
             labels,
             ["None of the above"],
@@ -2268,14 +2317,22 @@ mod tests {
             json!(["q1"]),
         );
         let q = expect_questions(
-            classify_elicitation(&raw, ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle))).unwrap(),
+            classify_elicitation(
+                &raw,
+                ElicitationPeer::Codex(Some(CodexUserInputShape::QuestionInTitle)),
+            )
+            .unwrap(),
         );
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Incremental", "None of the above"]);
     }
 
     /// A generic MCP server's form has no `codex` namespace at all, so it keeps
-    /// the JSON Schema reading codeg has always used — `description` is the
+    /// the JSON Schema reading harness_studio has always used — `description` is the
     /// prose, `title` the short label. The swap is codex-only.
     #[test]
     fn classify_elicitation_generic_mcp_form_keeps_description_as_the_question() {
@@ -2290,7 +2347,10 @@ mod tests {
             json!(["port"]),
         );
         let q = expect_questions(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
-        assert_eq!(q.specs[0].question, "Which port should the server listen on?");
+        assert_eq!(
+            q.specs[0].question,
+            "Which port should the server listen on?"
+        );
         assert_eq!(q.specs[0].header, "Port");
     }
 
@@ -2425,8 +2485,8 @@ mod tests {
         );
     }
 
-    /// The `request_user_input` form codex-acp 2.1.1 sends codeg, verbatim but
-    /// for the two ids: recorded live over stdio with codeg's exact
+    /// The `request_user_input` form codex-acp 2.1.1 sends harness_studio, verbatim but
+    /// for the two ids: recorded live over stdio with harness_studio's exact
     /// `clientCapabilities`, a plan-mode turn whose model calls
     /// `request_user_input` (it matches upstream's
     /// `elicitation-user-input-air-custom-answer.json`). 2.1.0's recording
@@ -2489,7 +2549,7 @@ mod tests {
         assert_eq!(labels, ["Run tests", "Stop"]);
         assert_eq!(q.tool_call_id.as_deref(), Some("request-user-input-1"));
 
-        // What codeg writes back, and (recorded in the same live run, off the
+        // What harness_studio writes back, and (recorded in the same live run, off the
         // tool output the model then received) what codex is handed for it:
         //   pick "Run tests"          → content.next_step = "Run tests"
         //                               → codex ["Run tests"]
@@ -2624,7 +2684,11 @@ mod tests {
         assert_eq!(q.specs.len(), 1);
         assert!(q.specs[0].multi_select);
         // Titles display; consts ride back on accept.
-        let labels: Vec<_> = q.specs[0].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Rust", "TS"]);
         let answer = QuestionAnswer {
             answers: vec![QuestionAnswerItem {
@@ -2652,7 +2716,11 @@ mod tests {
         assert_eq!(q.specs.len(), 3);
         // Booleans render as Yes/No; numbers as free text.
         let confirm = q.specs.iter().position(|s| s.id == "confirm").unwrap();
-        let labels: Vec<_> = q.specs[confirm].options.iter().map(|o| o.label.as_str()).collect();
+        let labels: Vec<_> = q.specs[confirm]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect();
         assert_eq!(labels, ["Yes", "No"]);
 
         let answer = QuestionAnswer {
@@ -2743,20 +2811,27 @@ mod tests {
             },
             "_meta": {"codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"]}
         });
-        let approval = expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
+        let approval =
+            expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
         assert_eq!(approval.message, "Allow tool call?");
         assert_eq!(approval.tool_call_id.as_deref(), Some("call-1"));
         assert!(approval.persist_in_content);
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
-        assert_eq!(ids, ["once", "session", "always", ELICITATION_DECLINE_OPTION_ID]);
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["once", "session", "always", ELICITATION_DECLINE_OPTION_ID]
+        );
         assert_eq!(approval.options[0].label, "Allow once");
         assert_eq!(approval.options[0].kind, "allow_once");
         assert_eq!(approval.options[1].kind, "allow_always");
 
         // Accepting echoes the chosen persist back in content…
-        let v =
-            serde_json::to_value(build_elicitation_approval_response(&approval, "session"))
-                .unwrap();
+        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "session"))
+            .unwrap();
         assert_eq!(v["action"], "accept");
         assert_eq!(v["content"]["persist"], "session");
         // …declining (or an unknown option) maps to decline.
@@ -2766,8 +2841,8 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["action"], "decline");
-        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "bogus"))
-            .unwrap();
+        let v =
+            serde_json::to_value(build_elicitation_approval_response(&approval, "bogus")).unwrap();
         assert_eq!(v["action"], "decline");
     }
 
@@ -2784,12 +2859,17 @@ mod tests {
             "requestedSchema": {"type": "object", "properties": {}},
             "_meta": {"codex_approval_kind": "mcp_tool_call"}
         });
-        let approval = expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
+        let approval =
+            expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
         assert!(!approval.persist_in_content);
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
         assert_eq!(ids, ["accept", ELICITATION_DECLINE_OPTION_ID]);
-        let v = serde_json::to_value(build_elicitation_approval_response(&approval, "accept"))
-            .unwrap();
+        let v =
+            serde_json::to_value(build_elicitation_approval_response(&approval, "accept")).unwrap();
         assert_eq!(v["action"], "accept");
         assert!(
             v.get("content").is_none() || v["content"].is_null(),
@@ -2802,9 +2882,14 @@ mod tests {
         // A non-approval form with nothing to fill in (a bare MCP server
         // confirmation) renders Accept/Decline rather than auto-declining.
         let raw = elicitation_raw(json!({}), json!([]));
-        let approval = expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
+        let approval =
+            expect_approval(classify_elicitation(&raw, ElicitationPeer::Codex(None)).unwrap());
         assert_eq!(approval.message, "Input requested");
-        let ids: Vec<_> = approval.options.iter().map(|o| o.option_id.as_str()).collect();
+        let ids: Vec<_> = approval
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
         assert_eq!(ids, ["accept", ELICITATION_DECLINE_OPTION_ID]);
     }
 
@@ -2901,7 +2986,10 @@ mod tests {
             validate_specs(&[spec("ok", 2, MAX_QUESTION_TEXT_CHARS + 1)]).is_err(),
             "oversized option label"
         );
-        assert!(validate_specs(&[spec("   ", 2, 0)]).is_err(), "blank question");
+        assert!(
+            validate_specs(&[spec("   ", 2, 0)]).is_err(),
+            "blank question"
+        );
 
         // Duplicate question id across the set (spec() hardcodes id "q") — answer
         // routing + UI state key on id, so duplicates must be rejected.
@@ -3043,7 +3131,13 @@ mod tests {
                 labels: vec!["x".into()],
             });
         }
-        let outcome = build_outcome(&qs, &QuestionAnswer { answers: items, declined: false });
+        let outcome = build_outcome(
+            &qs,
+            &QuestionAnswer {
+                answers: items,
+                declined: false,
+            },
+        );
         assert_eq!(outcome.answers.len(), 1);
         // Cap = options.len() + 1 = 3 (every real option plus one "Other"); the
         // FIRST three are kept (early break — labels past the cap and the 10k
@@ -3173,7 +3267,7 @@ mod tests {
 
     #[test]
     fn parse_grok_ext_clamps_questions_and_options_to_bounds() {
-        // 6 questions, each with 6 options — both past codeg's maxima.
+        // 6 questions, each with 6 options — both past harness_studio's maxima.
         let many: Vec<Value> = (0..6)
             .map(|qi| {
                 let opts: Vec<Value> = (0..6)
@@ -3184,7 +3278,10 @@ mod tests {
             .collect();
         let specs = parse_grok_ext_questions(&grok_params(json!(many))).unwrap();
         assert_eq!(specs.len(), MAX_QUESTIONS, "questions clamped");
-        assert!(specs.iter().all(|s| s.options.len() == MAX_OPTIONS), "options clamped");
+        assert!(
+            specs.iter().all(|s| s.options.len() == MAX_OPTIONS),
+            "options clamped"
+        );
         validate_specs(&specs).unwrap();
     }
 
@@ -3336,44 +3433,44 @@ mod tests {
     }
 
     #[test]
-    fn is_codeg_ask_tool_name_accepts_every_host_spelling_of_codegs_own_tool() {
+    fn is_harness_studio_ask_tool_name_accepts_every_host_spelling_of_harness_studios_own_tool() {
         for spelling in [
             // claude-agent-acp: an MCP tool's permission card title IS the
             // raw tool name.
-            "mcp__codeg-mcp__ask_user_question",
-            "codeg-mcp/ask_user_question",
-            "codeg-mcp: ask_user_question",
-            "mcp.codeg-mcp.ask_user_question",
+            "mcp__harness-studio-mcp__ask_user_question",
+            "harness-studio-mcp/ask_user_question",
+            "harness-studio-mcp: ask_user_question",
+            "mcp.harness-studio-mcp.ask_user_question",
             // Hosts that title-case or pad it.
-            "  MCP__Codeg-MCP__Ask_User_Question  ",
+            "  MCP__HarnessStudio-MCP__Ask_User_Question  ",
         ] {
             assert!(
-                is_codeg_ask_tool_name(spelling),
-                "{spelling} is codeg's own ask tool"
+                is_harness_studio_ask_tool_name(spelling),
+                "{spelling} is harness_studio's own ask tool"
             );
         }
     }
 
     #[test]
-    fn is_codeg_ask_tool_name_rejects_tools_that_are_not_codegs_ask() {
+    fn is_harness_studio_ask_tool_name_rejects_tools_that_are_not_harness_studios_ask() {
         for other in [
             // A third-party MCP server's similarly named tool: approving it is
             // the user's decision, so the bare suffix must NOT be enough.
             "mcp__other-server__ask_user_question",
             "ask_user_question",
             // grok's NATIVE ask arrives on its own ext channel, never as a
-            // permission request — and it is not codeg-mcp's tool either.
+            // permission request — and it is not harness-studio-mcp's tool either.
             "_x.ai/ask_user_question",
-            // Codeg's other companion tools keep their approval gate.
-            "mcp__codeg-mcp__delegate_to_agent",
-            "mcp__codeg-mcp__check_user_feedback",
+            // HarnessStudio's other companion tools keep their approval gate.
+            "mcp__harness-studio-mcp__delegate_to_agent",
+            "mcp__harness-studio-mcp__check_user_feedback",
             // Right server, right words, wrong tool — the match is anchored at
             // the END so a longer name cannot borrow it.
-            "mcp__codeg-mcp__ask_user_question_twice",
+            "mcp__harness-studio-mcp__ask_user_question_twice",
             "",
         ] {
             assert!(
-                !is_codeg_ask_tool_name(other),
+                !is_harness_studio_ask_tool_name(other),
                 "{other} must keep its approval card"
             );
         }
@@ -3455,8 +3552,14 @@ mod tests {
             answers: vec![],
             declined: true,
         };
-        assert_eq!(build_grok_ext_response(&outcome), json!({ "outcome": "skip_interview" }));
-        assert_eq!(grok_ext_skip_response(), json!({ "outcome": "skip_interview" }));
+        assert_eq!(
+            build_grok_ext_response(&outcome),
+            json!({ "outcome": "skip_interview" })
+        );
+        assert_eq!(
+            grok_ext_skip_response(),
+            json!({ "outcome": "skip_interview" })
+        );
     }
 
     #[test]
@@ -3551,7 +3654,10 @@ mod tests {
         );
         let input = grok_result_card_input(&specs);
         let output = grok_result_card_output(&outcome);
-        assert_eq!(input["questions"][0]["question"], output["answers"][0]["question"]);
+        assert_eq!(
+            input["questions"][0]["question"],
+            output["answers"][0]["question"]
+        );
         assert_eq!(output["answers"][0]["header"], "");
     }
 }

@@ -11,7 +11,7 @@
 //!
 //! Phase 5: ACP events are now consumed from `InternalEventBus`
 //! (`Arc<EventEnvelope>`, no JSON parse), while folder/app non-ACP channels
-//! continue to flow through `WebEventBroadcaster`. The subscriber selects
+//! continue to flow through `EventBroadcaster`. The subscriber selects
 //! over both receivers in the same `tokio::select!` loop.
 
 use std::collections::{HashMap, HashSet};
@@ -26,9 +26,9 @@ use tokio::task::JoinHandle;
 use crate::acp::internal_bus::InternalEventBus;
 use crate::acp::types::{AcpEvent, ConnectionStatus, EventEnvelope};
 use crate::db::entities::conversation::ConversationStatus;
+use crate::events::{emit_event, AppEvent, EventBroadcaster, EventEmitter};
 use crate::logging::throttle::{LagLogThrottle, LAG_LOG_WINDOW};
 use crate::models::pet::PetState;
-use crate::web::event_bridge::{emit_event, EventEmitter, WebEvent, WebEventBroadcaster};
 
 /// Shared latest-known `PetState`, written by the subscriber task and read
 /// by the `pet_get_current_state` command. Lets a freshly opened pet window
@@ -357,7 +357,7 @@ fn cancel_failed_recovery(clear_task: &mut Option<JoinHandle<()>>) {
 /// firehose entirely (eliminating the WS receiver-side dedup hack).
 pub fn pet_state_subscriber_task(
     bus: Arc<InternalEventBus>,
-    broadcaster: Arc<WebEventBroadcaster>,
+    broadcaster: Arc<EventBroadcaster>,
     emitter: EventEmitter,
     handle: PetStateHandle,
 ) -> impl Future<Output = ()> + Send + 'static {
@@ -487,7 +487,7 @@ pub fn pet_state_subscriber_task(
                 }
                 web_event = web_rx.recv() => {
                     match web_event {
-                        Ok(WebEvent { channel, payload }) => {
+                        Ok(AppEvent { channel, payload }) => {
                             // Folder/app side-channels stay on the JSON
                             // broadcaster: they aren't ACP envelopes, and the
                             // emitters (folder commands, agent installer)
@@ -1238,8 +1238,14 @@ mod tests {
 
         // High-volume / streaming variants — must NOT trigger the filter.
         let ignored: Vec<AcpEvent> = vec![
-            AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None },
-            AcpEvent::Thinking { text: "x".into(), parent_tool_use_id: None },
+            AcpEvent::ContentDelta {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
+            AcpEvent::Thinking {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
             AcpEvent::UsageUpdate { used: 1, size: 1 },
             AcpEvent::SessionStarted {
                 session_id: "ext".into(),
@@ -1257,16 +1263,16 @@ mod tests {
         handle: PetStateHandle,
     ) -> (
         Arc<InternalEventBus>,
-        Arc<WebEventBroadcaster>,
-        broadcast::Receiver<WebEvent>,
+        Arc<EventBroadcaster>,
+        broadcast::Receiver<AppEvent>,
     ) {
         let metrics = Arc::new(crate::acp::EventBusMetrics::default());
         let bus = Arc::new(InternalEventBus::new(metrics));
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         // The emitter's `bus` is unused in these tests (we don't call
         // `emit_with_state`); only its broadcaster is — `pet://state` /
         // `pet://oneshot` go through `emit_event` → broadcaster.
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
         let rx = broadcaster.subscribe();
         tokio::spawn(pet_state_subscriber_task(
             bus.clone(),
@@ -1481,7 +1487,7 @@ mod tests {
         assert_eq!(recovered.payload.as_ref(), &serde_json::json!("idle"));
     }
 
-    async fn read_until_oneshot(rx: &mut broadcast::Receiver<WebEvent>) -> WebEvent {
+    async fn read_until_oneshot(rx: &mut broadcast::Receiver<AppEvent>) -> AppEvent {
         loop {
             let evt = tokio::time::timeout(Duration::from_secs(1), rx.recv())
                 .await
@@ -1493,7 +1499,7 @@ mod tests {
         }
     }
 
-    async fn read_state_event(rx: &mut broadcast::Receiver<WebEvent>) -> WebEvent {
+    async fn read_state_event(rx: &mut broadcast::Receiver<AppEvent>) -> AppEvent {
         loop {
             let evt = tokio::time::timeout(Duration::from_secs(10), rx.recv())
                 .await
@@ -1571,8 +1577,8 @@ mod tests {
         use crate::commands::pet::pet_celebrate_core;
         use crate::models::pet::PetCelebrationKind;
 
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
-        let emitter = EventEmitter::test_web_only(broadcaster.clone());
+        let broadcaster = Arc::new(EventBroadcaster::new());
+        let emitter = EventEmitter::test_local(broadcaster.clone());
         let mut rx = broadcaster.subscribe();
 
         pet_celebrate_core(&emitter, PetCelebrationKind::Jumping);

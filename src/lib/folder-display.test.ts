@@ -96,25 +96,28 @@ describe("resolvePickerSelectedFolderId", () => {
 describe("formatFolderLabelWithAlias", () => {
   it("renders `alias [ name ]` (spaced) when an alias is set", () => {
     expect(
-      formatFolderLabelWithAlias({ name: "codeg", alias: "My Project" })
-    ).toBe("My Project [ codeg ]")
+      formatFolderLabelWithAlias({
+        name: "harness_studio",
+        alias: "My Project",
+      })
+    ).toBe("My Project [ harness_studio ]")
   })
 
   it("falls back to the bare name when alias is null", () => {
-    expect(formatFolderLabelWithAlias({ name: "codeg", alias: null })).toBe(
-      "codeg"
-    )
+    expect(
+      formatFolderLabelWithAlias({ name: "harness_studio", alias: null })
+    ).toBe("harness_studio")
   })
 
   it("treats an empty / whitespace-only alias as unset", () => {
-    expect(formatFolderLabelWithAlias({ name: "codeg", alias: "   " })).toBe(
-      "codeg"
-    )
+    expect(
+      formatFolderLabelWithAlias({ name: "harness_studio", alias: "   " })
+    ).toBe("harness_studio")
   })
 
   it("trims surrounding whitespace from the alias", () => {
     expect(
-      formatFolderLabelWithAlias({ name: "codeg", alias: "  Work  " })
-    ).toBe("Work [ codeg ]")
+      formatFolderLabelWithAlias({ name: "harness_studio", alias: "  Work  " })
+    ).toBe("Work [ harness_studio ]")
   })
 })

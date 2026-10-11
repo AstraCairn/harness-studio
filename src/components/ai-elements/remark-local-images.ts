@@ -88,8 +88,10 @@ export function remarkLocalImages() {
         ...image.data,
         hName: "span",
         hProperties: {
-          "data-codeg-local-image": source,
-          "data-codeg-image-linked": linkedImages.has(image) ? "true" : "false",
+          "data-harness-studio-local-image": source,
+          "data-harness-studio-image-linked": linkedImages.has(image)
+            ? "true"
+            : "false",
         },
         hChildren: [{ type: "text", value: image.alt ?? "" }],
       }

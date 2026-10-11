@@ -1,6 +1,6 @@
 //! `DelegationMetaWriter` — broker capability that attaches the live
 //! delegation state onto the parent's active `delegate_to_agent`
-//! tool-call. The shape written under `meta["codeg.delegation"]`
+//! tool-call. The shape written under `meta["harness_studio.delegation"]`
 //! follows the convention documented at
 //! [`crate::acp::session_state::ToolCallState::meta`].
 //!
@@ -31,14 +31,14 @@ use std::sync::Arc;
 
 use crate::acp::manager::ConnectionManager;
 use crate::acp::types::AcpEvent;
-use crate::web::event_bridge::{emit_with_state, emit_with_state_gated};
+use crate::events::{emit_with_state, emit_with_state_gated};
 
 /// Top-level key under which delegation state lives on a tool call's
 /// `meta` object. Single source of truth — both the writer and the
 /// frontend reader must spell it the same way.
-pub const DELEGATION_META_KEY: &str = "codeg.delegation";
+pub const DELEGATION_META_KEY: &str = "harness_studio.delegation";
 
-/// Capability the broker uses to patch `meta["codeg.delegation"]` on
+/// Capability the broker uses to patch `meta["harness_studio.delegation"]` on
 /// the parent connection's active `delegate_to_agent` tool call.
 ///
 /// Errors are swallowed at the impl boundary: a missing parent
@@ -59,7 +59,7 @@ pub trait DelegationMetaWriter: Send + Sync {
     /// `raw_input` on the live `ToolCallState`. Used for calls the host
     /// announced identity-less (Cursor's `"MCP: tool"` with an empty input —
     /// the wire never re-sends title/arguments), once the companion
-    /// round-trip reveals which codeg-mcp tool the call actually is and with
+    /// round-trip reveals which harness-studio-mcp tool the call actually is and with
     /// what arguments. Default no-op so `NoopMetaWriter` and mocks that don't
     /// observe identity writes stay unchanged.
     async fn write_tool_call_identity(
@@ -120,7 +120,7 @@ impl DelegationMetaWriter for ConnectionManagerMetaWriter {
         // `upsert_tool_call` inserts on miss, so emitting for an id the turn no
         // longer holds would MINT a brand-new, otherwise-empty tool call
         // carrying nothing but this meta — and the frontend's
-        // `inferLiveToolName` reads "has codeg.delegation meta" as
+        // `inferLiveToolName` reads "has harness_studio.delegation meta" as
         // `delegate_to_agent`, so that empty entry renders as a full (phantom)
         // delegation card. It is live-only state, so it vanishes on reload:
         // exactly the live/history divergence users see.
@@ -275,7 +275,7 @@ pub mod mock {
     }
 }
 
-/// Helper to construct the canonical `meta["codeg.delegation"]` value.
+/// Helper to construct the canonical `meta["harness_studio.delegation"]` value.
 /// Keeps the schema in one place so the writer impls and the broker
 /// callsites can't drift apart on field naming.
 #[allow(clippy::too_many_arguments)]
@@ -412,7 +412,16 @@ mod tests {
 
     #[test]
     fn build_meta_with_error_code() {
-        let v = build_delegation_meta("failed", None, Some(7), Some("timeout"), None, None, None, None);
+        let v = build_delegation_meta(
+            "failed",
+            None,
+            Some(7),
+            Some("timeout"),
+            None,
+            None,
+            None,
+            None,
+        );
         let inner = v.get(DELEGATION_META_KEY).unwrap().as_object().unwrap();
         assert_eq!(inner.get("status").unwrap().as_str().unwrap(), "failed");
         assert_eq!(
@@ -457,8 +466,8 @@ mod tests {
     /// comes off the DB row and names an older turn's call).
     #[tokio::test]
     async fn write_meta_skips_a_tool_call_the_turn_no_longer_holds() {
+        use crate::events::EventEmitter;
         use crate::models::agent::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         let manager = Arc::new(ConnectionManager::new());
         manager
@@ -467,7 +476,10 @@ mod tests {
         let writer = ConnectionManagerMetaWriter {
             manager: manager.clone(),
         };
-        let state = manager.get_state("p1").await.expect("test connection state");
+        let state = manager
+            .get_state("p1")
+            .await
+            .expect("test connection state");
 
         // While the parent's `delegate_to_agent` call is live, the write lands.
         state.write().await.apply_event(&AcpEvent::ToolCall {

@@ -15,7 +15,6 @@ import {
   Compass,
   FileSpreadsheet,
   GitBranch,
-  Globe,
   Keyboard,
   Menu,
   MessageSquareText,
@@ -41,6 +40,7 @@ import {
 import { AppTitleBar } from "@/components/layout/app-title-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer"
+import { requestSettingsNavigation } from "./settings-navigation"
 
 interface SettingsNavItem {
   href: string
@@ -60,7 +60,6 @@ interface SettingsNavItem {
     | "version_control"
     | "chat_channels"
     | "system"
-    | "web_service"
     | "logs"
   icon: ComponentType<{ className?: string }>
 }
@@ -137,11 +136,6 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
     icon: SendHorizontal,
   },
   {
-    href: "/settings/web-service",
-    labelKey: "web_service",
-    icon: Globe,
-  },
-  {
     href: "/settings/logs",
     labelKey: "logs",
     icon: FileSpreadsheet,
@@ -157,22 +151,11 @@ interface SettingsShellProps {
   children: ReactNode
 }
 
-/**
- * The nav for one runtime. Only one entry is runtime-bound: the Web service
- * page configures the server a web client is already talking to, and there is
- * no such server to configure from inside it.
- *
- * The Browser page is deliberately not on that list. Most of what it holds is
- * a desktop browser engine, but site rules, what a server starting in a
- * terminal does and the terminal's link menu all still decide something in a
- * browser session, and that page is the only place they can be set.
- */
 export function settingsNavItemsFor(
   env: TransportEnvironment
 ): SettingsNavItem[] {
-  return SETTINGS_NAV_ITEMS.filter(
-    (item) => !(item.labelKey === "web_service" && env === "web")
-  )
+  void env
+  return SETTINGS_NAV_ITEMS
 }
 
 function normalizePath(path: string): string {
@@ -197,7 +180,7 @@ export function SettingsShell({ children }: SettingsShellProps) {
   const [navOpen, setNavOpen] = useState(false)
 
   useEffect(() => {
-    document.title = `${t("title")} - codeg`
+    document.title = `${t("title")} - harness studio`
   }, [t])
 
   const navigateTo = useCallback(
@@ -218,13 +201,14 @@ export function SettingsShell({ children }: SettingsShellProps) {
       const search = window.location.search
       const fullTarget = search ? `${target}${search}` : target
 
-      if (isWindowsRuntime()) {
-        window.location.assign(fullTarget)
-        return
-      }
-
-      router.push(fullTarget)
-      setNavOpen(false)
+      requestSettingsNavigation(() => {
+        if (isWindowsRuntime()) {
+          window.location.assign(fullTarget)
+          return
+        }
+        router.push(fullTarget)
+        setNavOpen(false)
+      })
     },
     [router, setNavOpen]
   )

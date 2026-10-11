@@ -1,6 +1,6 @@
 //! Transcript-tail watcher: surfaces Claude Code's OUT-OF-TURN activity.
 //!
-//! Claude Code produces activity outside any codeg-driven prompt turn:
+//! Claude Code produces activity outside any harness-studio-driven prompt turn:
 //! `<task-notification>` completions of async sub-agents (`Agent` launched in
 //! the background) and background shell tasks, the agent's continued work
 //! after such a notification (which can run for many minutes), and cron//loop
@@ -27,11 +27,11 @@
 //!   dies with it.
 //!
 //! * **Rendering** — new transcript records that do NOT belong to a
-//!   codeg-sent prompt turn are assembled into turns with the SAME Stage-A/
+//!   harness-studio-sent prompt turn are assembled into turns with the SAME Stage-A/
 //!   Stage-B code the detail parser uses ([`ClaudeRecordAccumulator`] +
 //!   [`group_into_turns`]) and emitted as `AcpEvent::BackgroundActivity`
 //!   upserts for the frontend's overlay slice. Foreground turns are excluded
-//!   by the **prompt ledger**: every prompt codeg sends is fingerprinted, and
+//!   by the **prompt ledger**: every prompt harness_studio sends is fingerprinted, and
 //!   a transcript turn whose initiating user record matches an unconsumed
 //!   fingerprint is the wire-rendered foreground turn (each fingerprint is
 //!   consumed exactly once, so a cron//loop re-fire of the SAME text later
@@ -63,18 +63,17 @@ use tokio::sync::RwLock;
 use crate::acp::session_state::{background_keepalive_max_age, SessionState};
 use crate::acp::session_title::publish_native_title;
 use crate::acp::types::{AcpEvent, BackgroundSettledInfo, ConnectionStatus};
+use crate::events::{emit_with_state, EventEmitter};
 use crate::models::agent::AgentType;
 use crate::models::message::MessageTurn;
 use crate::parsers::claude::{
     capture_tag, capture_title_record, find_clear_rollover_successor, find_session_file,
-    group_into_turns, is_meta_message, slash_command_display,
-    task_notification_result_regex, task_notification_status_regex,
-    task_notification_summary_regex, task_notification_task_id_regex,
-    task_notification_tool_use_id_regex, ClaudeRecordAccumulator, BACKGROUND_RESULT_MAX_CHARS,
-    CONTEXT_CONTINUATION_PREFIX,
+    group_into_turns, is_meta_message, slash_command_display, task_notification_result_regex,
+    task_notification_status_regex, task_notification_summary_regex,
+    task_notification_task_id_regex, task_notification_tool_use_id_regex, ClaudeRecordAccumulator,
+    BACKGROUND_RESULT_MAX_CHARS, CONTEXT_CONTINUATION_PREFIX,
 };
 use crate::parsers::truncate_str;
-use crate::web::event_bridge::{emit_with_state, EventEmitter};
 
 /// Poll cadence while background work is outstanding or the transcript moved
 /// recently — tight enough that a completed task surfaces within a beat.
@@ -160,14 +159,10 @@ fn first_transcript_text(blocks: &[crate::acp::types::PromptInputBlock]) -> Opti
         let text = match block {
             PromptInputBlock::Text { text } => text.trim().to_string(),
             PromptInputBlock::Resource {
-                uri,
-                text: Some(_),
-                ..
+                uri, text: Some(_), ..
             }
             | PromptInputBlock::ResourceLink { uri, .. } => claude_uri_link(uri),
-            PromptInputBlock::Resource { .. } | PromptInputBlock::Image { .. } => {
-                return None
-            }
+            PromptInputBlock::Resource { .. } | PromptInputBlock::Image { .. } => return None,
         };
         (!text.is_empty()).then_some(text)
     })
@@ -178,7 +173,11 @@ fn first_transcript_text(blocks: &[crate::acp::types::PromptInputBlock]) -> Opti
 /// anything else (a web page, a pasted file's `clipboard://` uri).
 fn claude_uri_link(uri: &str) -> String {
     let named = |rest: &str| {
-        let name = rest.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(rest);
+        let name = rest
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(rest);
         format!("[@{name}]({uri})")
     };
     if let Some(path) = uri.strip_prefix("file://") {
@@ -190,7 +189,7 @@ fn claude_uri_link(uri: &str) -> String {
     }
 }
 
-/// Fingerprints of prompts codeg itself sent on this connection, so the
+/// Fingerprints of prompts harness_studio itself sent on this connection, so the
 /// watcher can tell wire-rendered foreground turns apart from out-of-turn
 /// activity. Shared between the connection loop (writer, on every
 /// `ConnectionCommand::Prompt`) and the watcher tick (consumer). A std mutex
@@ -246,7 +245,7 @@ impl PromptLedger {
     /// no reference to the file it replaced), so without this the only
     /// available evidence — "a sibling with a `/clear` head appeared right
     /// about when our file went quiet" — is equally true of every OTHER
-    /// conversation open on the same folder. codeg is a multi-agent
+    /// conversation open on the same folder. harness_studio is a multi-agent
     /// workbench; two Claude sessions in one project directory is the normal
     /// case, not the exotic one. Knowing that WE asked for the clear is what
     /// keeps this session from adopting a stranger's transcript.
@@ -298,7 +297,7 @@ impl PromptLedger {
             Some((Instant::now(), std::time::SystemTime::now()));
     }
 
-    /// Record the fingerprint of a prompt codeg is about to send: the first
+    /// Record the fingerprint of a prompt harness_studio is about to send: the first
     /// text the Claude adapter writes into the transcript's user record for
     /// it, trimmed — which is what that record's initiating text starts with.
     ///
@@ -318,7 +317,7 @@ impl PromptLedger {
         };
         // `/clear` is a CLI-local command: the adapter forwards it like any
         // other prompt and Claude answers it by starting a new session on a
-        // new transcript file. This is the only notice codeg gets.
+        // new transcript file. This is the only notice harness_studio gets.
         if fingerprint == "/clear" || fingerprint.starts_with("/clear ") {
             *self.clear_sent_at.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((Instant::now(), std::time::SystemTime::now()));
@@ -579,7 +578,7 @@ struct TaskEntry {
 }
 
 /// The current out-of-turn episode: a contiguous run of transcript records
-/// not belonging to any codeg-sent prompt turn, assembled into turns via the
+/// not belonging to any harness-studio-sent prompt turn, assembled into turns via the
 /// detail parser's own Stage A/B.
 struct Episode {
     /// Byte offset of the episode's initiating record — the stable base of
@@ -598,7 +597,7 @@ struct Episode {
 }
 
 enum Mode {
-    /// Records belong to a codeg-sent prompt turn — the wire renders them.
+    /// Records belong to a harness-studio-sent prompt turn — the wire renders them.
     Foreground,
     /// Records are out-of-turn — the overlay renders them.
     Background,
@@ -645,7 +644,7 @@ pub(crate) struct WatchState {
     /// `Prompting` state observed at the previous tick — the edge detector for
     /// `current_turn_launched_ids` above.
     was_prompting: bool,
-    /// A codeg-sent prompt has been matched in the transcript and the model has
+    /// A harness-studio-sent prompt has been matched in the transcript and the model has
     /// not answered it yet. Within that window the CLI writes the rest of the
     /// SUBMISSION — a slash command's `<local-command-stdout>`, the `isMeta`
     /// instruction `/goal` injects for the model, image metadata — and
@@ -788,7 +787,12 @@ impl WatchState {
             return;
         }
         let before = self.resolved_title();
-        capture_title_record(value, record_type, &mut self.custom_title, &mut self.ai_title);
+        capture_title_record(
+            value,
+            record_type,
+            &mut self.custom_title,
+            &mut self.ai_title,
+        );
         let after = self.resolved_title();
         // `capture_title_record` ignores blank values, so `after` is `None`
         // only when nothing has ever been captured — never a clear.
@@ -938,7 +942,10 @@ impl WatchState {
         // session id names the ABANDONED file, so the lookup asks for the id
         // this watch rolled onto instead.
         if self.file.is_none() {
-            let lookup_id = self.rolled_over_id.clone().unwrap_or_else(|| session_id.clone());
+            let lookup_id = self
+                .rolled_over_id
+                .clone()
+                .unwrap_or_else(|| session_id.clone());
             if let Some(f) = find_session_file(&lookup_id) {
                 self.adopt_file(f);
             }
@@ -1077,8 +1084,7 @@ impl WatchState {
         });
 
         let outstanding = self.tasks.len() as u32;
-        let accounting_changed =
-            expired_any || self.last_emitted_outstanding != Some(outstanding);
+        let accounting_changed = expired_any || self.last_emitted_outstanding != Some(outstanding);
         if changed_turns.is_empty() && settled.is_empty() && !accounting_changed {
             return None;
         }
@@ -1291,8 +1297,7 @@ impl WatchState {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                         {
-                            let status =
-                                task.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                            let status = task.get("status").and_then(|s| s.as_str()).unwrap_or("");
                             if is_terminal_task_status(status) && self.tasks.remove(id).is_some() {
                                 self.settled_ids.insert(id.to_string());
                                 tracing::info!(
@@ -1361,8 +1366,7 @@ impl WatchState {
                         // again — the notification's own <note> documents
                         // multi-notify).
                         "SendMessage" => {
-                            let Some(to) =
-                                input.and_then(|i| i.get("to")).and_then(|t| t.as_str())
+                            let Some(to) = input.and_then(|i| i.get("to")).and_then(|t| t.as_str())
                             else {
                                 continue;
                             };
@@ -1430,7 +1434,7 @@ impl WatchState {
         if let Some(initiator) = turn_initiator_text(value) {
             let initiator_text = initiator.as_str();
             if ledger.consume_matching(&initiator) {
-                // A codeg-sent prompt: the wire renders this turn. Close any
+                // A harness-studio-sent prompt: the wire renders this turn. Close any
                 // open episode first (flush its final state) and go silent.
                 tracing::debug!("[bg-watch] foreground turn matched ledger");
                 self.collect_changed_turns(cwd, changed_turns);
@@ -1505,8 +1509,7 @@ impl WatchState {
                 // Cosmetic re-basing of the SAME continuous out-of-turn
                 // stretch (not a new initiator record) — the origin carries
                 // over unchanged.
-                let inherited_origin =
-                    self.episode.as_ref().and_then(|e| e.origin_task_id.clone());
+                let inherited_origin = self.episode.as_ref().and_then(|e| e.origin_task_id.clone());
                 self.episode = Some(Episode {
                     start_offset: self.next_episode_base(),
                     acc: ClaudeRecordAccumulator::new(
@@ -1612,7 +1615,7 @@ fn turn_initiator_text(value: &serde_json::Value) -> Option<TurnInitiatorText> {
         if s.starts_with(CONTEXT_CONTINUATION_PREFIX) {
             return None;
         }
-        // A slash command persists as command tags; codeg sent the display
+        // A slash command persists as command tags; harness_studio sent the display
         // form ("/name args"), so match the ledger against that.
         if let Some(display) = slash_command_display(s) {
             return Some(TurnInitiatorText::ReconstructedSlashCommand(display));
@@ -1875,9 +1878,7 @@ mod tests {
         ws.tick(ledger, "/tmp", "conn-test", false, true)
     }
 
-    fn unpack(
-        event: AcpEvent,
-    ) -> (Vec<MessageTurn>, u32, Vec<BackgroundSettledInfo>, u64) {
+    fn unpack(event: AcpEvent) -> (Vec<MessageTurn>, u32, Vec<BackgroundSettledInfo>, u64) {
         match event {
             AcpEvent::BackgroundActivity {
                 turns,
@@ -1993,7 +1994,8 @@ mod tests {
         let path = temp_session(&dir);
         // Fork-time metadata at the head (post-epoch stamp), then the copied
         // history (original pre-fork stamps), then the genuinely-new prompt.
-        let queue_op = r#"{"type":"queue-operation","timestamp":"2026-07-07T03:50:00.100Z","uuid":"q-1"}"#;
+        let queue_op =
+            r#"{"type":"queue-operation","timestamp":"2026-07-07T03:50:00.100Z","uuid":"q-1"}"#;
         let copied_user = r#"{"type":"user","timestamp":"2026-07-07T03:46:00.000Z","uuid":"u-hi","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         let copied_asst = r#"{"type":"assistant","timestamp":"2026-07-07T03:46:05.000Z","uuid":"a-hi","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}]}}"#;
         let new_user = r#"{"type":"user","timestamp":"2026-07-07T03:50:10.000Z","uuid":"u-hello","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#;
@@ -2038,8 +2040,7 @@ mod tests {
         // The flush completes: the reconstructed ack must account.
         append_raw(&path, tail);
         append_raw(&path, "\n");
-        let (_, outstanding, ..) =
-            unpack(tick_now(&mut ws, &ledger).expect("ack event"));
+        let (_, outstanding, ..) = unpack(tick_now(&mut ws, &ledger).expect("ack event"));
         assert_eq!(outstanding, 1, "mid-flush ack must survive discovery");
     }
 
@@ -2073,8 +2074,7 @@ mod tests {
         // ahead of the baseline and re-arms the accounting.
         ws.rearm("s2".into(), epoch("2026-07-07T03:50:00.000Z"));
         ws.adopt_file(forked.clone());
-        let (_, outstanding, ..) =
-            unpack(tick_now(&mut ws, &ledger).expect("resume event"));
+        let (_, outstanding, ..) = unpack(tick_now(&mut ws, &ledger).expect("resume event"));
         assert_eq!(
             outstanding, 1,
             "a resume written before the watcher noticed the fork must re-arm"
@@ -2114,8 +2114,7 @@ mod tests {
         assert_eq!(outstanding, 1, "post-fork resume must re-arm");
 
         write_lines(&forked, &[&notification("agentX", "completed")]);
-        let (_, outstanding, settled, _) =
-            unpack(tick_now(&mut ws, &ledger).unwrap());
+        let (_, outstanding, settled, _) = unpack(tick_now(&mut ws, &ledger).unwrap());
         assert_eq!(outstanding, 0);
         assert_eq!(settled.len(), 1);
     }
@@ -2243,7 +2242,10 @@ mod tests {
             Some(&old),
             "a rollover this connection never asked for is not ours to adopt"
         );
-        assert!(ws.pending_transcript_id.is_none(), "no re-point may be emitted");
+        assert!(
+            ws.pending_transcript_id.is_none(),
+            "no re-point may be emitted"
+        );
         assert!(
             event.is_none(),
             "and none of the stranger's records may surface as our activity"
@@ -2365,7 +2367,7 @@ mod tests {
         let event = tick_prompting(&mut ws, &ledger);
         assert!(
             event.is_none() || unpack(event.unwrap()).0.is_empty(),
-            "the codeg-sent prompt classifies foreground"
+            "the harness-studio-sent prompt classifies foreground"
         );
 
         // Mid-turn steer: the connection is STILL prompting, and the arm
@@ -2401,7 +2403,7 @@ mod tests {
         );
     }
 
-    /// A slash command sent from codeg writes MORE than its own record: the
+    /// A slash command sent from harness_studio writes MORE than its own record: the
     /// command, then `<local-command-stdout>`, then (for `/goal`) the `isMeta`
     /// STRING instruction Claude Code injects for the model — and only then the
     /// reply. Those side records are user records carrying text, so
@@ -2446,8 +2448,7 @@ mod tests {
                 &assistant_text("a2", "resuming"),
             ],
         );
-        let (turns, ..) =
-            unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
+        let (turns, ..) = unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
         assert!(
             !turns.is_empty(),
             "an autonomous initiator after the reply is out-of-turn as before"
@@ -2557,8 +2558,7 @@ mod tests {
             &path,
             &[command, cron, &assistant_text("a1", "Working on it.")],
         );
-        let (turns, ..) =
-            unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
+        let (turns, ..) = unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
         assert!(
             !turns.is_empty(),
             "a different submission is not this one's side record"
@@ -2597,8 +2597,7 @@ mod tests {
                 &assistant_text("a1", "Build finished cleanly."),
             ],
         );
-        let (turns, ..) =
-            unpack(tick_prompting(&mut ws, &ledger).expect("settle event"));
+        let (turns, ..) = unpack(tick_prompting(&mut ws, &ledger).expect("settle event"));
         // Not just "an episode opened": the settlement's own follow-up is what
         // has nowhere else to render, so it must be IN the emitted turn.
         assert!(
@@ -2664,7 +2663,7 @@ mod tests {
         let ledger = PromptLedger::shared();
         ledger.record_text("do the thing");
 
-        // On disk before discovery: codeg's first prompt, the reply, an ack.
+        // On disk before discovery: harness_studio's first prompt, the reply, an ack.
         write_lines(
             &path,
             &[
@@ -2686,7 +2685,7 @@ mod tests {
         assert!(settled.is_empty());
         assert!(
             turns.is_empty(),
-            "the codeg-sent prompt classifies foreground — the wire renders it"
+            "the harness-studio-sent prompt classifies foreground — the wire renders it"
         );
 
         // Its fingerprint was consumed, so a same-text out-of-turn refire
@@ -2726,8 +2725,7 @@ mod tests {
             &path,
             &[&cron_prompt("new pass"), &assistant_text("a9", "hi")],
         );
-        let (turns, outstanding, ..) =
-            unpack(tick_now(&mut ws, &ledger).expect("turns event"));
+        let (turns, outstanding, ..) = unpack(tick_now(&mut ws, &ledger).expect("turns event"));
         assert_eq!(outstanding, 0, "historical ack must NOT register");
         assert_eq!(turns.len(), 1);
     }
@@ -2978,11 +2976,18 @@ mod tests {
         let _ = tick_now(&mut ws, &ledger);
         write_lines(
             &path,
-            &[&notification("shell1", "completed"), &assistant_text("a1", "Done.")],
+            &[
+                &notification("shell1", "completed"),
+                &assistant_text("a1", "Done."),
+            ],
         );
         let (turns, outstanding, settled, _) =
             unpack(tick_now(&mut ws, &ledger).expect("settle event"));
-        assert_eq!(turns.len(), 1, "a shell follow-up has nowhere else to render");
+        assert_eq!(
+            turns.len(),
+            1,
+            "a shell follow-up has nowhere else to render"
+        );
         assert_eq!(outstanding, 0);
         assert_eq!(
             settled.len(),
@@ -3063,8 +3068,7 @@ mod tests {
                 &assistant_text("a1", "Working on it."),
             ],
         );
-        let (turns, ..) =
-            unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
+        let (turns, ..) = unpack(tick_prompting(&mut ws, &ledger).expect("turns event"));
         assert_eq!(
             turns.len(),
             1,
@@ -3099,8 +3103,7 @@ mod tests {
                 &assistant_text("a1", "Build finished cleanly."),
             ],
         );
-        let (turns, ..) =
-            unpack(tick_prompting(&mut ws, &ledger).expect("settle event"));
+        let (turns, ..) = unpack(tick_prompting(&mut ws, &ledger).expect("settle event"));
         assert_eq!(
             turns.len(),
             1,
@@ -3162,7 +3165,7 @@ mod tests {
     }
 
     #[test]
-    fn codeg_sent_prompt_is_foreground_and_not_surfaced() {
+    fn harness_studio_sent_prompt_is_foreground_and_not_surfaced() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_session(&dir);
         write_lines(&path, &[]);
@@ -3185,7 +3188,7 @@ mod tests {
 
     #[test]
     fn same_text_refire_without_ledger_entry_is_background() {
-        // The /loop case: codeg sent the text once (consumed), the scheduler
+        // The /loop case: harness_studio sent the text once (consumed), the scheduler
         // re-fires the SAME text later — second occurrence must surface.
         let dir = tempfile::tempdir().unwrap();
         let path = temp_session(&dir);
@@ -3261,7 +3264,10 @@ mod tests {
         let more = assistant_text("a2", "step two");
         let (head, tail) = more.split_at(more.len() / 2);
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(head.as_bytes()).unwrap();
         }
         assert!(
@@ -3270,7 +3276,10 @@ mod tests {
         );
 
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(tail.as_bytes()).unwrap();
             f.write_all(b"\n").unwrap();
         }
@@ -3396,7 +3405,7 @@ mod tests {
         assert_eq!(outstanding, 1, "resumed sub-agent re-arms the keep-alive");
     }
 
-    /// A page the built-in browser handed over, as codeg sends it with nothing
+    /// A page the built-in browser handed over, as harness_studio sends it with nothing
     /// typed: the page's block as an embedded resource, its screenshot after.
     fn page_prompt(uri: &str) -> Vec<crate::acp::types::PromptInputBlock> {
         use crate::acp::types::PromptInputBlock;
@@ -3447,7 +3456,7 @@ mod tests {
         write_lines(&path, &refs);
         assert!(
             tick_now(&mut ws, &ledger).is_none(),
-            "the prompt codeg sent must not come back as an overlay turn"
+            "the prompt harness_studio sent must not come back as an overlay turn"
         );
 
         // The same records with nothing recorded are what the watcher treats
@@ -3515,7 +3524,10 @@ mod tests {
             "[@a b.ts](file:///repo/a b.ts)"
         );
         // A trailing slash leaves no last segment; the whole path names it.
-        assert_eq!(claude_uri_link("file:///repo/dir/"), "[@/repo/dir/](file:///repo/dir/)");
+        assert_eq!(
+            claude_uri_link("file:///repo/dir/"),
+            "[@/repo/dir/](file:///repo/dir/)"
+        );
         assert_eq!(
             claude_uri_link("zed://agent/thread/42"),
             "[@42](zed://agent/thread/42)"
@@ -3556,7 +3568,9 @@ mod tests {
         // cron prompt (isMeta + string): initiates with the prompt text.
         let cron: serde_json::Value = serde_json::from_str(&cron_prompt("check weather")).unwrap();
         assert_eq!(
-            turn_initiator_text(&cron).as_ref().map(|text| text.as_str()),
+            turn_initiator_text(&cron)
+                .as_ref()
+                .map(|text| text.as_str()),
             Some("check weather")
         );
 
@@ -3618,7 +3632,10 @@ mod tests {
 
         write_lines(&path, &[&ai_title("Fix the login flow")]);
         let _ = tick_now(&mut ws, &ledger);
-        assert_eq!(ws.pending_title.take().as_deref(), Some("Fix the login flow"));
+        assert_eq!(
+            ws.pending_title.take().as_deref(),
+            Some("Fix the login flow")
+        );
 
         // Claude Code re-emits the record; the resolved name did not change.
         write_lines(&path, &[&ai_title("Fix the login flow")]);
@@ -3628,7 +3645,10 @@ mod tests {
         // A genuinely new name is queued again.
         write_lines(&path, &[&ai_title("Fix the signup flow")]);
         let _ = tick_now(&mut ws, &ledger);
-        assert_eq!(ws.pending_title.take().as_deref(), Some("Fix the signup flow"));
+        assert_eq!(
+            ws.pending_title.take().as_deref(),
+            Some("Fix the signup flow")
+        );
     }
 
     /// `customTitle ?? aiTitle` — Claude Code's own precedence, and the one
@@ -3649,8 +3669,7 @@ mod tests {
         write_lines(&path, &[&ai_title("Concise AI Summary")]);
         let _ = tick_now(&mut ws, &ledger);
         assert_eq!(
-            ws.pending_title,
-            None,
+            ws.pending_title, None,
             "the generated title must not displace the user's own name"
         );
         assert_eq!(ws.resolved_title().as_deref(), Some("auth-refactor"));

@@ -17,14 +17,17 @@ import {
   acpDownloadAgentBinary,
   acpFetchAgentLatestRelease,
   acpGetAgentStatus,
-  acpListAgents,
+  acpListAgentsSnapshot,
   acpPreflight,
   acpPrepareNpxAgent,
   listModelProviders,
 } from "@/lib/api"
 import type { AcpAgentInfo, AgentLatestRelease, AgentType } from "@/lib/types"
 
-import { AcpAgentSettings } from "./acp-agent-settings"
+import {
+  AcpAgentSettings,
+  invalidateAgentCheckCache,
+} from "./acp-agent-settings"
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -135,7 +138,7 @@ function openAgent(agentType: AgentType) {
 }
 
 async function renderPanel(agents: AcpAgentInfo[]) {
-  vi.mocked(acpListAgents).mockResolvedValue(agents)
+  vi.mocked(acpListAgentsSnapshot).mockResolvedValue(agents)
   vi.mocked(listModelProviders).mockResolvedValue([])
   render(
     <NextIntlClientProvider locale="en" messages={enMessages}>
@@ -146,6 +149,7 @@ async function renderPanel(agents: AcpAgentInfo[]) {
 }
 
 beforeEach(() => {
+  invalidateAgentCheckCache()
   vi.clearAllMocks()
   vi.spyOn(console, "warn").mockImplementation(() => {})
 })

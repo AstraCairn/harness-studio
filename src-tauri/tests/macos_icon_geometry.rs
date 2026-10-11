@@ -3,7 +3,7 @@
 //! macOS draws `CFBundleIconFile` into a fixed tile, so the *artwork* — not the
 //! canvas — decides how big the app reads in the Dock. Apple's grid puts an
 //! 824x824 body in a 1024x1024 canvas, a 100px transparent margin on every
-//! side; Keynote, Pages, Maps, Chrome, Edge, OBS all measure exactly that. codeg
+//! side; Keynote, Pages, Maps, Chrome, Edge, OBS all measure exactly that. harness_studio
 //! shipped a full-bleed squircle through 0.29.0, which rendered ~1.24x wider
 //! than its neighbours — visibly "a size bigger" (issue #610).
 //!
@@ -73,7 +73,11 @@ fn icns_path() -> PathBuf {
 /// Walk the ICNS container: an 8-byte header, then `type` + `length` records
 /// where `length` counts its own 8-byte header.
 fn parse_chunks(data: &[u8]) -> Vec<(String, &[u8])> {
-    assert!(data.len() >= 8, "icon.icns is truncated ({} bytes)", data.len());
+    assert!(
+        data.len() >= 8,
+        "icon.icns is truncated ({} bytes)",
+        data.len()
+    );
     assert_eq!(&data[0..4], b"icns", "icon.icns is missing its magic");
 
     let declared = u32::from_be_bytes(data[4..8].try_into().expect("4 bytes")) as usize;
@@ -121,8 +125,12 @@ fn measure(image: &image::RgbaImage) -> Body {
     let alpha_row = |x: u32| f64::from(image.get_pixel(x, mid_y)[3]) / 255.0;
     let alpha_col = |y: u32| f64::from(image.get_pixel(mid_x, y)[3]) / 255.0;
 
-    let opaque_x: Vec<u32> = (0..w).filter(|&x| image.get_pixel(x, mid_y)[3] > 127).collect();
-    let opaque_y: Vec<u32> = (0..h).filter(|&y| image.get_pixel(mid_x, y)[3] > 127).collect();
+    let opaque_x: Vec<u32> = (0..w)
+        .filter(|&x| image.get_pixel(x, mid_y)[3] > 127)
+        .collect();
+    let opaque_y: Vec<u32> = (0..h)
+        .filter(|&y| image.get_pixel(mid_x, y)[3] > 127)
+        .collect();
     assert!(
         !opaque_x.is_empty() && !opaque_y.is_empty(),
         "no opaque pixels through the centre — the artwork is missing"

@@ -204,10 +204,7 @@ pub(crate) fn held_here() -> bool {
 /// # Safety
 ///
 /// `attr` must be an initialised `posix_spawnattr_t`.
-pub unsafe fn apply(
-    attr: &mut libc::posix_spawnattr_t,
-    requirement: &[u8],
-) -> std::io::Result<()> {
+pub unsafe fn apply(attr: &mut libc::posix_spawnattr_t, requirement: &[u8]) -> std::io::Result<()> {
     let set = set_fn().ok_or_else(|| {
         std::io::Error::other(
             "computer use needs macOS 14.4 or later, the first to let a launch be held to a \
@@ -269,7 +266,10 @@ mod tests {
              42434445313233343530180c1376616c69646174696f6e2d63617465676f727902010630\
              090c0476657273020101",
         );
-        assert_eq!(signed_by("ABCDE12345", "codeg-computer-helper"), apple);
+        assert_eq!(
+            signed_by("ABCDE12345", "harness-studio-computer-helper"),
+            apple
+        );
     }
 
     #[test]

@@ -1,14 +1,8 @@
 use serde::Serialize;
-use std::sync::Mutex;
 
 use crate::acp::binary_cache;
 use crate::acp::registry::{self, AcpAdapterRelation, AcpAgentMeta, AgentDistribution};
 use crate::models::agent::AgentType;
-
-/// Cache for npm environment check results.
-/// Stores `Some(checks)` after a successful (all-pass) run;
-/// stays `None` if checks failed so they are retried next time.
-static NPM_ENV_CACHE: Mutex<Option<Vec<CheckItem>>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +36,7 @@ pub struct CheckItem {
     pub fixes: Vec<FixAction>,
 }
 
-/// Everything the UI needs to explain that codeg's entry for this agent is an
+/// Everything the UI needs to explain that harness_studio's entry for this agent is an
 /// ACP *adapter*, not the vendor CLI the user already has — see
 /// [`registry::acp_adapter_relation`]. Deliberately STRUCTURED (no prose): the
 /// frontend owns the wording so it is localized, the same way
@@ -51,7 +45,7 @@ pub struct CheckItem {
 /// `None` on [`PreflightResult`] for every non-adapter agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdapterInfo {
-    /// npm spec codeg installs, e.g. "@agentclientprotocol/claude-agent-acp@0.81.1".
+    /// npm spec harness_studio installs, e.g. "@agentclientprotocol/claude-agent-acp@0.81.1".
     pub adapter_package: String,
     /// Command the launch gate resolves, e.g. "claude-agent-acp".
     pub adapter_cmd: String,
@@ -61,7 +55,7 @@ pub struct AdapterInfo {
     pub native_cmd: String,
     /// Display name for the vendor CLI, e.g. "Claude Code CLI".
     pub native_label: String,
-    /// Where the user's own vendor CLI was found, if at all. codeg never
+    /// Where the user's own vendor CLI was found, if at all. harness_studio never
     /// launches it — it is named so the user sees we did look.
     pub native_path: Option<String>,
     /// Config dir both read, so no second login is needed.
@@ -81,7 +75,7 @@ pub struct PreflightResult {
 }
 
 pub fn clear_npm_env_cache() {
-    *NPM_ENV_CACHE.lock().unwrap() = None;
+    crate::probe::clear_cache();
 }
 
 pub async fn run_preflight(agent_type: AgentType) -> PreflightResult {
@@ -176,23 +170,8 @@ fn build_adapter_info(
 }
 
 async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {
-    // Return cached result if a previous check passed.
-    // The cache stores only the base checks (node_available + npm_available);
-    // the per-agent node_version check is appended separately.
-    let cached = NPM_ENV_CACHE.lock().unwrap().clone();
-    if let Some(cached) = cached {
-        let mut checks = cached;
-        if let Some(required) = node_required {
-            // Extract node version string from the cached node_available message
-            // (format: "Node.js v20.19.0 available")
-            let node_ver = extract_node_version_from_message(&checks[0].message);
-            checks.push(build_node_version_check(node_ver.as_deref(), required));
-        }
-        return checks;
-    }
-
-    // Resolve absolute paths via `which` crate to avoid GUI PATH issues,
-    // then run version checks in parallel.
+    // The command cache coalesces these shared base probes. Each agent still
+    // gets its own Node.js minimum-version check.
     let node_path = which::which("node").ok();
     let npm_path = which::which("npm").ok();
 
@@ -200,10 +179,9 @@ async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {
         async {
             match &node_path {
                 Some(p) => {
-                    crate::process::tokio_command(p)
-                        .arg("--version")
-                        .output()
-                        .await
+                    let mut command = crate::process::tokio_command(p);
+                    command.arg("--version");
+                    crate::probe::output(command).await
                 }
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -214,10 +192,9 @@ async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {
         async {
             match &npm_path {
                 Some(p) => {
-                    crate::process::tokio_command(p)
-                        .arg("--version")
-                        .output()
-                        .await
+                    let mut command = crate::process::tokio_command(p);
+                    command.arg("--version");
+                    crate::probe::output(command).await
                 }
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -281,14 +258,9 @@ async fn check_npm_environment(node_required: Option<&str>) -> Vec<CheckItem> {
 
     let mut checks = vec![node_check, npm_check];
 
-    // Cache only if all checks passed — failed results are not cached so
-    // the user can retry after installing the missing tools.
     let all_passed = checks
         .iter()
         .all(|c| !matches!(c.status, CheckStatus::Fail));
-    if all_passed {
-        *NPM_ENV_CACHE.lock().unwrap() = Some(checks.clone());
-    }
 
     // After caching the base checks, append the per-agent Node.js version
     // requirement if specified. Only meaningful when node is available.
@@ -319,15 +291,6 @@ fn parse_node_version(v: &str) -> Option<(u32, u32, u32)> {
         .collect();
     let patch = patch_digits.parse().ok()?;
     Some((major, minor, patch))
-}
-
-/// Extract the node version string from a cached node_available message.
-/// Expected format: "Node.js v20.19.0 available" → Some("v20.19.0")
-fn extract_node_version_from_message(message: &str) -> Option<String> {
-    message
-        .split_whitespace()
-        .find(|s| s.starts_with('v') && s.contains('.'))
-        .map(|s| s.to_string())
 }
 
 /// Build a `CheckItem` for the Node.js version requirement check.
@@ -411,7 +374,7 @@ async fn check_uv_environment(
 
     // Fallback: the agent's own CLI is already installed on PATH (e.g. a user
     // who ran the official installer has `hermes` available). The agent is
-    // launchable as-is, but installing uv unlocks codeg's managed install /
+    // launchable as-is, but installing uv unlocks harness_studio's managed install /
     // upgrade flow, so offer it as a non-blocking action.
     if let Some((cmd, _)) = system_cmd {
         if crate::commands::acp::resolve_command_on_path(cmd).is_some() {
@@ -450,11 +413,9 @@ async fn check_uv_environment(
 /// Run `<uvx> --version` and extract the version token (output looks like
 /// "uvx 0.8.10 (hash date)").
 async fn run_uv_version(uvx_path: &std::path::Path) -> Option<String> {
-    let output = crate::process::tokio_command(uvx_path)
-        .arg("--version")
-        .output()
-        .await
-        .ok()?;
+    let mut command = crate::process::tokio_command(uvx_path);
+    command.arg("--version");
+    let output = crate::probe::output(command).await.ok()?;
     if !output.status.success() {
         return None;
     }
@@ -466,12 +427,18 @@ async fn run_uv_version(uvx_path: &std::path::Path) -> Option<String> {
 /// `Warn` (not `Fail`): recent uv releases are backward compatible for the
 /// `uvx --from <pkg>==<ver>` invocation, so an old uv should not hard-block.
 fn build_uv_version_check(current: Option<&str>, required: &str) -> CheckItem {
-    match (current.and_then(parse_node_version), parse_node_version(required)) {
+    match (
+        current.and_then(parse_node_version),
+        parse_node_version(required),
+    ) {
         (Some(cur), Some(req)) if cur >= req => CheckItem {
             check_id: "uv_version".into(),
             label: "uv version".into(),
             status: CheckStatus::Pass,
-            message: format!("uv {} meets the minimum requirement (>={required})", current.unwrap_or("")),
+            message: format!(
+                "uv {} meets the minimum requirement (>={required})",
+                current.unwrap_or("")
+            ),
             fixes: vec![],
         },
         (Some(_), Some(_)) => CheckItem {
@@ -558,7 +525,7 @@ async fn check_binary_environment(
             // the thing it predicts: `build_agent` falls back to a system
             // binary for every Binary agent, dir-tree or not, so a working
             // `opencode` on PATH connected fine while this check called it not
-            // installed. `dir_entry` describes the shape of the archive codeg
+            // installed. `dir_entry` describes the shape of the archive harness_studio
             // downloads; it says nothing about whether a system binary can be
             // launched.
             Ok(None)
@@ -570,7 +537,7 @@ async fn check_binary_environment(
                     label: "Binary cache".into(),
                     status: CheckStatus::Pass,
                     message: format!(
-                        "Using the system-installed {cmd} (codeg-managed download also available)"
+                        "Using the system-installed {cmd} (harness-studio-managed download also available)"
                     ),
                     fixes: vec![],
                 }
@@ -772,12 +739,7 @@ mod adapter_tests {
         let meta = registry::get_agent_meta(agent_type);
         let relation = registry::acp_adapter_relation(agent_type)
             .expect("agent under test must be an adapter agent");
-        build_adapter_info(
-            &meta,
-            &relation,
-            installed,
-            native_path.map(str::to_string),
-        )
+        build_adapter_info(&meta, &relation, installed, native_path.map(str::to_string))
     }
 
     // The card's whole argument rests on these four fields being concrete: the
@@ -798,9 +760,15 @@ mod adapter_tests {
         assert!(!info.adapter_installed);
         assert_eq!(info.native_cmd, "claude");
         assert_eq!(info.native_label, "Claude Code CLI");
-        assert_eq!(info.native_path.as_deref(), Some("/opt/homebrew/bin/claude"));
+        assert_eq!(
+            info.native_path.as_deref(),
+            Some("/opt/homebrew/bin/claude")
+        );
         assert_eq!(info.shared_config_dir, "~/.claude");
-        assert!(info.docs_url.ends_with("#acp-adapters"));
+        assert_eq!(
+            info.docs_url,
+            "https://agentclientprotocol.com/get-started/agents"
+        );
     }
 
     #[test]

@@ -408,7 +408,7 @@ impl OpenCodeParser {
                 duration_ms,
                 model: msg_model,
                 completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
         }
 
@@ -534,9 +534,12 @@ impl OpenCodeParser {
                         input_preview: None,
                         status: None,
                         meta: Some(serde_json::Value::Object(
-                            [("contextCompaction".to_string(), serde_json::Value::Object(marker))]
-                                .into_iter()
-                                .collect(),
+                            [(
+                                "contextCompaction".to_string(),
+                                serde_json::Value::Object(marker),
+                            )]
+                            .into_iter()
+                            .collect(),
                         )),
                     });
                     // The pair is required: a ToolUse with no result reads as a
@@ -973,7 +976,7 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
 /// tables. A 1.x database that 2.x opens keeps the legacy ones: its one-shot
 /// `V1Migration` copies every session across (`INSERT OR IGNORE`, progress in
 /// `kv` under `migration.v1-v2`) and never looks at them again, while a 1.x
-/// binary still pointed at the file — codeg's own pinned OpenCode among them —
+/// binary still pointed at the file — harness_studio's own pinned OpenCode among them —
 /// goes on writing there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionStore {
@@ -1363,7 +1366,7 @@ fn extract_opencode_file_image(value: &serde_json::Value) -> Option<ContentBlock
     })
 }
 
-/// One OpenCode tool call rewritten into codeg's shared tool vocabulary.
+/// One OpenCode tool call rewritten into harness_studio's shared tool vocabulary.
 struct NormalizedToolCall {
     tool_name: String,
     input_preview: Option<String>,
@@ -1391,7 +1394,8 @@ fn pick_str<'a>(value: Option<&'a serde_json::Value>, keys: &[&str]) -> Option<&
 /// as-is (an empty `oldString` is OpenCode's create-file form of `edit`).
 fn pick_str_verbatim<'a>(value: Option<&'a serde_json::Value>, keys: &[&str]) -> Option<&'a str> {
     let obj = value?;
-    keys.iter().find_map(|key| obj.get(*key).and_then(|v| v.as_str()))
+    keys.iter()
+        .find_map(|key| obj.get(*key).and_then(|v| v.as_str()))
 }
 
 /// Copy `value[from]` into `out[to]` verbatim when present and not null.
@@ -1409,7 +1413,10 @@ fn copy_field(
 }
 
 fn insert_str(out: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: &str) {
-    out.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    out.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
 }
 
 /// Start line of the first hunk in a unified diff (`@@ -12,7 +12,8 @@` → 12).
@@ -1467,7 +1474,7 @@ fn unwrap_skill_content(raw: &str) -> String {
 }
 
 /// Rewrite OpenCode's tool call into the canonical names and snake_case input
-/// keys every renderer in codeg dispatches on (`file_path`, `old_string`,
+/// keys every renderer in harness_studio dispatches on (`file_path`, `old_string`,
 /// `new_string`, `pattern`, …).
 ///
 /// OpenCode names its tool arguments in camelCase (`filePath`, `oldString`),
@@ -1718,10 +1725,7 @@ pub(crate) fn structure_read_output(metadata: Option<&serde_json::Value>) -> Opt
                 .and_then(|v| v.as_u64())
                 .filter(|n| *n > 0)
                 .unwrap_or(1);
-            Some(
-                serde_json::json!({ "start_line": start_line, "content": text })
-                    .to_string(),
-            )
+            Some(serde_json::json!({ "start_line": start_line, "content": text }).to_string())
         }
         "directory" => {
             let entries: Vec<&str> = display
@@ -1841,7 +1845,7 @@ fn subtask_summary(value: &serde_json::Value) -> Option<String> {
 /// layout. So every answered question rendered as "no selection" even though the
 /// answers were sitting right there. Emitting the canonical
 /// `{"answers":[{header,question,selected}],"declined":false}` envelope — the
-/// same shape `render_ask_result` writes for codeg's own companion — routes it
+/// same shape `render_ask_result` writes for harness_studio's own companion — routes it
 /// through the parser both cards already share.
 ///
 /// A dismissal surfaces as `state.error` carrying `Question.RejectedError`'s
@@ -1988,7 +1992,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else if matches!(msg.role, MessageRole::System) {
@@ -2001,7 +2005,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else {
@@ -2041,7 +2045,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms,
                 model: turn_model,
                 completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
         }
     }
@@ -2916,7 +2920,10 @@ mod tests {
         // rendered as single-select.
         let call = normalized("question", question_state());
         let input = input_of(&call);
-        assert_eq!(input["questions"][1]["multiSelect"], serde_json::json!(true));
+        assert_eq!(
+            input["questions"][1]["multiSelect"],
+            serde_json::json!(true)
+        );
         // Untouched where the source said nothing, and the rest is verbatim.
         assert!(input["questions"][0].get("multiSelect").is_none());
         assert_eq!(
@@ -3055,7 +3062,9 @@ mod tests {
         assert!(super::is_compaction_only(&[compaction(), result()]));
         // Anything the user actually said keeps the message theirs.
         assert!(!super::is_compaction_only(&[
-            ContentBlock::Text { text: "carry on".into() },
+            ContentBlock::Text {
+                text: "carry on".into()
+            },
             compaction(),
         ]));
         // A different tool's pair is not a compaction, and neither is nothing.
@@ -3105,7 +3114,9 @@ mod tests {
     /// renaming one to that must not send it back to the fallback.
     #[test]
     fn only_opencodes_own_generated_name_counts_as_untitled() {
-        assert!(super::is_default_title("New session - 2026-09-16T03:09:14.543Z"));
+        assert!(super::is_default_title(
+            "New session - 2026-09-16T03:09:14.543Z"
+        ));
         assert!(super::is_default_title(
             "Child session - 2026-09-16T03:09:14.543Z"
         ));
@@ -3195,7 +3206,10 @@ mod tests {
             ),
             None
         );
-        assert_eq!(super::resolve_title(None, Some("hi".into())).as_deref(), Some("hi"));
+        assert_eq!(
+            super::resolve_title(None, Some("hi".into())).as_deref(),
+            Some("hi")
+        );
     }
 
     /// The fallback runs the same folding and capping every other agent's

@@ -77,6 +77,7 @@ describe("model provider dialogs — the Claude Fable model pin", () => {
     await user.type(screen.getByLabelText("Name"), "Gateway")
     await user.type(screen.getByLabelText("API URL"), "https://gateway.test")
     await user.type(screen.getByLabelText("API Key"), "key")
+    await user.click(screen.getByText("Advanced configuration"))
     await user.type(fieldUnder("Default Fable Model"), "gw/fable")
     await user.click(screen.getByRole("button", { name: "Create" }))
 
@@ -97,6 +98,7 @@ describe("model provider dialogs — the Claude Fable model pin", () => {
         />
       )
     )
+    await user.click(screen.getByText("Advanced configuration"))
     const fable = fieldUnder("Default Fable Model")
     await waitFor(() => expect(fable).toHaveValue("gw/fable-old"))
 

@@ -13,7 +13,7 @@
 //!
 //! Dual-source, mirroring the ambient mapper: ACP lifecycle envelopes arrive
 //! on the typed [`InternalEventBus`]; conversation upsert/delete (title and
-//! membership changes) arrive on the JSON [`WebEventBroadcaster`]. Status flips
+//! membership changes) arrive on the JSON [`EventBroadcaster`]. Status flips
 //! are handled on the ACP side only, so the broadcaster arm ignores the
 //! `status` kind to avoid a redundant rebuild.
 
@@ -27,8 +27,8 @@ use crate::acp::manager::ConnectionManager;
 use crate::acp::types::AcpEvent;
 use crate::acp::InternalEventBus;
 use crate::commands::pet::pet_list_active_sessions_core;
-use crate::web::event_bridge::{
-    emit_event, EventEmitter, WebEvent, WebEventBroadcaster, CONVERSATION_CHANGED_EVENT,
+use crate::events::{
+    emit_event, AppEvent, EventBroadcaster, EventEmitter, CONVERSATION_CHANGED_EVENT,
 };
 
 /// Channel the aggregated active-session payload is published on.
@@ -85,7 +85,7 @@ async fn rebuild_and_emit(
 /// between `subscribe()` and the first `recv()`.
 pub fn pet_sessions_subscriber_task(
     bus: Arc<InternalEventBus>,
-    broadcaster: Arc<WebEventBroadcaster>,
+    broadcaster: Arc<EventBroadcaster>,
     emitter: EventEmitter,
     manager: ConnectionManager,
     db: DatabaseConnection,
@@ -114,7 +114,7 @@ pub fn pet_sessions_subscriber_task(
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 web = web_rx.recv() => match web {
-                    Ok(WebEvent { channel, payload }) => {
+                    Ok(AppEvent { channel, payload }) => {
                         if channel == CONVERSATION_CHANGED_EVENT {
                             // Status flips are already covered by the ACP arm;
                             // only upsert (title/new) and deleted change what
@@ -179,8 +179,14 @@ mod tests {
     #[test]
     fn relevant_filter_ignores_high_volume_events() {
         let ignored = [
-            AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None },
-            AcpEvent::Thinking { text: "x".into(), parent_tool_use_id: None },
+            AcpEvent::ContentDelta {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
+            AcpEvent::Thinking {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
             AcpEvent::UsageUpdate { used: 1, size: 1 },
         ];
         for ev in &ignored {

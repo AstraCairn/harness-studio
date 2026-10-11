@@ -238,7 +238,7 @@ pub struct ImportResult {
     pub restored: u32,
 }
 
-/// Reconciliation state of one locally-discovered session against the codeg DB,
+/// Reconciliation state of one locally-discovered session against the harness_studio DB,
 /// keyed by `(external_id, agent_type)` — the same identity `import_one` uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -283,7 +283,7 @@ pub struct ScanFolder {
     pub name: String,
     /// A live (non-deleted) folder row exists for this path. `false` with a
     /// `folder_id` means the row is soft-deleted and import will reopen it.
-    pub exists_in_codeg: bool,
+    pub exists_in_harness_studio: bool,
     pub folder_id: Option<i32>,
     pub agent_types: Vec<AgentType>,
     pub sessions: Vec<ScanSession>,

@@ -95,8 +95,7 @@ impl GeminiParser {
         if parent_name == "chats" {
             return None;
         }
-        (parent.parent()?.file_name()?.to_str()? == "chats")
-            .then(|| parent_name.to_string())
+        (parent.parent()?.file_name()?.to_str()? == "chats").then(|| parent_name.to_string())
     }
 
     fn parse_chat_value(path: &Path, raw: &str) -> Option<Value> {
@@ -212,7 +211,11 @@ impl GeminiParser {
 
             // Own the id before handing `value` over: `object` borrows `value`,
             // so a `&str` into it cannot survive the move.
-            if let Some(id) = object.get("id").and_then(|v| v.as_str()).map(str::to_string) {
+            if let Some(id) = object
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
                 Self::upsert_message(&mut messages, &mut index_by_id, &id, value);
                 continue;
             }
@@ -229,10 +232,7 @@ impl GeminiParser {
                 continue;
             }
 
-            let is_partial_metadata = object
-                .get("sessionId")
-                .and_then(|v| v.as_str())
-                .is_some()
+            let is_partial_metadata = object.get("sessionId").and_then(|v| v.as_str()).is_some()
                 && object.get("projectHash").and_then(|v| v.as_str()).is_some();
             if is_partial_metadata {
                 for (key, value) in object {
@@ -255,8 +255,8 @@ impl GeminiParser {
             if let Some(legacy) = Self::parse_legacy_record_value(raw) {
                 return Some(legacy);
             }
-            // Upstream gives up here. codeg keeps a transcript that named its
-            // own session: `projectHash` is metadata codeg never reads, and
+            // Upstream gives up here. harness_studio keeps a transcript that named its
+            // own session: `projectHash` is metadata harness_studio never reads, and
             // dropping the session would hide history the user can still see in
             // gemini's own `/resume` list for older files.
             if !has_session_id {
@@ -757,7 +757,7 @@ impl GeminiParser {
     ///   (`thoughtsTokenCount`) and `tool` (`toolUsePromptTokenCount`);
     /// - `total` is the API's `totalTokenCount`.
     ///
-    /// codeg's [`TurnUsage`] buckets are Anthropic-shaped and DISJOINT —
+    /// harness_studio's [`TurnUsage`] buckets are Anthropic-shaped and DISJOINT —
     /// `compute_session_stats` adds all four. Passing `input` through verbatim
     /// alongside `cached` therefore counted the cache twice, and `thoughts` /
     /// `tool` were dropped entirely.
@@ -837,7 +837,7 @@ impl GeminiParser {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 "gemini" | "assistant" | "model" => {
@@ -857,7 +857,7 @@ impl GeminiParser {
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string()),
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 "system" => {
@@ -873,7 +873,7 @@ impl GeminiParser {
                         duration_ms: None,
                         model: None,
                         completed_at: Some(timestamp),
-                    agent_message_id: None,
+                        agent_message_id: None,
                     });
                 }
                 _ => {}
@@ -1001,7 +1001,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
             continue;
@@ -1017,7 +1017,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
             continue;
@@ -1061,7 +1061,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
             duration_ms,
             model,
             completed_at,
-        agent_message_id: None,
+            agent_message_id: None,
         });
     }
 
@@ -1086,11 +1086,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-test-{nanos}"));
-        let chats_dir = base.join("tmp").join("codeg").join("chats");
+        let base: PathBuf = env::temp_dir().join(format!("harness-studio-gemini-test-{nanos}"));
+        let chats_dir = base.join("tmp").join("harness_studio").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         fs::write(
-            base.join("tmp").join("codeg").join(".project_root"),
+            base.join("tmp")
+                .join("harness_studio")
+                .join(".project_root"),
             "/Users/test/workspace/demo",
         )
         .expect("write project root");
@@ -1169,11 +1171,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-topic-{nanos}"));
-        let chats_dir = base.join("tmp").join("codeg").join("chats");
+        let base: PathBuf = env::temp_dir().join(format!("harness-studio-gemini-topic-{nanos}"));
+        let chats_dir = base.join("tmp").join("harness_studio").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         fs::write(
-            base.join("tmp").join("codeg").join(".project_root"),
+            base.join("tmp")
+                .join("harness_studio")
+                .join(".project_root"),
             "/Users/test/workspace/demo",
         )
         .expect("write project root");
@@ -1211,11 +1215,13 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-ctx-{nanos}"));
-        let chats_dir = base.join("tmp").join("codeg").join("chats");
+        let base: PathBuf = env::temp_dir().join(format!("harness-studio-gemini-ctx-{nanos}"));
+        let chats_dir = base.join("tmp").join("harness_studio").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         fs::write(
-            base.join("tmp").join("codeg").join(".project_root"),
+            base.join("tmp")
+                .join("harness_studio")
+                .join(".project_root"),
             "/Users/test/workspace/demo",
         )
         .expect("write project root");
@@ -1248,11 +1254,14 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-jsonl-test-{nanos}"));
-        let chats_dir = base.join("tmp").join("codeg-jsonl").join("chats");
+        let base: PathBuf =
+            env::temp_dir().join(format!("harness-studio-gemini-jsonl-test-{nanos}"));
+        let chats_dir = base.join("tmp").join("harness-studio-jsonl").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         fs::write(
-            base.join("tmp").join("codeg-jsonl").join(".project_root"),
+            base.join("tmp")
+                .join("harness-studio-jsonl")
+                .join(".project_root"),
             "/Users/test/workspace/jsonl-demo",
         )
         .expect("write project root");
@@ -1321,8 +1330,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-completed-{nanos}"));
-        let chats_dir = base.join("tmp").join("codeg").join("chats");
+        let base: PathBuf =
+            env::temp_dir().join(format!("harness-studio-gemini-completed-{nanos}"));
+        let chats_dir = base.join("tmp").join("harness_studio").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
 
         let file_path = chats_dir.join("session-completed.json");
@@ -1382,7 +1392,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-{tag}-{nanos}"));
+        let base: PathBuf = env::temp_dir().join(format!("harness-studio-gemini-{tag}-{nanos}"));
         let chats_dir = base.join("tmp").join(alias).join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         fs::write(
@@ -1409,10 +1419,10 @@ mod tests {
     /// inside a `$set.messages` array. This used to parse as zero messages.
     #[test]
     fn jsonl_rebuilds_history_from_set_messages() {
-        let base = chat_fixture("setmsgs", "codeg");
+        let base = chat_fixture("setmsgs", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-2026-09-09T06-29-setmsgs.jsonl");
         let content = r#"{"sessionId":"set-msgs-1","projectHash":"abc","startTime":"2026-09-09T06:29:23.000Z","lastUpdated":"2026-09-09T06:29:23.000Z","kind":"main"}
@@ -1438,10 +1448,10 @@ mod tests {
     /// first), and bare records appended afterwards extend it.
     #[test]
     fn jsonl_set_messages_replaces_then_appends() {
-        let base = chat_fixture("replace", "codeg");
+        let base = chat_fixture("replace", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-replace.jsonl");
         let content = r#"{"sessionId":"replace-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1461,10 +1471,10 @@ mod tests {
     /// `$rewindTo` drops the target and everything after it.
     #[test]
     fn jsonl_rewind_truncates_from_target() {
-        let base = chat_fixture("rewind", "codeg");
+        let base = chat_fixture("rewind", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-rewind.jsonl");
         let content = r#"{"sessionId":"rewind-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1491,10 +1501,10 @@ mod tests {
     /// upstream, rather than leaving it untouched.
     #[test]
     fn jsonl_rewind_to_unknown_id_clears_everything() {
-        let base = chat_fixture("rewind-miss", "codeg");
+        let base = chat_fixture("rewind-miss", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-rewind-miss.jsonl");
         let content = r#"{"sessionId":"rewind-miss-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1517,10 +1527,10 @@ mod tests {
     /// one seen, and fields the newer record omits do NOT survive.
     #[test]
     fn jsonl_repeated_id_replaces_whole_record_in_place() {
-        let base = chat_fixture("replace-id", "codeg");
+        let base = chat_fixture("replace-id", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-replace-id.jsonl");
         let content = r#"{"sessionId":"replace-id-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1552,10 +1562,10 @@ mod tests {
     /// One unparseable line must not take the whole transcript down with it.
     #[test]
     fn jsonl_skips_malformed_lines() {
-        let base = chat_fixture("badline", "codeg");
+        let base = chat_fixture("badline", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-badline.jsonl");
         let content = r#"{"sessionId":"badline-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1579,10 +1589,10 @@ mod tests {
     /// to the legacy single-record reader.
     #[test]
     fn jsonl_falls_back_to_legacy_single_object() {
-        let base = chat_fixture("legacy", "codeg");
+        let base = chat_fixture("legacy", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-legacy.jsonl");
         let content = r#"{
@@ -1607,10 +1617,10 @@ mod tests {
     /// still list, just with no messages.
     #[test]
     fn jsonl_metadata_only_session_still_lists() {
-        let base = chat_fixture("empty", "codeg");
+        let base = chat_fixture("empty", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-empty.jsonl");
         let content = r#"{"sessionId":"empty-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z","kind":"main"}
@@ -1630,10 +1640,10 @@ mod tests {
     /// `$set.summary` outranks both `update_topic` and the first user message.
     #[test]
     fn jsonl_prefers_metadata_summary_for_title() {
-        let base = chat_fixture("summary", "codeg");
+        let base = chat_fixture("summary", "harness_studio");
         let file_path = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("session-summary.jsonl");
         let content = r#"{"sessionId":"summary-1","projectHash":"abc","startTime":"2026-09-09T06:00:00.000Z","lastUpdated":"2026-09-09T06:00:00.000Z"}
@@ -1658,10 +1668,10 @@ mod tests {
     /// marked as children so they never import as root conversations.
     #[test]
     fn discovers_subagent_transcripts_as_children() {
-        let base = chat_fixture("subagent", "codeg");
+        let base = chat_fixture("subagent", "harness_studio");
         let nested = base
             .join("tmp")
-            .join("codeg")
+            .join("harness_studio")
             .join("chats")
             .join("parent-session-id");
         fs::create_dir_all(&nested).expect("create nested chat dir");
@@ -1699,7 +1709,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let base: PathBuf = env::temp_dir().join(format!("codeg-gemini-dirs-{nanos}"));
+        let base: PathBuf = env::temp_dir().join(format!("harness-studio-gemini-dirs-{nanos}"));
         let chats_dir = base.join("tmp").join("unmapped-alias").join("chats");
         fs::create_dir_all(&chats_dir).expect("create chat dir");
         // Deliberately NO `.project_root` and no `projects.json`.

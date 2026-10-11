@@ -10,7 +10,7 @@
 //!    hub::LogHub`], and returns a [`LogGuard`] the caller holds for the
 //!    process lifetime so buffered file lines flush on a graceful exit.
 //! 2. **Phase 2** — [`apply_persisted_level`], once the DB is open: overrides
-//!    the default level from the `logging.level` KV value (unless `CODEG_LOG` /
+//!    the default level from the `logging.level` KV value (unless `HARNESS_STUDIO_LOG` /
 //!    `RUST_LOG` is set, which wins).
 //! 3. **Phase 3** — `LogHub::set_emitter`, once `AppState` exists: starts
 //!    `logs://appended` delivery to the viewer.
@@ -43,7 +43,7 @@ pub struct LogGuard {
 
 /// Standing per-target ceilings applied to EVERY constructed filter — the
 /// default/configured level, a persisted level, AND an explicit `RUST_LOG` /
-/// `CODEG_LOG` override. Each entry is the MOST VERBOSE level that target may
+/// `HARNESS_STUDIO_LOG` override. Each entry is the MOST VERBOSE level that target may
 /// ever reach; see [`clamped_backstops`] for why that is a ceiling rather than a
 /// pin.
 ///
@@ -62,7 +62,7 @@ pub struct LogGuard {
 ///   — the shape behind the 34GB-in-8.8h field report on 0.23.3 (issue #427,
 ///   when this crate was still called `sacp`). It also carries one **INFO**
 ///   line per unhandled request (`incoming_actor` "Rejecting request with error,
-///   no handler") on the per-message hot path at the DEFAULT level. codeg keeps
+///   no handler") on the per-message hot path at the DEFAULT level. harness_studio keeps
 ///   its own throttled account of dropped / unclaimed messages
 ///   (`maybe_emit_ext_notification`, `TurnOutputProbe`), so none of that is
 ///   load-bearing.
@@ -75,7 +75,7 @@ pub struct LogGuard {
 ///   [`crate::logging::budget`] bounds whatever is left.
 ///
 ///   Protocol-level debugging stays reachable: a MORE SPECIFIC target beats a
-///   crate-level ceiling, so setting `CODEG_LOG` to
+///   crate-level ceiling, so setting `HARNESS_STUDIO_LOG` to
 ///   `info,agent_client_protocol::jsonrpc::transport_actor=trace` still dumps
 ///   the wire.
 /// - `tungstenite` → `Debug` — `handshake/client.rs` TRACEs the serialized
@@ -104,7 +104,7 @@ pub struct LogGuard {
 ///   for a firehose and wrong for a credential, so the dump gets its own entry.
 ///   Backstops are appended last and win at equal specificity (see
 ///   [`build_env_filter`]), so a plain `tungstenite::handshake::client=trace`
-///   from the Settings UI or `CODEG_LOG` loses to this entry at any module
+///   from the Settings UI or `HARNESS_STUDIO_LOG` loses to this entry at any module
 ///   depth. Asking for LESS is still honored: the clamp never raises
 ///   verbosity, so `off` still means off.
 ///
@@ -117,7 +117,7 @@ pub struct LogGuard {
 ///   `.sqlx_logging(false)`, but that is a per-call-site opt-out that a new
 ///   connection can forget; this makes forgetting harmless. Slow-query lines are
 ///   WARN and survive.
-/// - `codeg_lib::logging` → `Off` — the logging stack must not log about itself
+/// - `harness_studio_lib::logging` → `Off` — the logging stack must not log about itself
 ///   (cross-thread feedback-loop backstop; the layer's thread-local guard
 ///   handles the same-thread case).
 ///
@@ -129,14 +129,14 @@ const TARGET_BACKSTOPS: &[(&str, LogLevel)] = &[
     ("tungstenite", LogLevel::Debug),
     ("tungstenite::handshake::client", LogLevel::Debug),
     ("sqlx::query", LogLevel::Warn),
-    ("codeg_lib::logging", LogLevel::Off),
+    ("harness_studio_lib::logging", LogLevel::Off),
 ];
 
 /// The one target that is refused structurally rather than by level.
 ///
 /// [`TARGET_BACKSTOPS`] is a table of *levels*, and a level is negotiable:
 /// `EnvFilter` ranks a field-qualified directive above a plain target one, so
-/// `CODEG_LOG='tungstenite::handshake::client[{message}]=trace'` outranks the
+/// `HARNESS_STUDIO_LOG='tungstenite::handshake::client[{message}]=trace'` outranks the
 /// entry there — and that `trace!` is a formatted event, so it has a `message`
 /// field to match on. The entry in the table still earns its place (it keeps
 /// the crate ceiling coherent and it is what the directive tests read), but it
@@ -262,7 +262,7 @@ fn env_override_directives(s: &str) -> String {
 ///   out of `split(',')` and both sides of `=` are compared as-is.
 ///
 /// **With nothing applicable the answer is `Off`, not "unbounded".** An
-/// expression like `codeg_lib=info` enables nothing else — `EnvFilter::builder()`
+/// expression like `harness_studio_lib=info` enables nothing else — `EnvFilter::builder()`
 /// leaves `default_directive` unset (`builder.rs:353`), so an unmatched target is
 /// disabled — and a ceiling emitted as `agent_client_protocol=warn` there would *turn agent_client_protocol on*, a
 /// floor masquerading as a ceiling, which is the whole bug this clamp prevents.
@@ -283,7 +283,7 @@ fn env_level_for_target(expr: &str, target: &str) -> LogLevel {
             // `target=level`. An OMITTED level is TRACE (`directive.rs:203`); an
             // INVALID one makes the whole directive unparseable, and
             // `parse_lossy` drops those — so must we, or we'd emit a ceiling for
-            // a directive `EnvFilter` never accepted. `CODEG_LOG=off,agent_client_protocol=bogus`
+            // a directive `EnvFilter` never accepted. `HARNESS_STUDIO_LOG=off,agent_client_protocol=bogus`
             // is the case that matters: EnvFilter keeps only `off`, so appending
             // `agent_client_protocol=warn` there would turn agent_client_protocol back on.
             //
@@ -391,14 +391,14 @@ pub fn build_env_filter(settings: &LogSettings) -> EnvFilter {
 /// recursion backstop.
 fn is_valid_target(target: &str) -> bool {
     if target.is_empty()
-        || target == "codeg_lib::logging"
-        || target.starts_with("codeg_lib::logging::")
+        || target == "harness_studio_lib::logging"
+        || target.starts_with("harness_studio_lib::logging::")
     {
         return false;
     }
-    target.split("::").all(|seg| {
-        !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    })
+    target
+        .split("::")
+        .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
 }
 
 /// Build a reload handle not attached to any installed subscriber, for tests
@@ -418,12 +418,12 @@ const LOG_FILE_SUFFIX: &str = "log";
 
 /// Retention for rotated daily files. A disk-bound necessity (daily files would
 /// otherwise accumulate forever), not a functional cap; generous default,
-/// overridable via `CODEG_LOG_MAX_FILES`.
+/// overridable via `HARNESS_STUDIO_LOG_MAX_FILES`.
 ///
 /// Note this bounds the number of **files**, not their size — a single day's
 /// file is bounded separately by [`crate::logging::budget`].
 fn file_retention() -> usize {
-    std::env::var("CODEG_LOG_MAX_FILES")
+    std::env::var("HARNESS_STUDIO_LOG_MAX_FILES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -431,12 +431,12 @@ fn file_retention() -> usize {
 }
 
 /// The env-override directive, or `None`: the first non-empty (trimmed) value of
-/// `CODEG_LOG` then `RUST_LOG`. Single source of truth for env-level precedence,
+/// `HARNESS_STUDIO_LOG` then `RUST_LOG`. Single source of truth for env-level precedence,
 /// so the startup filter and the env-lock checks can't diverge — e.g. an empty
-/// `CODEG_LOG` must not mask a valid `RUST_LOG` (a `var().or_else(var)` would
+/// `HARNESS_STUDIO_LOG` must not mask a valid `RUST_LOG` (a `var().or_else(var)` would
 /// treat the empty `Ok("")` as present and skip `RUST_LOG`).
 fn env_level_override() -> Option<String> {
-    ["CODEG_LOG", "RUST_LOG"].iter().find_map(|key| {
+    ["HARNESS_STUDIO_LOG", "RUST_LOG"].iter().find_map(|key| {
         std::env::var(key)
             .ok()
             .map(|v| v.trim().to_string())
@@ -444,7 +444,7 @@ fn env_level_override() -> Option<String> {
     })
 }
 
-/// Whether an explicit `CODEG_LOG` / `RUST_LOG` is set (and non-empty). When
+/// Whether an explicit `HARNESS_STUDIO_LOG` / `RUST_LOG` is set (and non-empty). When
 /// true the env var owns the live level: startup skips the persisted level and
 /// the Settings UI locks the control (so it can't silently diverge).
 pub fn env_level_is_set() -> bool {
@@ -501,7 +501,7 @@ fn init_file_writer(dir: &Path, prefix: &str) -> Option<(NonBlocking, WorkerGuar
     Some(tracing_appender::non_blocking(budgeted))
 }
 
-/// Build and install the subscriber. `file_dir` is `None` for `codeg-mcp`
+/// Build and install the subscriber. `file_dir` is `None` for `harness-studio-mcp`
 /// (stderr only). Returns the reload handle and the appender guard.
 fn build_subscriber(
     initial: LogLevel,
@@ -526,7 +526,7 @@ fn build_subscriber(
     let (filter_layer, reload_handle) = reload::Layer::new(initial_filter);
 
     // stderr fmt layer — MUST target stderr (not the default stdout): in
-    // codeg-mcp stdout is the JSON-RPC channel, and elsewhere the migrated
+    // harness-studio-mcp stdout is the JSON-RPC channel, and elsewhere the migrated
     // eprintln! all went to stderr.
     let file = file_dir.and_then(|dir| init_file_writer(dir, file_prefix));
 
@@ -576,28 +576,22 @@ fn build_subscriber(
     // Last here, because the hook logs through the subscriber that was just
     // installed. Early everywhere else: every binary builds its subscriber
     // through this one function, so this single call covers the desktop app,
-    // the server, `codeg-mcp`, the supervisor and the credential helper, and it
+    // the server, `harness-studio-mcp`, the supervisor and the credential helper, and it
     // runs before any of them does real work.
     crate::logging::panic_hook::install();
 
     (reload_handle, guard)
 }
 
-/// Phase 1 for the desktop `codeg` binary: stderr + file (`codeg.<date>.log`) +
+/// Phase 1 for the desktop `harness_studio` binary: stderr + file (`harness_studio.<date>.log`) +
 /// buffer. Default level is env-or-`info`; [`apply_persisted_level`] refines it
 /// once the DB is open.
 pub fn init_desktop() -> LogGuard {
-    init_with_file("codeg")
-}
-
-/// Phase 1 for `codeg-server`: stderr + file (`codeg-server.<date>.log`) +
-/// buffer.
-pub fn init_server() -> LogGuard {
-    init_with_file("codeg-server")
+    init_with_file("harness_studio")
 }
 
 fn init_with_file(prefix: &str) -> LogGuard {
-    let dir = crate::paths::codeg_logs_root();
+    let dir = crate::paths::harness_studio_logs_root();
     let (reload, guard) = build_subscriber(LogLevel::default(), Some(&dir), prefix);
     LogHub::install(reload);
     LogGuard { _guard: guard }
@@ -605,11 +599,11 @@ fn init_with_file(prefix: &str) -> LogGuard {
 
 /// Install a **stderr-only** subscriber (no file / buffer / hub / emitter) for
 /// process modes that run before — or instead of — the full logging stack:
-/// `codeg-mcp`, the `--supervise` supervisor, and the `--credential-helper`
+/// `harness-studio-mcp`, the `--supervise` supervisor, and the `--credential-helper`
 /// subprocess. Without an installed subscriber, `tracing` calls on those paths
 /// are silently dropped (unlike the old `eprintln!`, which always hit stderr).
 ///
-/// stderr (not stdout) is mandatory: in `codeg-mcp` and the credential helper,
+/// stderr (not stdout) is mandatory: in `harness-studio-mcp` and the credential helper,
 /// stdout is a protocol channel. No file appender: those modes are short-lived
 /// or multi-process and must not clobber a shared rolling file. No hub: nothing
 /// to buffer/emit, so `BufferEmitLayer` short-circuits.
@@ -618,13 +612,13 @@ pub fn init_stderr_only() -> LogGuard {
     LogGuard { _guard: guard }
 }
 
-/// Phase 1 for `codeg-mcp`. See [`init_stderr_only`].
+/// Phase 1 for `harness-studio-mcp`. See [`init_stderr_only`].
 pub fn init_mcp() -> LogGuard {
     init_stderr_only()
 }
 
 /// Phase 2: override the default level from the persisted `logging.level` KV
-/// value, unless an explicit `CODEG_LOG` / `RUST_LOG` is set (env wins). No-op
+/// value, unless an explicit `HARNESS_STUDIO_LOG` / `RUST_LOG` is set (env wins). No-op
 /// when no hub is installed (mcp) or the value is absent/unparseable.
 pub async fn apply_persisted_level(conn: &sea_orm::DatabaseConnection) {
     if env_level_is_set() {
@@ -653,7 +647,7 @@ mod tests {
             level: LogLevel::Info,
             targets: vec![
                 TargetDirective {
-                    target: "codeg_lib::acp".into(),
+                    target: "harness_studio_lib::acp".into(),
                     level: LogLevel::Debug,
                 },
                 // Whitespace-only target is skipped, not emitted as a bare "=trace".
@@ -662,22 +656,22 @@ mod tests {
                     level: LogLevel::Trace,
                 },
                 TargetDirective {
-                    target: "codeg_lib::web".into(),
+                    target: "harness_studio_lib::web".into(),
                     level: LogLevel::Warn,
                 },
             ],
         };
         let rendered = build_env_filter(&settings).to_string();
         assert!(
-            rendered.contains("codeg_lib::acp=debug"),
+            rendered.contains("harness_studio_lib::acp=debug"),
             "missing acp override: {rendered}"
         );
         assert!(
-            rendered.contains("codeg_lib::web=warn"),
+            rendered.contains("harness_studio_lib::web=warn"),
             "missing web override: {rendered}"
         );
         assert!(
-            rendered.contains("codeg_lib::logging=off"),
+            rendered.contains("harness_studio_lib::logging=off"),
             "missing backstop: {rendered}"
         );
         assert!(
@@ -696,21 +690,30 @@ mod tests {
                     level: LogLevel::Trace,
                 },
                 TargetDirective {
-                    target: "codeg_lib::logging".into(), // backstop override attempt → dropped
+                    target: "harness_studio_lib::logging".into(), // backstop override attempt → dropped
                     level: LogLevel::Trace,
                 },
                 TargetDirective {
-                    target: "codeg_lib::acp".into(),
+                    target: "harness_studio_lib::acp".into(),
                     level: LogLevel::Debug,
                 },
             ],
         };
         let rendered = build_env_filter(&settings).to_string();
-        assert!(rendered.contains("codeg_lib::acp=debug"), "{rendered}");
+        assert!(
+            rendered.contains("harness_studio_lib::acp=debug"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("bad-target"), "{rendered}");
         // The logging module stays off; the override attempt is dropped.
-        assert!(rendered.contains("codeg_lib::logging=off"), "{rendered}");
-        assert!(!rendered.contains("codeg_lib::logging=trace"), "{rendered}");
+        assert!(
+            rendered.contains("harness_studio_lib::logging=off"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("harness_studio_lib::logging=trace"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -735,7 +738,7 @@ mod tests {
             "tungstenite=info",
             // Every SQL statement at INFO if a ConnectOptions forgets to opt out.
             "sqlx::query=warn",
-            "codeg_lib::logging=off",
+            "harness_studio_lib::logging=off",
         ] {
             assert!(rendered.contains(pin), "missing backstop {pin}: {rendered}");
         }
@@ -763,7 +766,7 @@ mod tests {
                 .parse_lossy(&env)
                 .to_string()
                 .contains("tungstenite=debug"),
-            "CODEG_LOG=trace re-opened the handshake dump: {env}"
+            "HARNESS_STUDIO_LOG=trace re-opened the handshake dump: {env}"
         );
     }
 
@@ -784,7 +787,7 @@ mod tests {
                 .to_string();
             assert!(
                 !rendered.contains("tungstenite::handshake::client=trace"),
-                "CODEG_LOG={asked} reopened the dump: {rendered}"
+                "HARNESS_STUDIO_LOG={asked} reopened the dump: {rendered}"
             );
         }
 
@@ -865,10 +868,10 @@ mod tests {
             crate::logging::panic_hook::PANIC_TARGET
         ));
         for other in [
-            "codeg_lib::acp::connection",
-            "codeg_lib::panic_hook",
-            "codeg_lib::panicky",
-            "codeg_lib",
+            "harness_studio_lib::acp::connection",
+            "harness_studio_lib::panic_hook",
+            "harness_studio_lib::panicky",
+            "harness_studio_lib",
             "panic",
         ] {
             assert!(
@@ -901,16 +904,17 @@ mod tests {
 
         let seen = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default()
-            .with(EnvFilter::builder().parse_lossy(
-                "trace,tungstenite::handshake::client[{message}]=trace",
-            ))
+            .with(
+                EnvFilter::builder()
+                    .parse_lossy("trace,tungstenite::handshake::client[{message}]=trace"),
+            )
             .with(filter_fn(|meta| !is_credential_dump_target(meta.target())))
             .with(CaptureTargets(seen.clone()));
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::trace!(target: "tungstenite::handshake::client", "Request: bearer s3cret");
             tracing::trace!(target: "tungstenite::protocol", "frame");
-            tracing::trace!(target: "codeg_lib::acp", "unrelated");
+            tracing::trace!(target: "harness_studio_lib::acp", "unrelated");
         });
 
         let seen = seen.lock().unwrap();
@@ -923,7 +927,7 @@ mod tests {
             "frame tracing must still arrive: {seen:?}"
         );
         assert!(
-            seen.iter().any(|t| t == "codeg_lib::acp"),
+            seen.iter().any(|t| t == "harness_studio_lib::acp"),
             "unrelated targets must still arrive: {seen:?}"
         );
     }
@@ -957,8 +961,7 @@ mod tests {
         // The reloadable filter, not a bare `EnvFilter`: the real stack's first
         // layer is a `reload::Layer`, and a per-layer filter beneath one is the
         // combination this test exists to pin.
-        let (reloadable, _handle) =
-            reload::Layer::new(EnvFilter::builder().parse_lossy("trace"));
+        let (reloadable, _handle) = reload::Layer::new(EnvFilter::builder().parse_lossy("trace"));
         let subscriber = Registry::default()
             .with(reloadable)
             .with(filter_fn(|meta| !is_credential_dump_target(meta.target())))
@@ -972,7 +975,7 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::error!(target: crate::logging::panic_hook::PANIC_TARGET, "panic in thread …");
-            tracing::info!(target: "codeg_lib::acp", "ordinary event");
+            tracing::info!(target: "harness_studio_lib::acp", "ordinary event");
         });
 
         let seen = seen.lock().unwrap();
@@ -990,7 +993,7 @@ mod tests {
         );
         assert_eq!(
             seen.iter()
-                .filter(|(_, target)| target == "codeg_lib::acp")
+                .filter(|(_, target)| target == "harness_studio_lib::acp")
                 .count(),
             2,
             "an ordinary event still reaches both sinks: {seen:?}"
@@ -999,19 +1002,23 @@ mod tests {
 
     #[test]
     fn env_override_appends_backstops_so_debug_cannot_reopen_them() {
-        // The explicit RUST_LOG/CODEG_LOG path bypasses build_env_filter, so it
+        // The explicit RUST_LOG/HARNESS_STUDIO_LOG path bypasses build_env_filter, so it
         // must apply the same backstops itself — otherwise `RUST_LOG=debug`
         // re-opens the kill_tree per-PID firehose and the agent_client_protocol wire dump.
         assert_eq!(
             env_override_directives("debug"),
             "debug,kill_tree=warn,agent_client_protocol=warn,tungstenite=debug,\
-             tungstenite::handshake::client=debug,sqlx::query=warn,codeg_lib::logging=off"
+             tungstenite::handshake::client=debug,sqlx::query=warn,harness_studio_lib::logging=off"
         );
         // And the parsed filter still carries the clamps under a global debug.
         let rendered = EnvFilter::builder()
             .parse_lossy(env_override_directives("debug"))
             .to_string();
-        for pin in ["kill_tree=warn", "agent_client_protocol=warn", "sqlx::query=warn"] {
+        for pin in [
+            "kill_tree=warn",
+            "agent_client_protocol=warn",
+            "sqlx::query=warn",
+        ] {
             assert!(
                 rendered.contains(pin),
                 "{pin} clamp must survive a global debug override: {rendered}"
@@ -1054,7 +1061,7 @@ mod tests {
         assert_eq!(
             env_override_directives("OFF"),
             "OFF,kill_tree=off,agent_client_protocol=off,tungstenite=off,\
-             tungstenite::handshake::client=off,sqlx::query=off,codeg_lib::logging=off",
+             tungstenite::handshake::client=off,sqlx::query=off,harness_studio_lib::logging=off",
             "a bare off override collapses the ceilings, case-insensitively"
         );
     }
@@ -1072,36 +1079,55 @@ mod tests {
         assert_eq!(
             env_override_directives("agent_client_protocol=off"),
             "agent_client_protocol=off,kill_tree=off,agent_client_protocol=off,tungstenite=off,\
-             tungstenite::handshake::client=off,sqlx::query=off,codeg_lib::logging=off"
+             tungstenite::handshake::client=off,sqlx::query=off,harness_studio_lib::logging=off"
         );
         // ...but the same target asking for MORE is still refused: that is the
         // firehose this whole clamp exists to keep shut.
         assert!(
-            env_override_directives("agent_client_protocol=trace").contains("agent_client_protocol=warn"),
+            env_override_directives("agent_client_protocol=trace")
+                .contains("agent_client_protocol=warn"),
             "a crate-wide trace request must still be clamped"
         );
         // A compound expression's bare level is the ceiling for targets it
         // doesn't name.
-        let compound = env_override_directives("off,codeg_lib::acp=trace");
+        let compound = env_override_directives("off,harness_studio_lib::acp=trace");
         assert!(compound.contains("agent_client_protocol=off"), "{compound}");
-        assert!(!compound.contains("agent_client_protocol=warn"), "{compound}");
-        let error_compound = env_override_directives("error,codeg_lib::acp=info");
-        assert!(error_compound.contains("agent_client_protocol=error"), "{error_compound}");
-        assert!(!error_compound.contains("agent_client_protocol=warn"), "{error_compound}");
+        assert!(
+            !compound.contains("agent_client_protocol=warn"),
+            "{compound}"
+        );
+        let error_compound = env_override_directives("error,harness_studio_lib::acp=info");
+        assert!(
+            error_compound.contains("agent_client_protocol=error"),
+            "{error_compound}"
+        );
+        assert!(
+            !error_compound.contains("agent_client_protocol=warn"),
+            "{error_compound}"
+        );
         // No bare level at all: EnvFilter leaves unmatched targets disabled, so a
         // ceiling of `off` is the honest answer — emitting `warn` here would turn
         // agent_client_protocol ON in an expression that never asked for it.
-        let targeted = env_override_directives("codeg_lib::acp=info");
+        let targeted = env_override_directives("harness_studio_lib::acp=info");
         assert!(targeted.contains("agent_client_protocol=off"), "{targeted}");
-        assert!(!targeted.contains("agent_client_protocol=warn"), "{targeted}");
+        assert!(
+            !targeted.contains("agent_client_protocol=warn"),
+            "{targeted}"
+        );
     }
 
     #[test]
     fn env_level_for_target_resolves_like_env_filter_would() {
         // Exact target beats the global, and the last exact wins.
-        assert_eq!(env_level_for_target("info,agent_client_protocol=off", "agent_client_protocol"), LogLevel::Off);
         assert_eq!(
-            env_level_for_target("agent_client_protocol=warn,agent_client_protocol=debug", "agent_client_protocol"),
+            env_level_for_target("info,agent_client_protocol=off", "agent_client_protocol"),
+            LogLevel::Off
+        );
+        assert_eq!(
+            env_level_for_target(
+                "agent_client_protocol=warn,agent_client_protocol=debug",
+                "agent_client_protocol"
+            ),
             LogLevel::Debug
         );
         // A later but BROADER directive can't displace a narrower earlier one.
@@ -1117,21 +1143,39 @@ mod tests {
         // A MORE specific target doesn't either — EnvFilter prefers it for events
         // beneath it, which is the escape hatch.
         assert_eq!(
-            env_level_for_target("info,agent_client_protocol::jsonrpc=trace", "agent_client_protocol"),
+            env_level_for_target(
+                "info,agent_client_protocol::jsonrpc=trace",
+                "agent_client_protocol"
+            ),
             LogLevel::Info
         );
         // Span/field syntax falls through to the global by design.
         assert_eq!(
-            env_level_for_target("info,agent_client_protocol[span]=trace", "agent_client_protocol"),
+            env_level_for_target(
+                "info,agent_client_protocol[span]=trace",
+                "agent_client_protocol"
+            ),
             LogLevel::Info
         );
         // Nothing applicable at all ⇒ off, not unbounded.
-        assert_eq!(env_level_for_target("other=trace", "agent_client_protocol"), LogLevel::Off);
-        assert_eq!(env_level_for_target("", "agent_client_protocol"), LogLevel::Off);
+        assert_eq!(
+            env_level_for_target("other=trace", "agent_client_protocol"),
+            LogLevel::Off
+        );
+        assert_eq!(
+            env_level_for_target("", "agent_client_protocol"),
+            LogLevel::Off
+        );
         // Case is tolerated in a level.
-        assert_eq!(env_level_for_target("INFO,agent_client_protocol=WARN", "agent_client_protocol"), LogLevel::Warn);
+        assert_eq!(
+            env_level_for_target("INFO,agent_client_protocol=WARN", "agent_client_protocol"),
+            LogLevel::Warn
+        );
         // Malformed `=level` is dropped, like `parse_lossy` does.
-        assert_eq!(env_level_for_target("=info", "agent_client_protocol"), LogLevel::Off);
+        assert_eq!(
+            env_level_for_target("=info", "agent_client_protocol"),
+            LogLevel::Off
+        );
     }
 
     /// `EnvFilter` normalizes whitespace NOWHERE: `Directive::parse` walks
@@ -1145,7 +1189,11 @@ mod tests {
     /// drift apart silently.
     #[test]
     fn padded_directives_are_inert_to_both_the_filter_and_the_ceiling() {
-        for expr in ["info ,agent_client_protocol =off", " info,agent_client_protocol = off", "info , agent_client_protocol=off"] {
+        for expr in [
+            "info ,agent_client_protocol =off",
+            " info,agent_client_protocol = off",
+            "info , agent_client_protocol=off",
+        ] {
             let level = env_level_for_target(expr, "agent_client_protocol");
             assert_eq!(
                 level,
@@ -1167,7 +1215,10 @@ mod tests {
             env_level_for_target("info,agent_client_protocol=off", "agent_client_protocol"),
             LogLevel::Off
         );
-        assert_eq!(env_level_for_target("info,other=off", "agent_client_protocol"), LogLevel::Info);
+        assert_eq!(
+            env_level_for_target("info,other=off", "agent_client_protocol"),
+            LogLevel::Info
+        );
     }
 
     /// `parse_lossy` DROPS a directive whose level is invalid — it does not
@@ -1183,14 +1234,26 @@ mod tests {
         );
         let rendered = env_override_directives("off,agent_client_protocol=bogus");
         assert!(rendered.contains("agent_client_protocol=off"), "{rendered}");
-        assert!(!rendered.contains("agent_client_protocol=warn"), "{rendered}");
+        assert!(
+            !rendered.contains("agent_client_protocol=warn"),
+            "{rendered}"
+        );
 
         // Numeric spellings go through `usize` in `LevelFilter::from_str`, so
         // these are levels, not garbage — and `00` is `off`, not `trace`.
-        assert_eq!(env_level_for_target("agent_client_protocol=00", "agent_client_protocol"), LogLevel::Off);
-        assert_eq!(env_level_for_target("agent_client_protocol=005", "agent_client_protocol"), LogLevel::Trace);
+        assert_eq!(
+            env_level_for_target("agent_client_protocol=00", "agent_client_protocol"),
+            LogLevel::Off
+        );
+        assert_eq!(
+            env_level_for_target("agent_client_protocol=005", "agent_client_protocol"),
+            LogLevel::Trace
+        );
         // Out-of-range numbers are invalid, so that directive drops.
-        assert_eq!(env_level_for_target("off,agent_client_protocol=9", "agent_client_protocol"), LogLevel::Off);
+        assert_eq!(
+            env_level_for_target("off,agent_client_protocol=9", "agent_client_protocol"),
+            LogLevel::Off
+        );
         // A padded level is invalid to `LevelFilter::from_str`, so it drops too.
         assert_eq!(
             env_level_for_target("off,agent_client_protocol= warn", "agent_client_protocol"),
@@ -1204,14 +1267,29 @@ mod tests {
     #[test]
     fn env_level_for_target_understands_every_directive_form() {
         // Numeric levels (`LevelFilter::from_str`): 0=off .. 5=trace.
-        assert_eq!(env_level_for_target("5", "agent_client_protocol"), LogLevel::Trace);
-        assert_eq!(env_level_for_target("0", "agent_client_protocol"), LogLevel::Off);
-        assert_eq!(env_level_for_target("agent_client_protocol=2", "agent_client_protocol"), LogLevel::Warn);
+        assert_eq!(
+            env_level_for_target("5", "agent_client_protocol"),
+            LogLevel::Trace
+        );
+        assert_eq!(
+            env_level_for_target("0", "agent_client_protocol"),
+            LogLevel::Off
+        );
+        assert_eq!(
+            env_level_for_target("agent_client_protocol=2", "agent_client_protocol"),
+            LogLevel::Warn
+        );
         // A bare target with no level means TRACE for it (directive.rs:163).
-        assert_eq!(env_level_for_target("agent_client_protocol", "agent_client_protocol"), LogLevel::Trace);
+        assert_eq!(
+            env_level_for_target("agent_client_protocol", "agent_client_protocol"),
+            LogLevel::Trace
+        );
         // So does `target=` with the level omitted (directive.rs:203) — NOT the
         // `ERROR` that `LevelFilter::from_str("")` alone would give.
-        assert_eq!(env_level_for_target("agent_client_protocol=", "agent_client_protocol"), LogLevel::Trace);
+        assert_eq!(
+            env_level_for_target("agent_client_protocol=", "agent_client_protocol"),
+            LogLevel::Trace
+        );
 
         // EnvFilter matches targets by raw `starts_with`, so a shorter directive
         // target also governs longer ones: `tungstenite=off` covers
@@ -1233,7 +1311,12 @@ mod tests {
         );
 
         // And the clamp still refuses "louder" for each of these forms.
-        for expr in ["agent_client_protocol", "agent_client_protocol=", "agent_client_protocol=5", "5"] {
+        for expr in [
+            "agent_client_protocol",
+            "agent_client_protocol=",
+            "agent_client_protocol=5",
+            "5",
+        ] {
             assert!(
                 env_override_directives(expr).contains("agent_client_protocol=warn"),
                 "{expr} must still be clamped to warn"
@@ -1254,7 +1337,10 @@ mod tests {
         })
         .to_string();
         assert!(rendered.contains("agent_client_protocol=off"), "{rendered}");
-        assert!(!rendered.contains("agent_client_protocol=warn"), "{rendered}");
+        assert!(
+            !rendered.contains("agent_client_protocol=warn"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1288,14 +1374,20 @@ mod tests {
         let rendered = EnvFilter::builder()
             .parse_lossy(env_override_directives("agent_client_protocol=trace"))
             .to_string();
-        assert!(rendered.contains("agent_client_protocol=warn"), "{rendered}");
-        assert!(!rendered.contains("agent_client_protocol=trace"), "{rendered}");
+        assert!(
+            rendered.contains("agent_client_protocol=warn"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("agent_client_protocol=trace"),
+            "{rendered}"
+        );
     }
 
     #[test]
     fn is_valid_target_grammar() {
-        assert!(is_valid_target("codeg_lib::acp"));
-        assert!(is_valid_target("codeg_lib::acp::delegation"));
+        assert!(is_valid_target("harness_studio_lib::acp"));
+        assert!(is_valid_target("harness_studio_lib::acp::delegation"));
         assert!(is_valid_target("a"));
         assert!(!is_valid_target(""));
         assert!(!is_valid_target("bad-target"));
@@ -1303,23 +1395,29 @@ mod tests {
         assert!(!is_valid_target("trailing::"));
         assert!(!is_valid_target("a:::b"));
         assert!(!is_valid_target("has space"));
-        assert!(!is_valid_target("codeg_lib::logging"));
-        assert!(!is_valid_target("codeg_lib::logging::hub"));
+        assert!(!is_valid_target("harness_studio_lib::logging"));
+        assert!(!is_valid_target("harness_studio_lib::logging::hub"));
     }
 
     #[test]
     fn env_level_override_precedence() {
         // Both unset → no override.
         temp_env::with_vars(
-            [("CODEG_LOG", None::<&str>), ("RUST_LOG", None::<&str>)],
+            [
+                ("HARNESS_STUDIO_LOG", None::<&str>),
+                ("RUST_LOG", None::<&str>),
+            ],
             || {
                 assert_eq!(env_level_override(), None);
                 assert!(!env_level_is_set());
             },
         );
-        // Empty CODEG_LOG must NOT mask a valid RUST_LOG (the bug Codex caught).
+        // Empty HARNESS_STUDIO_LOG must NOT mask a valid RUST_LOG (the bug Codex caught).
         temp_env::with_vars(
-            [("CODEG_LOG", Some("")), ("RUST_LOG", Some("debug"))],
+            [
+                ("HARNESS_STUDIO_LOG", Some("")),
+                ("RUST_LOG", Some("debug")),
+            ],
             || {
                 assert_eq!(env_level_override().as_deref(), Some("debug"));
                 assert!(env_level_is_set());
@@ -1327,15 +1425,18 @@ mod tests {
         );
         // Both empty / whitespace-only → no override.
         temp_env::with_vars(
-            [("CODEG_LOG", Some("  ")), ("RUST_LOG", Some(""))],
+            [("HARNESS_STUDIO_LOG", Some("  ")), ("RUST_LOG", Some(""))],
             || {
                 assert_eq!(env_level_override(), None);
                 assert!(!env_level_is_set());
             },
         );
-        // CODEG_LOG wins when both are non-empty.
+        // HARNESS_STUDIO_LOG wins when both are non-empty.
         temp_env::with_vars(
-            [("CODEG_LOG", Some("trace")), ("RUST_LOG", Some("debug"))],
+            [
+                ("HARNESS_STUDIO_LOG", Some("trace")),
+                ("RUST_LOG", Some("debug")),
+            ],
             || {
                 assert_eq!(env_level_override().as_deref(), Some("trace"));
             },

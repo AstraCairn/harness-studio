@@ -5,14 +5,8 @@
 // rules, multi-tenant prefixing, etc.) doesn't have to be remembered at every
 // call site.
 
-const TOKEN_KEY = "codeg_token"
+const TOKEN_KEY = "harness_studio_token"
 
-export function getCodegToken(): string {
+export function getHarnessStudioToken(): string {
   return localStorage.getItem(TOKEN_KEY) ?? ""
-}
-
-export function redirectToCodegLogin(): void {
-  if (window.location.pathname.startsWith("/login")) return
-  localStorage.removeItem(TOKEN_KEY)
-  window.location.href = "/login"
 }

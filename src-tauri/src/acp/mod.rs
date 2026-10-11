@@ -1,7 +1,7 @@
 pub mod agent_mentions;
-pub mod air_contract;
 pub mod agent_process;
 pub mod agent_session;
+pub mod air_contract;
 pub mod antigravity_login;
 pub mod background_watch;
 pub mod binary_cache;
@@ -41,8 +41,8 @@ pub mod remote_registry;
 pub mod scratch_dir;
 pub mod service_error;
 pub mod session_info;
-pub mod session_title;
 pub mod session_state;
+pub mod session_title;
 pub mod stderr_tail;
 pub mod temp_reclaim;
 pub mod terminal_runtime;
@@ -71,16 +71,19 @@ pub use types::{
 /// Feed this to [`crate::db::service::conversation_service::bind_external_id`]
 /// so it can tell "this conversation continues under a new agent session" from
 /// "an unrelated session landed on this row". The first is routine: when a
-/// custom agent has forgotten a session, codeg opens a fresh one and links the
+/// custom agent has forgotten a session, harness_studio opens a fresh one and links the
 /// transcripts, and both the reader and the generic parser then treat the chain
 /// as one conversation. Splitting there would clone the conversation in the
-/// sidebar on every restart. The second is codeg#500, where the split is the
+/// sidebar on every restart. The second is harness_studio#500, where the split is the
 /// whole point.
 ///
 /// Empty — and free — for every built-in agent: their history lives in the
-/// agent's own store, codeg records no transcript, and so nothing can ever be
+/// agent's own store, harness_studio records no transcript, and so nothing can ever be
 /// carried forward. Only custom agents can produce a non-empty answer.
-pub fn continued_session_ids(agent_type: crate::models::AgentType, session_id: &str) -> Vec<String> {
+pub fn continued_session_ids(
+    agent_type: crate::models::AgentType,
+    session_id: &str,
+) -> Vec<String> {
     if agent_type.custom_id().is_none() {
         return Vec::new();
     }

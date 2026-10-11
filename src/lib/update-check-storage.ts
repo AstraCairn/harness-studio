@@ -25,8 +25,8 @@ import type { AppUpdateInfo } from "@/lib/updater"
  * `localStorage` degrades to "nothing remembered", never an exception.
  */
 
-const LAST_CHECK_KEY = "codeg.updateCheck.last"
-const DISMISSED_VERSION_KEY = "codeg.updateCheck.dismissedVersion"
+const LAST_CHECK_KEY = "harness_studio.updateCheck.last"
+const DISMISSED_VERSION_KEY = "harness_studio.updateCheck.dismissedVersion"
 
 export interface CachedUpdateCheck {
   /** Epoch ms when the check completed. */

@@ -9,8 +9,8 @@
  * less (no title, no picture) and is decided on the backend.
  *
  * Pictures are fetched one window at a time as the list renders, through the
- * helper — codeg itself never captures the screen. A window that can never be
- * shared (codeg's, a credential manager, one whose application cannot be
+ * helper — harness_studio itself never captures the screen. A window that can never be
+ * shared (harness_studio's, a credential manager, one whose application cannot be
  * told) is kept out of the grid, in a folded list at the bottom with the
  * reason, and gets no picture.
  *
@@ -851,9 +851,11 @@ export function ComputerWindowPicker({
                       </li>
                     ))}
                   </ul>
-                  {unshareable.some((w) => w.notGrantable === "codeg") && (
+                  {unshareable.some(
+                    (w) => w.notGrantable === "harness_studio"
+                  ) && (
                     <p className="mt-2 text-2xs leading-snug text-muted-foreground">
-                      {t("codegWhy")}
+                      {t("harnessStudioWhy")}
                     </p>
                   )}
                 </CollapsibleContent>

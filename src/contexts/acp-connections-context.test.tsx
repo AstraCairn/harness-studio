@@ -580,7 +580,7 @@ describe("AcpConnectionsProvider preview-tab release (disconnectIfIdle)", () => 
         "turn_complete",
         expect.objectContaining({
           title: "Fix the flaky upload test",
-          redactedTitle: "api - Codeg",
+          redactedTitle: "api - harness studio",
           body: "api · notificationTurnComplete",
         })
       )
@@ -2798,7 +2798,7 @@ describe("streaming flush window widens with the run it re-renders", () => {
     }
   })
 
-  // Codeg runs several agents at once by design. A window sized from what one
+  // HarnessStudio runs several agents at once by design. A window sized from what one
   // conversation is re-rendering must not be charged to another — least of all
   // to a background one that costs nothing to flush and gains nothing by
   // waiting.
@@ -3313,7 +3313,7 @@ describe("AcpConnectionsProvider Grok cross-agent-type model switch", () => {
     const handlers = latestAttachHandlers()
     h.toastError.mockClear()
     const instructions =
-      "Pi is too old for this version of Codeg: opening a session needs Pi 0.81.0 or newer."
+      "Pi is too old for this version of harness studio: opening a session needs Pi 0.81.0 or newer."
     emitAcpEvent(handlers, {
       seq: 1,
       connection_id: "spawned-conn",
@@ -6478,7 +6478,7 @@ describe("AIR session failures are told as notifications", () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
-  it("tells one failed turn once — the typed record first, then codeg's verdict", async () => {
+  it("tells one failed turn once — the typed record first, then harness_studio's verdict", async () => {
     const handlers = await connectOwner()
     startTurn(handlers)
     emit(handlers, { type: "session_failure", record: failure() })
@@ -6509,7 +6509,7 @@ describe("AIR session failures are told as notifications", () => {
     )
   })
 
-  it("tells one failed turn once — codeg's verdict first, then the typed record", async () => {
+  it("tells one failed turn once — harness_studio's verdict first, then the typed record", async () => {
     const handlers = await connectOwner()
     startTurn(handlers)
     emit(handlers, {

@@ -30,13 +30,13 @@ use crate::parsers::{
 /// through pi's tilde rule ([`expand_pi_tilde`]), because pi reads them through
 /// `expandTildePath`.
 ///
-/// That is pi's own documented order minus its `--session-dir` flag, which codeg
+/// That is pi's own documented order minus its `--session-dir` flag, which harness_studio
 /// never passes (`docs/settings.md`: "precedence is `--session-dir`,
 /// `PI_CODING_AGENT_SESSION_DIR`, then `sessionDir` in settings.json"). The
 /// settings layer is not optional garnish: pi-acp reads it too
 /// (`getPiSessionsDir` → `readSessionDirFromSettings`), so a user who sets
 /// `sessionDir` and is missing this layer gets a pi that resumes fine while
-/// codeg's history list stays permanently empty.
+/// harness_studio's history list stays permanently empty.
 ///
 /// Mirrors the `resolve_*`/`resolve_*_from` split of `parsers::kimi_code` so the
 /// environment lookup is a pure function over its inputs (testable without
@@ -84,7 +84,7 @@ pub(crate) fn resolve_pi_agent_dir() -> PathBuf {
 /// `contextWindow: definition.contextWindow ?? 128000`. The entry REPLACES any
 /// built-in model of the same id (`applyModelsJson` upserts by id and only
 /// borrows `api`/`baseUrl` from the one it replaces), so 128K is what pi runs
-/// with — not the built-in catalog's number, and not codeg's name table's.
+/// with — not the built-in catalog's number, and not harness_studio's name table's.
 const PI_DEFAULT_MODEL_CONTEXT_WINDOW: u64 = 128_000;
 
 /// The context window `<agent_dir>/models.json` settles on for a model.
@@ -234,7 +234,7 @@ fn expand_pi_tilde(value: &str, home_dir: Option<&Path>) -> PathBuf {
 /// resolves a single sessions root with no workspace in hand.
 ///
 /// Guessing is worse than declining. Resolving a relative value against the agent
-/// dir (which is what pi-acp's own discovery helper does) would point codeg at a
+/// dir (which is what pi-acp's own discovery helper does) would point harness_studio at a
 /// directory nobody writes to AND would shadow the default — costing the user the
 /// history pi wrote to `<agent_dir>/sessions` before they ever set the option.
 /// Falling through keeps that history listed.
@@ -742,11 +742,7 @@ fn has_fork(entries: &[SessionRecord], by_id: &HashMap<&str, usize>) -> bool {
 /// Whether a record survives the branch filter. An entry WITHOUT an `id` is
 /// always kept: it has no place in the tree, so dropping it would be pure loss
 /// rather than branch pruning.
-fn keeps_record(
-    active: Option<&HashSet<usize>>,
-    index: usize,
-    record: &SessionRecord,
-) -> bool {
+fn keeps_record(active: Option<&HashSet<usize>>, index: usize, record: &SessionRecord) -> bool {
     match active {
         None => true,
         Some(on_path) => on_path.contains(&index) || entry_id(&record.value).is_none(),
@@ -959,7 +955,7 @@ fn parse_branch_summary(sp: &mut SessionParse, value: &Value, ts: DateTime<Utc>,
 
 /// An extension-injected message that DOES participate in the LLM context
 /// (`custom_message`). `display: false` is the extension asking for it to stay
-/// hidden in the TUI, and codeg honors that rather than second-guessing it.
+/// hidden in the TUI, and harness_studio honors that rather than second-guessing it.
 fn parse_custom_message(sp: &mut SessionParse, value: &Value, ts: DateTime<Utc>, idx: usize) {
     if !value
         .get("display")
@@ -1404,7 +1400,7 @@ fn text_message(
         duration_ms: None,
         model,
         completed_at: Some(ts),
-    agent_message_id: None,
+        agent_message_id: None,
     }
 }
 
@@ -1430,7 +1426,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else if matches!(msg.role, MessageRole::System) {
@@ -1443,7 +1439,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else {
@@ -1482,7 +1478,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms,
                 model: turn_model,
                 completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
         }
     }
@@ -1544,8 +1540,8 @@ mod tests {
     /// pi's `modelFromJson` ends `contextWindow: definition.contextWindow ??
     /// 128000`, and the entry REPLACES any built-in of the same id. So a listed
     /// model that declares nothing is not unknown — it is 128K, including for
-    /// an id codeg's own name table would answer differently. This is the shape
-    /// codeg's Pi settings panel writes (`apply_pi_custom_model` records `id` +
+    /// an id harness_studio's own name table would answer differently. This is the shape
+    /// harness_studio's Pi settings panel writes (`apply_pi_custom_model` records `id` +
     /// `name` + reasoning, never a window).
     #[test]
     fn a_listed_model_without_a_window_takes_pi_s_own_default() {
@@ -1733,10 +1729,7 @@ mod tests {
     #[test]
     fn resolve_sessions_dir_defaults_to_home_dot_pi() {
         let resolved = resolve_pi_sessions_dir_from(None, None, Some(PathBuf::from("/home/demo")));
-        assert_eq!(
-            resolved,
-            PathBuf::from("/home/demo/.pi/agent/sessions")
-        );
+        assert_eq!(resolved, PathBuf::from("/home/demo/.pi/agent/sessions"));
     }
 
     #[test]
@@ -1746,10 +1739,7 @@ mod tests {
             Some(OsString::new()),
             Some(PathBuf::from("/home/demo")),
         );
-        assert_eq!(
-            resolved,
-            PathBuf::from("/home/demo/.pi/agent/sessions")
-        );
+        assert_eq!(resolved, PathBuf::from("/home/demo/.pi/agent/sessions"));
     }
 
     #[test]
@@ -1768,8 +1758,12 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create session dir");
         let mut file = std::fs::File::create(dir.join(filename)).expect("create jsonl");
         for record in records {
-            writeln!(file, "{}", serde_json::to_string(record).expect("serialize"))
-                .expect("write line");
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(record).expect("serialize")
+            )
+            .expect("write line");
         }
     }
 
@@ -1785,14 +1779,14 @@ mod tests {
             json!({"type":"model_change","id":"mc1","parentId":"m1","timestamp":"2026-06-27T10:00:01.500Z",
                    "provider":"anthropic","modelId":"claude-sonnet-4-6"}),
             json!({"type":"message","id":"m2","parentId":"mc1","timestamp":"2026-06-27T10:00:02.000Z",
-                   "message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","stopReason":"tool_use",
-                     "usage":{"input":1200,"output":80,"cacheRead":4000,"cacheWrite":0,"totalTokens":5280,"cost":0.01},
-                     "content":[
-                       // The REAL on-disk shape: the payload key is `thinking`.
-                       {"type":"thinking","thinking":"check the build first","thinkingSignature":"sig"},
-                       {"type":"text","text":"Running the build now."},
-                       {"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"pnpm build"}}
-                     ]}}),
+            "message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-6","stopReason":"tool_use",
+              "usage":{"input":1200,"output":80,"cacheRead":4000,"cacheWrite":0,"totalTokens":5280,"cost":0.01},
+              "content":[
+                // The REAL on-disk shape: the payload key is `thinking`.
+                {"type":"thinking","thinking":"check the build first","thinkingSignature":"sig"},
+                {"type":"text","text":"Running the build now."},
+                {"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"pnpm build"}}
+              ]}}),
             json!({"type":"message","id":"m3","parentId":"m2","timestamp":"2026-06-27T10:00:09.000Z",
                    "message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash",
                      "content":[{"type":"text","text":"Compiled successfully"}],"isError":false}}),
@@ -1850,9 +1844,9 @@ mod tests {
 
         let has_user = detail.turns.iter().any(|t| {
             matches!(t.role, TurnRole::User)
-                && t.blocks
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("pnpm build")))
+                && t.blocks.iter().any(
+                    |b| matches!(b, ContentBlock::Text { text } if text.contains("pnpm build")),
+                )
         });
         assert!(has_user, "user message becomes a User turn");
 
@@ -1990,10 +1984,10 @@ mod tests {
             &[
                 json!({"type":"session","version":3,"id":id,"timestamp":"2026-06-27T10:00:00.000Z","cwd":"/Users/demo/app"}),
                 json!({"type":"message","id":"m1","timestamp":"2026-06-27T10:00:01.000Z",
-                       "message":{"role":"user","content":[
-                         {"type":"text","text":"part one "},
-                         {"type":"text","text":"part two"}
-                       ]}}),
+                "message":{"role":"user","content":[
+                  {"type":"text","text":"part one "},
+                  {"type":"text","text":"part two"}
+                ]}}),
                 json!({"type":"message","id":"m2","timestamp":"2026-06-27T10:00:02.000Z",
                        "message":{"role":"assistant","model":"claude-sonnet-4-6",
                          "content":[{"type":"text","text":"ok"}]}}),
@@ -2050,7 +2044,10 @@ mod tests {
             matches!(b, ContentBlock::ToolResult { is_error, output_preview, .. }
                 if *is_error && output_preview.as_deref() == Some("boom"))
         });
-        assert!(errored, "a non-zero exitCode marks the bash result an error");
+        assert!(
+            errored,
+            "a non-zero exitCode marks the bash result an error"
+        );
     }
 
     #[test]
@@ -2086,11 +2083,18 @@ mod tests {
         .unwrap();
 
         let parser = PiParser::with_base_dir(base.to_path_buf());
-        let summaries = parser.list_conversations().expect("list survives malformed lines");
+        let summaries = parser
+            .list_conversations()
+            .expect("list survives malformed lines");
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, id);
-        let detail = parser.get_conversation(id).expect("detail survives malformed lines");
-        assert!(detail.turns.iter().any(|t| matches!(t.role, TurnRole::User)));
+        let detail = parser
+            .get_conversation(id)
+            .expect("detail survives malformed lines");
+        assert!(detail
+            .turns
+            .iter()
+            .any(|t| matches!(t.role, TurnRole::User)));
     }
 
     #[test]
@@ -2156,10 +2160,10 @@ mod tests {
                 json!({"type":"message","id":"m1","parentId":null,"timestamp":"2026-06-27T10:00:01.000Z",
                        "message":{"role":"user","content":"go"}}),
                 json!({"type":"message","id":"m2","parentId":"m1","timestamp":"2026-06-27T10:00:02.000Z",
-                       "message":{"role":"assistant","model":"m","content":[
-                         {"type":"thinking","thinking":"weighing the options","thinkingSignature":"abc"},
-                         {"type":"text","text":"done"}
-                       ]}}),
+                "message":{"role":"assistant","model":"m","content":[
+                  {"type":"thinking","thinking":"weighing the options","thinkingSignature":"abc"},
+                  {"type":"text","text":"done"}
+                ]}}),
             ],
             id,
         );
@@ -2178,9 +2182,9 @@ mod tests {
             &[
                 header(id),
                 json!({"type":"message","id":"m1","parentId":null,"timestamp":"2026-06-27T10:00:01.000Z",
-                       "message":{"role":"assistant","model":"m","content":[
-                         {"type":"thinking","text":"legacy shape"}
-                       ]}}),
+                "message":{"role":"assistant","model":"m","content":[
+                  {"type":"thinking","text":"legacy shape"}
+                ]}}),
             ],
             id,
         );
@@ -2630,10 +2634,14 @@ mod tests {
             Some(&json!("automatic"))
         );
         assert!(
-            detail.turns.iter().flat_map(|t| &t.blocks).any(|b| matches!(
-                b,
-                ContentBlock::ToolResult { tool_use_id: Some(id), .. } if id == "c1"
-            )),
+            detail
+                .turns
+                .iter()
+                .flat_map(|t| &t.blocks)
+                .any(|b| matches!(
+                    b,
+                    ContentBlock::ToolResult { tool_use_id: Some(id), .. } if id == "c1"
+                )),
             "the pair must settle or the card reads as still running"
         );
     }
@@ -2675,7 +2683,7 @@ mod tests {
 
     /// pi-acp resolves `<agentDir>/settings.json` → `sessionDir` before falling
     /// back to `<agentDir>/sessions`, so a user who sets it kept a pi that
-    /// resumed fine and a codeg history list that was permanently empty.
+    /// resumed fine and a harness_studio history list that was permanently empty.
     #[test]
     fn settings_json_session_dir_is_honored() {
         let dir = tempdir().expect("tempdir");
@@ -2764,7 +2772,7 @@ mod tests {
     /// relative one does: `\srv\x` (and `/srv/x`) carries a root but no drive
     /// prefix, so Windows resolves it against whatever drive the pi process's cwd
     /// sits on — and that cwd is the per-session workspace pi-acp passes. Widening
-    /// the gate from `is_absolute` to `has_root` would name a directory codeg
+    /// the gate from `is_absolute` to `has_root` would name a directory harness_studio
     /// cannot know AND shadow the history in `<agent_dir>\sessions`.
     #[test]
     #[cfg(windows)]

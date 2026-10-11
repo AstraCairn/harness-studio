@@ -15,6 +15,7 @@ use crate::app_error::AppCommandError;
 use crate::db::service::{app_metadata_service, conversation_service};
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
+use crate::events::{emit_event, EventEmitter};
 use crate::models::pet::{
     ImportCodexPetsRequest, ImportCodexPetsResult, ImportablePet, NewPetInput, PetCelebrationKind,
     PetDetail, PetMetaPatch, PetParentRef, PetSessionEntry, PetSessionsPayload, PetSpriteAsset,
@@ -26,7 +27,6 @@ use crate::pets::marketplace::{
     MarketplaceInstallRequest, MarketplaceInstallResponse, MarketplaceListParams,
     MarketplaceListResponse,
 };
-use crate::web::event_bridge::{emit_event, EventEmitter};
 
 /// KV key used by `app_metadata_service` for the persisted pet UI state.
 const PET_CONFIG_KEY: &str = "pet.config";
@@ -637,8 +637,8 @@ mod tests {
         use crate::acp::manager::ConnectionManager;
         use crate::acp::types::ConnectionStatus;
         use crate::db::test_helpers;
+        use crate::events::EventEmitter;
         use crate::models::agent::AgentType;
-        use crate::web::event_bridge::EventEmitter;
 
         let db = test_helpers::fresh_in_memory_db().await;
         let folder_id = test_helpers::seed_folder(&db, "/tmp/pet-deleg").await;
@@ -746,7 +746,10 @@ mod tests {
             child_row.connection_id, "conn-child",
             "the row must answer through the CHILD connection, not the parent"
         );
-        let parent_ref = child_row.parent.as_ref().expect("sub-agent row names its parent");
+        let parent_ref = child_row
+            .parent
+            .as_ref()
+            .expect("sub-agent row names its parent");
         assert_eq!(parent_ref.conversation_id, parent_id);
         assert_eq!(parent_ref.folder_id, folder_id);
         assert_eq!(parent_ref.agent_type, AgentType::ClaudeCode);

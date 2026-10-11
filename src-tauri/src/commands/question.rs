@@ -3,7 +3,7 @@
 //!
 //! One knob survives across restarts:
 //!   * `question.enabled` — feature kill switch (**default true**). When on,
-//!     `codeg-mcp` exposes the `ask_user_question` tool so an agent can block on
+//!     `harness-studio-mcp` exposes the `ask_user_question` tool so an agent can block on
 //!     a multiple-choice question rendered above the conversation input box.
 //!
 //! Default-ON deliberately diverges from live-feedback / delegation (both
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::acp::question::{QuestionConfig, QuestionRuntimeConfig};
 use crate::app_error::AppCommandError;
 use crate::db::service::app_metadata_service;
-use crate::web::event_bridge::{emit_event, EventEmitter, QUESTION_SETTINGS_CHANGED_EVENT};
+use crate::events::{emit_event, EventEmitter, QUESTION_SETTINGS_CHANGED_EVENT};
 
 pub const KEY_QUESTION_ENABLED: &str = "question.enabled";
 

@@ -1,8 +1,8 @@
-//! History parser for agents that have **no codeg-side store parser**: custom
+//! History parser for agents that have **no harness-studio-side store parser**: custom
 //! ACP agents.
 //!
 //! Every other parser in this module reverse-engineers one agent's private
-//! session store. This one reads codeg's own ACP transcript
+//! session store. This one reads harness_studio's own ACP transcript
 //! ([`crate::acp_transcript`]) — the raw `session/prompt` payloads and
 //! `session/update` notifications the connection layer witnessed — and projects
 //! them into [`MessageTurn`]s using nothing but ACP semantics.
@@ -23,7 +23,7 @@
 //! ## Turn boundaries
 //!
 //! ACP has no "turn ended" notification — the stop reason is the *response* to
-//! `session/prompt`. codeg records it as an explicit
+//! `session/prompt`. harness_studio records it as an explicit
 //! [`EntryKind::TurnEnd`](crate::acp_transcript::EntryKind::TurnEnd) line, so
 //! live-recorded transcripts have exact boundaries. Transcripts hydrated from a
 //! `session/load` replay have no such line (the agent replays only
@@ -33,8 +33,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, TimeZone, Utc};
 use agent_client_protocol::schema::v1::{SessionUpdate, ToolCallContent};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::Deserialize as _;
 
 use crate::acp::connection::{
@@ -57,7 +57,7 @@ impl AcpNativeParser {
     pub fn new(agent_type: AgentType) -> Self {
         Self {
             agent_type,
-            root: crate::paths::codeg_acp_transcripts_root(),
+            root: crate::paths::harness_studio_acp_transcripts_root(),
         }
     }
 
@@ -103,19 +103,18 @@ impl AgentParser for AcpNativeParser {
     fn get_conversation(&self, conversation_id: &str) -> Result<ConversationDetail, ParseError> {
         let dir = self.agent_dir();
         // Reads the whole continuation chain: when the agent had forgotten the
-        // session and codeg started a fresh one, the earlier turns still live
+        // session and harness_studio started a fresh one, the earlier turns still live
         // under the previous session id.
         let transcript = acp_transcript::read_chain_in(&self.root, dir, conversation_id);
         if transcript.header.is_none() && transcript.is_empty() {
-            return Err(ParseError::ConversationNotFound(conversation_id.to_string()));
+            return Err(ParseError::ConversationNotFound(
+                conversation_id.to_string(),
+            ));
         }
         let turns = project_turns(&transcript.entries);
         let (used, size) = latest_context_window(&transcript.entries);
-        let session_stats = crate::parsers::merge_context_window_stats(
-            session_stats(&turns),
-            used,
-            size,
-        );
+        let session_stats =
+            crate::parsers::merge_context_window_stats(session_stats(&turns), used, size);
         Ok(ConversationDetail {
             summary: self.summarize(conversation_id, &transcript),
             turns,
@@ -157,7 +156,7 @@ impl AcpNativeParser {
             folder_path,
             folder_name,
             // The first prompt's text is the only title an ACP transcript can
-            // honestly yield — ACP has no title channel, and codeg's DB-side
+            // honestly yield — ACP has no title channel, and harness_studio's DB-side
             // auto-title backfill takes it from here.
             title: first_prompt_title(&transcript.entries),
             started_at,
@@ -173,7 +172,9 @@ impl AcpNativeParser {
 }
 
 fn epoch_ms_to_utc(ms: u64) -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(ms as i64).single().unwrap_or_else(Utc::now)
+    Utc.timestamp_millis_opt(ms as i64)
+        .single()
+        .unwrap_or_else(Utc::now)
 }
 
 fn first_prompt_title(entries: &[TranscriptEntry]) -> Option<String> {
@@ -221,8 +222,12 @@ fn prompt_blocks(payload: &serde_json::Value) -> Vec<ContentBlock> {
 /// chunk arrives already deserialized, so it is converted straight across
 /// rather than being serialized back to JSON only to be re-read. Consumes the
 /// block, so an embedded image's base64 moves instead of being copied twice.
-fn prompt_block_from_content(content: agent_client_protocol::schema::v1::ContentBlock) -> Option<PromptInputBlock> {
-    use agent_client_protocol::schema::v1::{ContentBlock as Wire, EmbeddedResourceResource as Res};
+fn prompt_block_from_content(
+    content: agent_client_protocol::schema::v1::ContentBlock,
+) -> Option<PromptInputBlock> {
+    use agent_client_protocol::schema::v1::{
+        ContentBlock as Wire, EmbeddedResourceResource as Res,
+    };
     let non_empty = |s: String| (!s.is_empty()).then_some(s);
     match content {
         Wire::Text(t) => Some(PromptInputBlock::Text {
@@ -250,7 +255,9 @@ fn prompt_block_from_content(content: agent_client_protocol::schema::v1::Content
                 // no bytes this can render.
                 _ => return None,
             };
-            let is_image = mime_type.as_deref().is_some_and(|m| m.starts_with("image/"));
+            let is_image = mime_type
+                .as_deref()
+                .is_some_and(|m| m.starts_with("image/"));
             if uri.is_empty() && !(is_image && blob.is_some()) {
                 return None;
             }
@@ -389,7 +396,7 @@ pub fn project_turns(entries: &[TranscriptEntry]) -> Vec<MessageTurn> {
     // second user turn.
     let mut prompt_just_recorded = false;
     // Timestamp of the prompt that opened the current turn. An assistant turn's
-    // span starts when codeg SENT the prompt, not when the first token arrived —
+    // span starts when harness_studio SENT the prompt, not when the first token arrived —
     // time-to-first-token is part of how long the agent took, and this matches
     // what `turn_timings` records for built-ins.
     let mut turn_start_hint: Option<u64> = None;
@@ -416,7 +423,7 @@ pub fn project_turns(entries: &[TranscriptEntry]) -> Vec<MessageTurn> {
                     duration_ms: None,
                     model: None,
                     completed_at: None,
-                agent_message_id: None,
+                    agent_message_id: None,
                 });
                 seq += 1;
                 prompt_just_recorded = true;
@@ -481,7 +488,7 @@ fn flush(pending: &mut Option<PendingTurn>, turns: &mut Vec<MessageTurn>, seq: &
             .or_else(|| p.last_at_ms.checked_sub(p.started_at_ms)),
         model: p.model,
         completed_at: Some(epoch_ms_to_utc(p.last_at_ms)),
-    agent_message_id: None,
+        agent_message_id: None,
     });
     *seq += 1;
 }
@@ -547,7 +554,7 @@ fn apply_update(
     }
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
-            // Live path: codeg already recorded the outgoing prompt, so the
+            // Live path: harness_studio already recorded the outgoing prompt, so the
             // agent's echo is a duplicate. Replay path: there is no recorded
             // prompt, so this IS the user turn and it also ends the previous
             // assistant turn.
@@ -681,7 +688,9 @@ fn content_block_text(block: &agent_client_protocol::schema::v1::ContentBlock) -
         agent_client_protocol::schema::v1::ContentBlock::Text(t) => t.text.clone(),
         agent_client_protocol::schema::v1::ContentBlock::ResourceLink(link) => link.uri.clone(),
         agent_client_protocol::schema::v1::ContentBlock::Resource(res) => match &res.resource {
-            agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(t) => t.text.clone(),
+            agent_client_protocol::schema::v1::EmbeddedResourceResource::TextResourceContents(
+                t,
+            ) => t.text.clone(),
             _ => String::new(),
         },
         _ => String::new(),
@@ -704,8 +713,7 @@ fn upsert_tool_call(
     meta: Option<serde_json::Value>,
 ) {
     pending.has_content = true;
-    let own_input =
-        json_value_to_text(&raw_input.cloned()).filter(|t| !t.trim().is_empty());
+    let own_input = json_value_to_text(&raw_input.cloned()).filter(|t| !t.trim().is_empty());
     let synthesized_edit = if own_input.is_none() {
         synthesize_edit_input_from_diffs(content)
     } else {
@@ -741,7 +749,9 @@ fn upsert_tool_call(
             }
         }
         None => {
-            pending.tool_use_index.insert(id.to_string(), pending.blocks.len());
+            pending
+                .tool_use_index
+                .insert(id.to_string(), pending.blocks.len());
             pending.blocks.push(ContentBlock::ToolUse {
                 tool_use_id: Some(id.to_string()),
                 // ACP has no tool *name* channel — `title` is what the agent
@@ -987,7 +997,7 @@ mod tests {
     /// older builds) while a `session/load` chunk arrives already typed. Two
     /// readers, one meaning: the same content has to produce the same block
     /// whichever door it comes through, or history would contradict itself
-    /// depending on whether codeg recorded the turn or the agent replayed it.
+    /// depending on whether harness_studio recorded the turn or the agent replayed it.
     #[test]
     fn the_typed_and_raw_readers_agree_on_the_same_content() {
         for item in attachment_prompt().as_array().expect("an array") {
@@ -1123,7 +1133,7 @@ mod tests {
     /// this parser re-derives the same mapping from the recorded wire bytes.
     /// They are two implementations of one contract — a viewer watching live and
     /// a reader after a refresh must see the same message — so pin them
-    /// together over the block shapes codeg's composer actually sends.
+    /// together over the block shapes harness_studio's composer actually sends.
     #[test]
     fn history_projection_matches_the_live_user_message_projection() {
         use crate::acp::types::{user_blocks_from_prompt, PromptInputBlock, UserMessageBlock};
@@ -1328,7 +1338,7 @@ mod tests {
         }
     }
 
-    /// A `delegate_to_agent` call from the codeg-mcp companion must replay
+    /// A `delegate_to_agent` call from the harness-studio-mcp companion must replay
     /// under its wire name. The frontend's tool-kind classifier
     /// (`isAgentLikeToolName`) recognizes `delegate_to_agent` across host
     /// naming conventions and renders the delegation card from it — the same
@@ -1343,7 +1353,7 @@ mod tests {
                 serde_json::json!({
                     "sessionUpdate": "tool_call",
                     "toolCallId": "call-9",
-                    "title": "mcp__codeg-mcp__delegate_to_agent",
+                    "title": "mcp__harness-studio-mcp__delegate_to_agent",
                     "kind": "other",
                     "status": "pending",
                     "rawInput": { "agent_type": "custom:goose", "task": "review the diff" }
@@ -1369,7 +1379,7 @@ mod tests {
                 input_preview,
                 ..
             } => {
-                assert_eq!(tool_name, "mcp__codeg-mcp__delegate_to_agent");
+                assert_eq!(tool_name, "mcp__harness-studio-mcp__delegate_to_agent");
                 let input = input_preview.as_deref().unwrap();
                 assert!(input.contains("custom:goose"));
                 assert!(input.contains("review the diff"));
@@ -1481,7 +1491,11 @@ mod tests {
             .iter()
             .filter(|b| matches!(b, ContentBlock::ToolUse { tool_name, .. } if tool_name == "TodoWrite"))
             .collect();
-        assert_eq!(plan_blocks.len(), 1, "the plan card is replaced, not repeated");
+        assert_eq!(
+            plan_blocks.len(),
+            1,
+            "the plan card is replaced, not repeated"
+        );
         match plan_blocks[0] {
             ContentBlock::ToolUse { input_preview, .. } => {
                 let v: serde_json::Value =
@@ -1593,8 +1607,8 @@ mod tests {
             let parsed: SessionUpdate = serde_json::from_value(payload.clone())
                 .unwrap_or_else(|e| panic!("sample is not a valid SessionUpdate: {payload} ({e})"));
             let entry = [update(1, payload.clone())];
-            let read = !project_turns(&entry).is_empty()
-                || latest_context_window(&entry) != (None, None);
+            let read =
+                !project_turns(&entry).is_empty() || latest_context_window(&entry) != (None, None);
             assert_eq!(
                 is_recorded_update(&parsed),
                 read,
@@ -1607,9 +1621,15 @@ mod tests {
     fn the_last_usage_update_becomes_the_context_window_footer() {
         let entries = vec![
             prompt(1, "hi"),
-            update(2, serde_json::json!({"sessionUpdate":"usage_update","used":100,"size":1000})),
+            update(
+                2,
+                serde_json::json!({"sessionUpdate":"usage_update","used":100,"size":1000}),
+            ),
             update(3, text_chunk("agent_message_chunk", "ok")),
-            update(4, serde_json::json!({"sessionUpdate":"usage_update","used":250,"size":1000})),
+            update(
+                4,
+                serde_json::json!({"sessionUpdate":"usage_update","used":250,"size":1000}),
+            ),
         ];
         assert_eq!(latest_context_window(&entries), (Some(250), Some(1000)));
         // Occupancy is NOT a turn's token usage: recording it must not put
@@ -1617,7 +1637,10 @@ mod tests {
         assert!(project_turns(&entries).iter().all(|t| t.usage.is_none()));
 
         // A window of zero is an agent reporting nothing, not a reading.
-        let zero = [update(5, serde_json::json!({"sessionUpdate":"usage_update","used":9,"size":0}))];
+        let zero = [update(
+            5,
+            serde_json::json!({"sessionUpdate":"usage_update","used":9,"size":0}),
+        )];
         assert_eq!(latest_context_window(&zero), (None, None));
         assert_eq!(latest_context_window(&[prompt(1, "hi")]), (None, None));
     }
@@ -1639,7 +1662,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "codeg-acp-native-test-{}-{:?}",
+            "harness-studio-acp-native-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -1745,7 +1768,7 @@ mod tests {
     #[test]
     fn a_session_restarted_after_the_agent_forgot_it_reads_as_one_conversation() {
         // The agent kept its sessions in memory, so reopening the conversation
-        // failed `session/load` and codeg opened `sess-new` for the same
+        // failed `session/load` and harness_studio opened `sess-new` for the same
         // conversation, linked back to `sess-old`. Both halves must render as
         // one history, listed once.
         let root = temp_root();

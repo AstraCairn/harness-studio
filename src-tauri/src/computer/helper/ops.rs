@@ -5,7 +5,7 @@
 //! (`list_apps`, `list_windows`, `get_window_state`, `verify_state`) and
 //! there are the only ones the helper ever calls, with arguments built from
 //! typed fields — never a tool name or an argument object that came from
-//! codeg as-is. (What the driver's listing leaves unsaid — which windows are
+//! harness_studio as-is. (What the driver's listing leaves unsaid — which windows are
 //! minimized, and on macOS which applications hidden — the helper asks the
 //! system itself: see `mark_out_of_sight`.)
 
@@ -170,7 +170,7 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// A name two applications go by names neither: the answer lists their
 /// keys.
 ///
-/// What it is, for codeg to judge by, is kept apart from the command that
+/// What it is, for harness_studio to judge by, is kept apart from the command that
 /// starts it ([`InstalledApp`]): its bundle identifier where it has one that
 /// is not a path, and its executable — the path the driver gives, or else the
 /// first word of its launch command.
@@ -383,25 +383,25 @@ fn required_array<'a>(tool: &str, value: &'a Value, key: &str) -> Result<&'a [Va
 #[cfg(any(test, not(any(target_os = "macos", windows))))]
 fn parse_apps(value: &Value) -> Result<Vec<RawApp>, HelperError> {
     required_array("list_apps", value, "apps").map(|apps| {
-            apps.iter()
-                // The driver also lists installed applications that are not
-                // running (pid 0); only running ones have windows.
-                .filter(|a| a.get("running").and_then(Value::as_bool) == Some(true))
-                .filter_map(|a| {
-                    let pid = u32::try_from(a.get("pid")?.as_u64()?)
-                        .ok()
-                        .filter(|p| *p > 0)?;
-                    Some(RawApp {
-                        pid,
-                        name: string(a, "name").unwrap_or_default(),
-                        bundle_id: string(a, "bundle_id"),
-                        path: string(a, "launch_path"),
-                        active: a.get("active").and_then(Value::as_bool).unwrap_or(false),
-                        started_at: process_start(pid),
-                    })
+        apps.iter()
+            // The driver also lists installed applications that are not
+            // running (pid 0); only running ones have windows.
+            .filter(|a| a.get("running").and_then(Value::as_bool) == Some(true))
+            .filter_map(|a| {
+                let pid = u32::try_from(a.get("pid")?.as_u64()?)
+                    .ok()
+                    .filter(|p| *p > 0)?;
+                Some(RawApp {
+                    pid,
+                    name: string(a, "name").unwrap_or_default(),
+                    bundle_id: string(a, "bundle_id"),
+                    path: string(a, "launch_path"),
+                    active: a.get("active").and_then(Value::as_bool).unwrap_or(false),
+                    started_at: process_start(pid),
                 })
-                .collect()
-        })
+            })
+            .collect()
+    })
 }
 
 /// Remembers which application each running process is, so listing windows
@@ -629,7 +629,7 @@ pub(super) fn join_identified(windows: Vec<RawWindow>, stamps: Vec<Option<u64>>)
 
 /// The windows in a `list_windows` answer that could be someone's window at
 /// all: the normal layer, with an area. Visible or not — whether a window is
-/// worth *showing* is codeg's call, made after it has matched the listing
+/// worth *showing* is harness_studio's call, made after it has matched the listing
 /// against the windows it has already named. A shared window whose
 /// application is hidden (⌘H) is off screen and still the same window, and a
 /// listing that dropped it would read as the window closing and end the
@@ -637,44 +637,44 @@ pub(super) fn join_identified(windows: Vec<RawWindow>, stamps: Vec<Option<u64>>)
 pub(super) fn parse_windows(value: &Value) -> Result<Vec<RawWindow>, HelperError> {
     let flag = |w: &Value, key: &str| w.get(key).and_then(Value::as_bool);
     required_array("list_windows", value, "windows").map(|windows| {
-            windows
-                .iter()
-                .filter(|w| w.get("layer").and_then(Value::as_i64).unwrap_or(0) == 0)
-                .filter_map(|w| {
-                    let bounds = rect(w.get("bounds")?)?;
-                    if bounds.is_empty() {
-                        return None;
-                    }
-                    let pid = u32::try_from(w.get("pid")?.as_u64()?).ok()?;
-                    Some(RawWindow {
-                        window_id: w.get("window_id")?.as_u64()?,
+        windows
+            .iter()
+            .filter(|w| w.get("layer").and_then(Value::as_i64).unwrap_or(0) == 0)
+            .filter_map(|w| {
+                let bounds = rect(w.get("bounds")?)?;
+                if bounds.is_empty() {
+                    return None;
+                }
+                let pid = u32::try_from(w.get("pid")?.as_u64()?).ok()?;
+                Some(RawWindow {
+                    window_id: w.get("window_id")?.as_u64()?,
+                    pid,
+                    title: string(w, "title").unwrap_or_default(),
+                    bounds,
+                    on_screen: flag(w, "is_on_screen").unwrap_or(false),
+                    minimized: flag(w, "minimized"),
+                    hidden: None,
+                    on_current_space: flag(w, "on_current_space"),
+                    z_index: w.get("z_index").and_then(Value::as_i64),
+                    content: None,
+                    app: RawApp {
                         pid,
-                        title: string(w, "title").unwrap_or_default(),
-                        bounds,
-                        on_screen: flag(w, "is_on_screen").unwrap_or(false),
-                        minimized: flag(w, "minimized"),
-                        hidden: None,
-                        on_current_space: flag(w, "on_current_space"),
-                        z_index: w.get("z_index").and_then(Value::as_i64),
-                        content: None,
-                        app: RawApp {
-                            pid,
-                            name: string(w, "app_name").unwrap_or_default(),
-                            bundle_id: None,
-                            path: None,
-                            active: false,
-                            started_at: None,
-                        },
-                    })
+                        name: string(w, "app_name").unwrap_or_default(),
+                        bundle_id: None,
+                        path: None,
+                        active: false,
+                        started_at: None,
+                    },
                 })
-                .collect()
-        })
+            })
+            .collect()
+    })
 }
 
 /// macOS: mark which of `windows` are minimized, and which belong to a
 /// hidden (⌘H) application — neither of which the driver's listing says.
 /// There such a window is only off screen, as are the hidden windows
-/// applications keep — so codeg, which lists the one and not the other, would
+/// applications keep — so harness_studio, which lists the one and not the other, would
 /// list neither. Accessibility tells them apart (see `super::axwin`), and is
 /// asked about those applications alone ([`owners_to_ask`]). Only called while
 /// the helper may ask it.

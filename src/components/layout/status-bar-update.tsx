@@ -11,7 +11,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
-import { openUrl } from "@/lib/platform"
 import { describeAppUpdateError } from "@/lib/updater"
 import { cn } from "@/lib/utils"
 
@@ -24,8 +23,6 @@ const ReleaseNotes = dynamic(
   },
   { ssr: false }
 )
-
-const RELEASES_URL = "https://github.com/spacering-net/codeg/releases/latest"
 
 function Spinner({ className }: { className?: string }) {
   return (
@@ -130,8 +127,6 @@ export function StatusBarUpdate() {
     currentVersion,
     dismissedVersion,
     canInstallInPlace,
-    runtime,
-    selfUpdateSupported,
     selfUpdateBlocker,
     dismissAvailable,
     startUpdate,
@@ -347,16 +342,6 @@ export function StatusBarUpdate() {
           <p className="text-2xs leading-5 text-amber-500">{blockerHint}</p>
         )}
 
-        {/* Docker upgrades only live as long as the container does. */}
-        {available &&
-          selfUpdateSupported &&
-          !selfUpdateBlocker &&
-          runtime === "docker" && (
-            <p className="text-2xs leading-5 text-muted-foreground/80">
-              {t("dockerUpgradeHint")}
-            </p>
-          )}
-
         <div className="flex items-center justify-end gap-2">
           {showAvailable && (
             <Button size="sm" variant="ghost" onClick={handleLater}>
@@ -393,10 +378,9 @@ export function StatusBarUpdate() {
                 {t("upgradeTo", { version: available!.version })}
               </Button>
             ) : (
-              <Button size="sm" onClick={() => void openUrl(RELEASES_URL)}>
-                <ArrowUpCircle className="h-3.5 w-3.5" />
-                {t("viewRelease", { version: available!.version })}
-              </Button>
+              <span className="text-xs text-muted-foreground">
+                v{available!.version}
+              </span>
             )
           ) : null}
         </div>

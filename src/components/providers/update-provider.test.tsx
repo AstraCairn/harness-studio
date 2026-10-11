@@ -243,8 +243,8 @@ describe("UpdateProvider", () => {
 
 // ─── Availability ──────────────────────────────────────────────────────────
 
-const LAST_CHECK_KEY = "codeg.updateCheck.last"
-const DISMISSED_KEY = "codeg.updateCheck.dismissedVersion"
+const LAST_CHECK_KEY = "harness_studio.updateCheck.last"
+const DISMISSED_KEY = "harness_studio.updateCheck.dismissedVersion"
 
 let ctx: ReturnType<typeof useAppUpdate> = null
 let availableIdentities = 0

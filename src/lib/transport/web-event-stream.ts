@@ -72,7 +72,7 @@ interface ActiveSub {
   handlers: AttachHandlers
 }
 
-export class WebEventStream implements EventStream {
+export class AppEventStream implements EventStream {
   private subs = new Map<string, ActiveSub>()
   private unbindWsReady: (() => void) | null
 
@@ -208,6 +208,6 @@ function safeInvoke(name: string, fn: () => void): void {
   try {
     fn()
   } catch (err) {
-    console.error(`[WebEventStream] ${name} handler threw:`, err)
+    console.error(`[AppEventStream] ${name} handler threw:`, err)
   }
 }

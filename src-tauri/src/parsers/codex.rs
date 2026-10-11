@@ -14,9 +14,8 @@ use crate::acp::agent_mentions::{
 use crate::models::*;
 use crate::parsers::codex_code_mode::{
     extract_chunk_ids, extract_shell_session_ids, is_code_mode_call, parse_code_mode_script,
-    script_card_input,
-    split_code_mode_output, with_note, CodeModeCall, CodeModeOutput, CodeModeScript, ScriptStatus,
-    Separator, CODEX_SCRIPT_TOOL_NAME,
+    script_card_input, split_code_mode_output, with_note, CodeModeCall, CodeModeOutput,
+    CodeModeScript, ScriptStatus, Separator, CODEX_SCRIPT_TOOL_NAME,
 };
 use crate::parsers::{
     codex_desktop_attachments, folder_name_from_path, title_from_user_text, truncate_str,
@@ -244,7 +243,7 @@ impl CodexParser {
     ///
     /// Pointers chain — a fork of a fork, and every revert adds a rollout — so
     /// they are followed to the root. A chain ends early at a rollout it has
-    /// already visited (a malformed cycle) or one codeg cannot find, which is
+    /// already visited (a malformed cycle) or one harness_studio cannot find, which is
     /// not an error: the rollout may have been pruned, or live in a codex home
     /// this parser isn't pointed at. What was reached renders on its own rather
     /// than the conversation being refused. One that is there but fails to
@@ -356,7 +355,7 @@ impl CodexParser {
     /// under the same thread id and leaves the old file in place, so the id
     /// matches several files and traversal order would decide — on NTFS, whose
     /// listings are name-sorted, always in favour of the stale original. codex
-    /// records the switch in its SQLite state; codeg reads only the rollouts, so
+    /// records the switch in its SQLite state; harness_studio reads only the rollouts, so
     /// this is codex's own rule for when that state is unavailable: the newest
     /// file.
     fn find_current_rollout(&self, thread_id: &str) -> Option<PathBuf> {
@@ -408,10 +407,7 @@ impl CodexParser {
         titles
     }
 
-    fn parse_jsonl_summary(
-        &self,
-        path: &Path,
-    ) -> Result<Option<ConversationSummary>, ParseError> {
+    fn parse_jsonl_summary(&self, path: &Path) -> Result<Option<ConversationSummary>, ParseError> {
         let lines = self.rollout_lines(path)?;
 
         let mut conversation_id: Option<String> = None;
@@ -745,9 +741,7 @@ impl CodexParser {
                                         pending_promotions.push((
                                             is_user,
                                             is_user
-                                                .then(|| {
-                                                    extract_codex_title_candidate(&text, true)
-                                                })
+                                                .then(|| extract_codex_title_candidate(&text, true))
                                                 .flatten(),
                                         ));
                                     }
@@ -1710,13 +1704,12 @@ fn completed_mcp_call(payload: &serde_json::Value) -> Option<CompletedMcpCall> {
     let stated_is_error = result
         .and_then(|result| result.get("isError"))
         .and_then(serde_json::Value::as_bool);
-    let claimed_failed =
-        stated_is_error == Some(true)
-            || stated_error.is_some()
-            || item
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(is_failed_status);
+    let claimed_failed = stated_is_error == Some(true)
+        || stated_error.is_some()
+        || item
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_failed_status);
     let claimed_ok = stated_is_error == Some(false)
         || item.get("status").and_then(serde_json::Value::as_str) == Some("completed");
     Some(CompletedMcpCall {
@@ -1832,7 +1825,7 @@ fn codex_script_meta(
     if truncated {
         marks.insert("truncated".to_string(), true.into());
     }
-    (!marks.is_empty()).then(|| serde_json::json!({ "codeg.codexScript": marks }))
+    (!marks.is_empty()).then(|| serde_json::json!({ "harness_studio.codexScript": marks }))
 }
 
 /// How to name a call when telling the reader whose output shares a card.
@@ -2360,7 +2353,7 @@ fn infer_tool_call_output_is_error(
 /// Synthetic rawInput key the live input shaper uses to carry the collab op
 /// through to the card (see frontend `collab-tool.ts` `COLLAB_OP_KEY`). Kept in
 /// sync here so history `wait_agent` capsules render with an op-aware title.
-const COLLAB_OP_KEY: &str = "__codegCollabOp";
+const COLLAB_OP_KEY: &str = "__harnessStudioCollabOp";
 
 /// Whether a collab status string is an error (mirrors the frontend
 /// `isErrorCollabStatusKind`: only `errored` / `failed` / `notFound`).
@@ -2412,7 +2405,7 @@ const CODEX_ENCRYPTED_PLACEHOLDER: &str = "[encrypted]";
 /// Public because the LIVE path writes the same key
 /// (`acp/connection.rs::classify_codex_subagent_activity`) — streaming and
 /// reload must not disagree about what the card means.
-pub const CODEX_SUBAGENT_LAUNCH_KEY: &str = "__codegCodexSubagentLaunch";
+pub const CODEX_SUBAGENT_LAUNCH_KEY: &str = "__harnessStudioCodexSubagentLaunch";
 
 /// Whether a `spawn_agent`'s arguments are codex 0.147's native team-of-agents
 /// shape: `task_name` and no `agent_type` (which that release removed).
@@ -2427,7 +2420,7 @@ fn is_native_team_spawn(args: Option<&serde_json::Value>) -> bool {
 /// Written by both the rollout parser and the live path
 /// (`acp/connection.rs`), so a reload cannot disagree with the stream about
 /// whether the child finished.
-pub const CODEX_SUBAGENT_STATE_KEY: &str = "__codegCodexSubagentState";
+pub const CODEX_SUBAGENT_STATE_KEY: &str = "__harnessStudioCodexSubagentState";
 
 /// One `SubAgentActivity` record, normalized across the two on-disk shapes.
 ///
@@ -3150,7 +3143,7 @@ impl CodexParser {
         //     its result is only a fallback for agents never waited on.
         // codex-acp 1.0.1 (#223) maps `collabAgentToolCall` onto live ACP
         // `tool_call`s; 1.1.3+ (#304) additionally emits `subAgentActivity` as a
-        // SEPARATE live `tool_call` (`_meta.codex.subagent`), but codeg
+        // SEPARATE live `tool_call` (`_meta.codex.subagent`), but harness_studio
         // suppresses it (redundant with the collab capsule — see
         // `is_codex_subagent_activity`) and it carries no transcript content, so
         // the nested `agent-<id>.jsonl` stats still only exist on history reload.
@@ -3543,7 +3536,7 @@ impl CodexParser {
                                     duration_ms: None,
                                     model: None,
                                     completed_at: Some(timestamp),
-                                agent_message_id: None,
+                                    agent_message_id: None,
                                 });
                             }
                             "agent_message" => {
@@ -3581,7 +3574,7 @@ impl CodexParser {
                                     duration_ms: None,
                                     model: None,
                                     completed_at: Some(timestamp),
-                                agent_message_id: None,
+                                    agent_message_id: None,
                                 });
                             }
                             "thread_goal_updated" => {
@@ -3661,7 +3654,7 @@ impl CodexParser {
                                         duration_ms: None,
                                         model: None,
                                         completed_at: Some(timestamp),
-                                    agent_message_id: None,
+                                        agent_message_id: None,
                                     });
                                 }
                             }
@@ -3727,10 +3720,7 @@ impl CodexParser {
                                     } else {
                                         continue;
                                     };
-                                    completed_mcp_by_exec
-                                        .entry(exec_id)
-                                        .or_default()
-                                        .push(call);
+                                    completed_mcp_by_exec.entry(exec_id).or_default().push(call);
                                     continue;
                                 }
                                 // Plan mode's finished plan document. This is the
@@ -3780,10 +3770,8 @@ impl CodexParser {
                                 // ONE 思考 card (live parity) instead of one card per
                                 // section, and if no grouped summary arrives
                                 // (interrupted/older rollouts) nothing is lost.
-                                let text = payload
-                                    .get("text")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
+                                let text =
+                                    payload.get("text").and_then(|t| t.as_str()).unwrap_or("");
                                 if !text.trim().is_empty() {
                                     pending_reasoning.push(text.to_string());
                                     pending_reasoning_ts = Some(timestamp);
@@ -3836,7 +3824,7 @@ impl CodexParser {
                                     duration_ms: None,
                                     model: None,
                                     completed_at: Some(timestamp),
-                                agent_message_id: None,
+                                    agent_message_id: None,
                                 });
                                 if !call_id.is_empty() {
                                     emitted_image_ids.insert(call_id);
@@ -4038,8 +4026,7 @@ impl CodexParser {
                                     codex_inter_agent_final_answer(payload)
                                 {
                                     if let Some(thread_id) = agent_path_to_thread_id.get(author) {
-                                        agent_fallback_results
-                                            .insert(thread_id.clone(), body);
+                                        agent_fallback_results.insert(thread_id.clone(), body);
                                     }
                                 }
                             }
@@ -4068,9 +4055,7 @@ impl CodexParser {
                                     .map(|parts| {
                                         parts
                                             .iter()
-                                            .filter_map(|p| {
-                                                p.get("text").and_then(|t| t.as_str())
-                                            })
+                                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                                             .filter(|t| !t.trim().is_empty())
                                             .collect::<Vec<_>>()
                                             .join("\n\n")
@@ -4190,7 +4175,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                     }
                                     "wait_agent" => {
@@ -4258,7 +4243,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                     }
                                     _ => {
@@ -4332,7 +4317,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                     }
                                 }
@@ -4384,9 +4369,7 @@ impl CodexParser {
                                         note: collected.note,
                                     };
                                     let semantic = (parsed.status == ScriptStatus::Completed)
-                                        .then(|| {
-                                            completed_mcp_by_exec.remove(&deferred.call_id)
-                                        })
+                                        .then(|| completed_mcp_by_exec.remove(&deferred.call_id))
                                         .flatten();
                                     let (uses, results) = semantic
                                         .and_then(|calls| {
@@ -4467,7 +4450,7 @@ impl CodexParser {
                                         duration_ms: None,
                                         model: None,
                                         completed_at: Some(timestamp),
-                                    agent_message_id: None,
+                                        agent_message_id: None,
                                     });
                                 } else if is_spawn {
                                     if let Some(output_obj) = parse_codex_json_output(payload) {
@@ -4494,7 +4477,7 @@ impl CodexParser {
                                         duration_ms: None,
                                         model: None,
                                         completed_at: Some(timestamp),
-                                    agent_message_id: None,
+                                        agent_message_id: None,
                                     });
                                 } else if is_wait || is_list {
                                     // Emit one `collab_agent` capsule per wait or
@@ -4509,12 +4492,14 @@ impl CodexParser {
                                     // spawn capsule's own result on the strength
                                     // of a `list_agents` the model happened to
                                     // call would lose the report entirely.
-                                    let capsule = parse_codex_json_output(payload).and_then(
-                                        |output_obj| {
+                                    let capsule =
+                                        parse_codex_json_output(payload).and_then(|output_obj| {
                                             if is_list {
                                                 return build_collab_list_input(&output_obj);
                                             }
-                                            match output_obj.get("status").and_then(|s| s.as_object())
+                                            match output_obj
+                                                .get("status")
+                                                .and_then(|s| s.as_object())
                                             {
                                                 Some(status) => {
                                                     // Mark returned agents so the spawn
@@ -4535,8 +4520,7 @@ impl CodexParser {
                                                 }
                                                 None => native_team_wait_input(&output_obj),
                                             }
-                                        },
-                                    );
+                                        });
                                     if let Some((collab_input, is_error)) = capsule {
                                         messages.push(UnifiedMessage {
                                             id: format!("tool-{}", messages.len()),
@@ -4553,7 +4537,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                         messages.push(UnifiedMessage {
                                             id: format!("tool-result-{}", messages.len()),
@@ -4570,7 +4554,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                     }
                                 } else if is_close {
@@ -4584,11 +4568,8 @@ impl CodexParser {
                                             // just `completed`): an errored/notFound
                                             // close with no wait must not lose its
                                             // message or its error state.
-                                            if let Some(prev) =
-                                                output_obj.get("previous_status")
-                                            {
-                                                let (st, msg) =
-                                                    extract_wait_agent_status(prev);
+                                            if let Some(prev) = output_obj.get("previous_status") {
+                                                let (st, msg) = extract_wait_agent_status(prev);
                                                 if let Some(text) = msg {
                                                     agent_fallback_results
                                                         .entry(agent_id.clone())
@@ -4639,21 +4620,21 @@ impl CodexParser {
                                             &mut shell_sessions,
                                         );
                                     }
-                                    let (raw_output, envelope_error) =
-                                        if envelope.status != ScriptStatus::Unknown
-                                            || output_value.is_some_and(|v| v.is_array())
-                                        {
-                                            (
-                                                with_note(
-                                                    Some(envelope.joined()),
-                                                    envelope.note.as_deref(),
-                                                )
-                                                .filter(|s| !s.is_empty()),
-                                                envelope.is_error(),
+                                    let (raw_output, envelope_error) = if envelope.status
+                                        != ScriptStatus::Unknown
+                                        || output_value.is_some_and(|v| v.is_array())
+                                    {
+                                        (
+                                            with_note(
+                                                Some(envelope.joined()),
+                                                envelope.note.as_deref(),
                                             )
-                                        } else {
-                                            (value_to_preview(output_value), false)
-                                        };
+                                            .filter(|s| !s.is_empty()),
+                                            envelope.is_error(),
+                                        )
+                                    } else {
+                                        (value_to_preview(output_value), false)
+                                    };
                                     // A poll about to be folded into the card of
                                     // the command it is collecting for: its
                                     // envelope has to go, and an envelope that
@@ -4692,7 +4673,7 @@ impl CodexParser {
                                         duration_ms: None,
                                         model: None,
                                         completed_at: Some(timestamp),
-                                    agent_message_id: None,
+                                        agent_message_id: None,
                                     });
                                 }
                             }
@@ -4731,7 +4712,7 @@ impl CodexParser {
                                             duration_ms: None,
                                             model: None,
                                             completed_at: Some(timestamp),
-                                        agent_message_id: None,
+                                            agent_message_id: None,
                                         });
                                         continue;
                                     }
@@ -4792,7 +4773,10 @@ impl CodexParser {
                                             Some(existing) => existing.content = blocks,
                                             None => {
                                                 messages.push(UnifiedMessage {
-                                                    id: format!("assistant-plan-{}", messages.len()),
+                                                    id: format!(
+                                                        "assistant-plan-{}",
+                                                        messages.len()
+                                                    ),
                                                     role: MessageRole::Assistant,
                                                     content: blocks,
                                                     timestamp,
@@ -4888,7 +4872,7 @@ impl CodexParser {
                                     duration_ms: None,
                                     model: None,
                                     completed_at: Some(timestamp),
-                                agent_message_id: None,
+                                    agent_message_id: None,
                                 });
                                 if !id.is_empty() {
                                     emitted_image_ids.insert(id);
@@ -5036,7 +5020,8 @@ impl CodexParser {
                                     *is_error = true;
                                 }
                                 if let Some(dir) = session_dir {
-                                    let stats = agent_stats_cache.entry(agent_id.to_string())
+                                    let stats = agent_stats_cache
+                                        .entry(agent_id.to_string())
                                         .or_insert_with(|| {
                                             parse_codex_subagent_stats(dir, agent_id)
                                         });
@@ -5124,7 +5109,7 @@ impl CodexParser {
                     duration_ms: None,
                     model: None,
                     completed_at: Some(pending.timestamp),
-                agent_message_id: None,
+                    agent_message_id: None,
                 })
                 .collect();
             messages.splice(insert_at..insert_at, group);
@@ -5180,7 +5165,7 @@ impl CodexParser {
                         duration_ms: None,
                         model: None,
                         completed_at: first_timestamp,
-                    agent_message_id: None,
+                        agent_message_id: None,
                     },
                 );
             }
@@ -5408,7 +5393,9 @@ fn reconcile_turn_usage(turns: &mut [MessageTurn], recorded: &TurnUsage) {
         .fold(TurnUsage::default(), |acc, u| codex_usage_add(&acc, u));
 
     let missing = TurnUsage {
-        input_tokens: recorded.input_tokens.saturating_sub(attributed.input_tokens),
+        input_tokens: recorded
+            .input_tokens
+            .saturating_sub(attributed.input_tokens),
         output_tokens: recorded
             .output_tokens
             .saturating_sub(attributed.output_tokens),
@@ -5426,14 +5413,11 @@ fn reconcile_turn_usage(turns: &mut [MessageTurn], recorded: &TurnUsage) {
     // Prefer a turn that already reports usage — it is one the transcript
     // itself tied to a model call, so the recovered tokens land beside spend
     // that really happened rather than on an unrelated bubble.
-    let target = turns
-        .iter()
-        .rposition(|t| t.usage.is_some())
-        .or_else(|| {
-            turns.iter().rposition(|t| {
-                matches!(t.role, TurnRole::Assistant) && !is_codex_compaction_divider(&t.blocks)
-            })
-        });
+    let target = turns.iter().rposition(|t| t.usage.is_some()).or_else(|| {
+        turns.iter().rposition(|t| {
+            matches!(t.role, TurnRole::Assistant) && !is_codex_compaction_divider(&t.blocks)
+        })
+    });
     if let Some(turn) = target.and_then(|i| turns.get_mut(i)) {
         turn.usage = Some(match turn.usage {
             Some(ref existing) => codex_usage_add(existing, &missing),
@@ -5633,7 +5617,7 @@ fn flush_pending_reasoning(
         duration_ms: None,
         model: None,
         completed_at: Some(timestamp),
-    agent_message_id: None,
+        agent_message_id: None,
     });
 }
 
@@ -5813,7 +5797,7 @@ const CODEX_PLAN_APPROVED_OUTPUT: &str = "User approved the plan.";
 
 /// Append the settled `plan_review` call that reports an approved plan.
 ///
-/// Deliberately the same shape the LIVE path produces: codeg seeds codex-acp's
+/// Deliberately the same shape the LIVE path produces: harness_studio seeds codex-acp's
 /// unannounced plan-review call with `raw_input: None` (see
 /// `handle_permission_request`) because the plan is already in the transcript,
 /// and the frontend renders that input-less call as a bare decision marker. So
@@ -6182,7 +6166,7 @@ struct PendingPromotedMessage {
 ///   blocks and compaction summaries, i.e. text codex deliberately keeps out of
 ///   the chat. That rule regresses 60 existing conversations.
 /// * *Per file, when the event channel is absent anywhere* — this is inert on the
-///   corpus, but it evaporates the moment the user resumes the session in codeg:
+///   corpus, but it evaporates the moment the user resumes the session in harness_studio:
 ///   native `event_msg` records append to the SAME rollout, the gate flips off,
 ///   and the whole imported prefix disappears again. That is exactly the workflow
 ///   #452 reports.
@@ -6595,9 +6579,9 @@ fn response_item_user_has_image(payload: &serde_json::Value) -> bool {
         .get("content")
         .and_then(|c| c.as_array())
         .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("type").and_then(|v| v.as_str()) == Some("input_image")
-            })
+            items
+                .iter()
+                .any(|item| item.get("type").and_then(|v| v.as_str()) == Some("input_image"))
         })
 }
 
@@ -6712,7 +6696,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else if matches!(msg.role, MessageRole::System) {
@@ -6725,7 +6709,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms: None,
                 model: None,
                 completed_at: msg.completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
             i += 1;
         } else {
@@ -6766,7 +6750,7 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
                 duration_ms,
                 model: turn_model,
                 completed_at,
-            agent_message_id: None,
+                agent_message_id: None,
             });
         }
     }
@@ -7715,40 +7699,40 @@ mod tests {
 
     use std::collections::HashMap;
 
+    use super::codex_compacted_summary;
+    use super::codex_line_ordinal;
+    use super::codex_parent_thread_id;
+    use super::completed_mcp_call;
     use super::extract_codex_title_candidate;
     use super::extract_context_window_used_tokens_from_token_count_info;
     use super::extract_response_item_user_image_blocks;
     use super::extract_turn_usage_from_codex_usage;
-    use super::codex_line_ordinal;
-    use super::codex_parent_thread_id;
-    use super::completed_mcp_call;
-    use super::serialize_preview;
-    use super::truncate_str;
-    use super::BudgetedSink;
-    use super::MCP_RESULT_FALLBACK_CAP;
     use super::is_encrypted_envelope;
     use super::is_promotable_user_text;
     use super::merge_codex_context_window_stats;
-    use super::native_team_wait_input;
     use super::merge_codex_total_usage_stats;
+    use super::native_team_wait_input;
     use super::parse_codex_subagent_stats;
     use super::redact_encrypted_args;
     use super::resolve_codex_home_dir_from;
+    use super::serialize_preview;
+    use super::should_skip_duplicate_user_message;
+    use super::strip_blocked_resource_mentions;
     use super::trim_subagent_replay_prefix;
+    use super::truncate_str;
+    use super::AgentParser;
+    use super::BudgetedSink;
+    use super::CodexParser;
     use super::RolloutFileName;
-    use super::codex_compacted_summary;
     use super::CODEX_COMPACTION_SUMMARY_PREFIX;
     use super::CODEX_COMPACTION_TOOL_NAME;
     use super::CODEX_PLAN_APPROVAL_PROMPT;
     use super::CODEX_PLAN_APPROVED_OUTPUT;
+    use super::CODEX_SCRIPT_TOOL_NAME;
     use super::CODEX_SUBAGENT_LAUNCH_KEY;
     use super::CODEX_SUBAGENT_STATE_KEY;
     use super::COLLAB_OP_KEY;
-    use super::should_skip_duplicate_user_message;
-    use super::strip_blocked_resource_mentions;
-    use super::AgentParser;
-    use super::CodexParser;
-    use super::CODEX_SCRIPT_TOOL_NAME;
+    use super::MCP_RESULT_FALLBACK_CAP;
     use crate::models::{
         ContentBlock, MessageRole, MessageTurn, SessionStats, TurnRole, TurnUsage, UnifiedMessage,
     };
@@ -7984,9 +7968,9 @@ mod tests {
                 ),
             ];
             fs::write(
-                temp_dir
-                    .path()
-                    .join(format!("rollout-2026-08-28T10-00-00-{conversation_id}.jsonl")),
+                temp_dir.path().join(format!(
+                    "rollout-2026-08-28T10-00-00-{conversation_id}.jsonl"
+                )),
                 format!("{}\n", lines.join("\n")),
             )
             .expect("write rollout");
@@ -8260,7 +8244,7 @@ mod tests {
             .join(format!(
                 "rollout-2026-08-15T16-00-00-{conversation_id}.jsonl"
             ));
-        let visible = "Ask [@Antigravity](codeg://agent/antigravity) to review";
+        let visible = "Ask [@Antigravity](harnessstudio://agent/antigravity) to review";
         let mut prompt = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -8335,7 +8319,7 @@ mod tests {
             .join(format!(
                 "rollout-2026-08-15T16-00-00-{conversation_id}.jsonl"
             ));
-        let visible = "Ask [@Codex](codeg://agent/codex) to inspect this";
+        let visible = "Ask [@Codex](harnessstudio://agent/codex) to inspect this";
         let mut prompt = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -8405,7 +8389,7 @@ mod tests {
             .join(format!(
                 "rollout-2026-08-15T16-00-00-{conversation_id}.jsonl"
             ));
-        let visible = "Explain \u{001e}<codeg_internal_agent_routes version=\"2\">user text</codeg_internal_agent_routes>\u{001e}";
+        let visible = "Explain \u{001e}<harness_studio_internal_agent_routes version=\"2\">user text</harness_studio_internal_agent_routes>\u{001e}";
         let lines = [
             serde_json::json!({
                 "timestamp": "2026-08-15T08:00:00Z",
@@ -8438,7 +8422,7 @@ mod tests {
         assert!(summary
             .title
             .as_deref()
-            .is_some_and(|title| title.contains("codeg_internal_agent_routes")));
+            .is_some_and(|title| title.contains("harness_studio_internal_agent_routes")));
 
         let detail = parser.get_conversation(conversation_id).unwrap();
         assert!(matches!(
@@ -8452,7 +8436,7 @@ mod tests {
         use crate::acp::agent_mentions::append_agent_routes;
         use crate::acp::types::PromptInputBlock;
 
-        let visible = "Review this image [@Codex](codeg://agent/codex)";
+        let visible = "Review this image [@Codex](harnessstudio://agent/codex)";
         let mut prompt = vec![PromptInputBlock::Text {
             text: visible.into(),
         }];
@@ -8524,7 +8508,7 @@ mod tests {
             duration_ms: None,
             model: None,
             completed_at: Some(now),
-        agent_message_id: None,
+            agent_message_id: None,
         }];
 
         assert!(should_skip_duplicate_user_message(
@@ -8755,7 +8739,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-ctx-{nanos}.jsonl"));
+        let path: PathBuf = env::temp_dir().join(format!("harness-studio-codex-ctx-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ctx-1\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -8838,7 +8822,12 @@ mod tests {
             )
         };
         let searched_report = |ts: &str| {
-            usage_count_line(ts, [522_480, 450_432, 7_798], [579_422, 501_952, 8_158], WINDOW)
+            usage_count_line(
+                ts,
+                [522_480, 450_432, 7_798],
+                [579_422, 501_952, 8_158],
+                WINDOW,
+            )
         };
         let first_turn = vec![
             rollout_line(
@@ -8874,14 +8863,22 @@ mod tests {
             ),
         ];
         let reading = |lines: &[String], tag: &str| {
-            let stats = parse_lines(lines, tag).session_stats.expect("session stats");
-            (stats.context_window_used_tokens, stats.context_window_usage_percent)
+            let stats = parse_lines(lines, tag)
+                .session_stats
+                .expect("session stats");
+            (
+                stats.context_window_used_tokens,
+                stats.context_window_usage_percent,
+            )
         };
 
         let (used, percent) = reading(&first_turn, "ws-846-searched");
         assert_eq!(used, Some(57_302), "the reading before the search stands");
         let percent = percent.expect("percent");
-        assert!((percent - 57_302.0 / WINDOW as f64 * 100.0).abs() < 1e-9, "{percent}");
+        assert!(
+            (percent - 57_302.0 / WINDOW as f64 * 100.0).abs() < 1e-9,
+            "{percent}"
+        );
 
         // Older codex restates the latest report as the next request opens; a
         // restatement of the report set aside is set aside with it.
@@ -8997,18 +8994,25 @@ mod tests {
             .iter()
             .filter_map(|t| t.usage.as_ref())
             .map(|u| {
-                u.input_tokens + u.output_tokens + u.cache_creation_input_tokens
+                u.input_tokens
+                    + u.output_tokens
+                    + u.cache_creation_input_tokens
                     + u.cache_read_input_tokens
             })
             .sum()
     }
 
-    fn parse_rollout(label: &str, content: &str, session_id: &str) -> crate::models::ConversationDetail {
+    fn parse_rollout(
+        label: &str,
+        content: &str,
+        session_id: &str,
+    ) -> crate::models::ConversationDetail {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-{label}-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-{label}-{nanos}.jsonl"));
         fs::write(&path, content).expect("write test jsonl");
         let detail = CodexParser::new()
             .parse_conversation_detail(&path, session_id)
@@ -9123,7 +9127,10 @@ mod tests {
         );
         let detail = parse_rollout("toolonly", content, "toolonly-1");
         assert!(
-            !detail.turns.iter().any(|t| matches!(t.role, TurnRole::Assistant)),
+            !detail
+                .turns
+                .iter()
+                .any(|t| matches!(t.role, TurnRole::Assistant)),
             "precondition: this rollout has no assistant turn"
         );
         let total = detail
@@ -9165,7 +9172,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-spans-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-spans-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"spans-1\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -9233,7 +9241,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-midctx-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-midctx-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"midctx-1\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -9277,7 +9286,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-completed-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-completed-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"completed-1\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -9322,7 +9332,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-goal-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-goal-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"goal-1\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -9386,8 +9397,7 @@ mod tests {
 
         // active → create_goal, objective + status carried in the tool_result.
         let create_id = find("create_goal");
-        let create_out: serde_json::Value =
-            serde_json::from_str(&outputs[&create_id]).unwrap();
+        let create_out: serde_json::Value = serde_json::from_str(&outputs[&create_id]).unwrap();
         assert_eq!(create_out["goal"]["status"], "active");
         assert_eq!(create_out["goal"]["objective"], "Refactor the auth module");
         // Distinct goal events get distinct (occurrence-addressed) ids.
@@ -9395,8 +9405,7 @@ mod tests {
 
         // budgetLimited → update_goal with the status normalized to snake_case.
         let update_id = find("update_goal");
-        let update_out: serde_json::Value =
-            serde_json::from_str(&outputs[&update_id]).unwrap();
+        let update_out: serde_json::Value = serde_json::from_str(&outputs[&update_id]).unwrap();
         assert_eq!(update_out["goal"]["status"], "budget_limited");
         assert_eq!(update_out["goal"]["tokensUsed"], 5200);
         let update_in: serde_json::Value = serde_json::from_str(&inputs[&update_id]).unwrap();
@@ -9415,7 +9424,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-goalnull-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-goalnull-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gc-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
@@ -9478,7 +9488,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-puregoal-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-puregoal-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"pg-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
@@ -9551,7 +9562,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-goaltext-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-goaltext-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gt-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"/goal Analyze the README\"}}\n",
@@ -9569,7 +9580,10 @@ mod tests {
             .iter()
             .filter(|t| matches!(t.role, TurnRole::User))
             .count();
-        assert_eq!(user_turns, 1, "real user_message not duplicated by synthesis");
+        assert_eq!(
+            user_turns, 1,
+            "real user_message not duplicated by synthesis"
+        );
         let user_text = detail
             .turns
             .iter()
@@ -9599,7 +9613,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-goaldup-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-goaldup-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gd-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Investigate auth\",\"status\":\"active\"}}}\n",
@@ -9648,7 +9662,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-goalconfirm-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-goalconfirm-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gc-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static page\",\"status\":\"active\"}}}\n",
@@ -9717,7 +9731,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumconfirm-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumconfirm-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sc-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static page\",\"status\":\"active\"}}}\n",
@@ -9753,7 +9767,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumgoal-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumgoal-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sg-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
@@ -9769,10 +9783,7 @@ mod tests {
             .expect("summary present");
 
         // Objective wins as title; the internal-context text never leaks in.
-        assert_eq!(
-            summary.title.as_deref(),
-            Some("Build a static test page")
-        );
+        assert_eq!(summary.title.as_deref(), Some("Build a static test page"));
         // The synthesized user turn (+1) plus the agent_message (+1).
         assert_eq!(summary.message_count, 2);
 
@@ -9788,7 +9799,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumname-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumname-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sn-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
@@ -9820,7 +9831,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumimg-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumimg-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"si-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Do the thing\",\"status\":\"active\"}}}\n",
@@ -9873,8 +9884,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumimg-bothchan-{nanos}.jsonl"));
+        let path: PathBuf = env::temp_dir().join(format!(
+            "harness-studio-codex-sumimg-bothchan-{nanos}.jsonl"
+        ));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"si-both\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"look at this\",\"images\":[\"data:image/png;base64,AAAA\"]}}\n",
@@ -9906,7 +9918,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumimg-parity-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumimg-parity-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"si-parity\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"inspect this\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AAAA\"}]}}\n",
@@ -9940,7 +9952,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-{tag}-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-{tag}-{nanos}.jsonl"));
         fs::write(&path, content).expect("write test jsonl");
         let parser = CodexParser::new();
         let summary = parser
@@ -10134,7 +10147,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-sumnull-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-sumnull-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"snl-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":null}}\n",
@@ -10167,7 +10180,7 @@ mod tests {
             .expect("system time ok")
             .as_nanos();
         let path: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-gtxt-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-gtxt-{nanos}.jsonl"));
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gt2-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Do X\",\"status\":\"active\"}}}\n",
@@ -10220,7 +10233,7 @@ mod tests {
 
         // (a) terminal-only goal → no capture, no synthetic count/title.
         let path_a: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-term-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-term-{nanos}.jsonl"));
         fs::write(
             &path_a,
             concat!(
@@ -10236,13 +10249,16 @@ mod tests {
             .expect("ok")
             .expect("present");
         assert_eq!(summary_a.title, None, "terminal goal is not a title");
-        assert_eq!(summary_a.message_count, 1, "no synthetic user for terminal goal");
+        assert_eq!(
+            summary_a.message_count, 1,
+            "no synthetic user for terminal goal"
+        );
         let _ = fs::remove_file(&path_a);
 
         // (b) terminal THEN active → the active objective is captured (not the
         // terminal one), matching the detail parser's first-create_goal capture.
         let path_b: PathBuf =
-            env::temp_dir().join(format!("codeg-codex-termact-{nanos}.jsonl"));
+            env::temp_dir().join(format!("harness-studio-codex-termact-{nanos}.jsonl"));
         fs::write(
             &path_b,
             concat!(
@@ -10284,7 +10300,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-img-dedupe-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-img-dedupe-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-05-05T12:35:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ig-test\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -10338,7 +10355,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-img-mime-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-img-mime-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-05-05T12:35:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ig-mime\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -10425,7 +10443,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-img-noprompt-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-img-noprompt-{nanos}.jsonl"));
 
         let content = concat!(
             "{\"timestamp\":\"2026-05-05T12:35:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ig-noprompt\",\"cwd\":\"/tmp/demo\"}}\n",
@@ -10472,7 +10491,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-img-subagent-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-img-subagent-{nanos}.jsonl"));
 
         // Sequence:
         //   1. user msg
@@ -10538,7 +10558,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path = env::temp_dir().join(format!("codeg-codex-{tag}-{nanos}.jsonl"));
+        let path = env::temp_dir().join(format!("harness-studio-codex-{tag}-{nanos}.jsonl"));
         let mut content = lines.join("\n");
         content.push('\n');
         fs::write(&path, content).expect("write test jsonl");
@@ -10557,7 +10577,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let dir = env::temp_dir().join(format!("codeg-codex-{tag}-{nanos}"));
+        let dir = env::temp_dir().join(format!("harness-studio-codex-{tag}-{nanos}"));
         fs::create_dir_all(&dir).expect("create temp session dir");
         dir
     }
@@ -11127,7 +11147,10 @@ mod tests {
         lines.extend(announced_reasoning(
             "2026-09-24T07:21:02Z",
             "rs_1",
-            &["**Checking directory usage**", "**Checking repository changes**"],
+            &[
+                "**Checking directory usage**",
+                "**Checking repository changes**",
+            ],
         ));
         lines.extend(announced_reasoning(
             "2026-09-24T07:21:12Z",
@@ -11139,7 +11162,10 @@ mod tests {
         lines.extend(announced_reasoning(
             "2026-09-24T07:21:20Z",
             "rs_4",
-            &["**Reviewing disk usage snapshot**", "**Measuring temporary storage usage**"],
+            &[
+                "**Reviewing disk usage snapshot**",
+                "**Measuring temporary storage usage**",
+            ],
         ));
         // A tool call is visible and ends the run; its own announcement follows.
         lines.extend([
@@ -11296,7 +11322,9 @@ mod tests {
 
         assert_eq!(
             thinking_texts(&detail),
-            vec!["**Assessing execution capabilities**\n\n**Determining the next step**".to_string()]
+            vec![
+                "**Assessing execution capabilities**\n\n**Determining the next step**".to_string()
+            ]
         );
 
         let _ = fs::remove_file(path);
@@ -11441,7 +11469,11 @@ mod tests {
                 serde_json::json!({"agent_b":{"completed":"B_RESULT_TOKEN"}}),
             ),
             narration("2026-06-27T10:00:09Z", "NARRATION_MID B back waiting A"),
-            wait("2026-06-27T10:00:10Z", "wait_2", serde_json::json!(["agent_a"])),
+            wait(
+                "2026-06-27T10:00:10Z",
+                "wait_2",
+                serde_json::json!(["agent_a"]),
+            ),
             wait_out(
                 "2026-06-27T10:00:11Z",
                 "wait_2",
@@ -11499,7 +11531,7 @@ mod tests {
             .expect("wait capsule carrying A's result");
         assert!(a_cap.contains("agent_a"));
         // op-aware title source is present.
-        assert!(a_cap.contains("__codegCollabOp"));
+        assert!(a_cap.contains("__harnessStudioCollabOp"));
 
         // The result text must NOT remain on the spawn execution capsules or any
         // tool result (it lives only in the wait capsules now).
@@ -11835,8 +11867,7 @@ mod tests {
                 _ => None,
             })
             .expect("spawn Agent capsule present");
-        let parsed: serde_json::Value =
-            serde_json::from_str(input).expect("spawn input is JSON");
+        let parsed: serde_json::Value = serde_json::from_str(input).expect("spawn input is JSON");
         assert_eq!(
             parsed.get("agent_id").and_then(|v| v.as_str()),
             Some("AGENT_UUID_X"),
@@ -11935,7 +11966,9 @@ mod tests {
         // 0.147 emits no wait/close capsule, so this card stands for the LAUNCH
         // only and must say so rather than read as "the sub-agent finished".
         assert_eq!(
-            parsed.get(CODEX_SUBAGENT_LAUNCH_KEY).and_then(|v| v.as_bool()),
+            parsed
+                .get(CODEX_SUBAGENT_LAUNCH_KEY)
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
 
@@ -12051,7 +12084,10 @@ mod tests {
         // stream showed vanished on reload and nothing could resolve the
         // child's own rollout.
         let sealed = format!("gAAAAAB{}", "qgWsi0g7gOInVU3UTzqL".repeat(30));
-        let path = write_temp_rollout("nativeteam0153", &native_team_0153_lines("MESSAGE", &sealed));
+        let path = write_temp_rollout(
+            "nativeteam0153",
+            &native_team_0153_lines("MESSAGE", &sealed),
+        );
         let detail = CodexParser::new()
             .parse_conversation_detail(&path, "parent")
             .expect("parse ok");
@@ -12207,7 +12243,10 @@ mod tests {
             })
             .expect("roster renders as a collab capsule, not a generic tool card");
         let parsed: serde_json::Value = serde_json::from_str(input).expect("collab input is JSON");
-        assert_eq!(parsed.get(COLLAB_OP_KEY).and_then(|v| v.as_str()), Some("list"));
+        assert_eq!(
+            parsed.get(COLLAB_OP_KEY).and_then(|v| v.as_str()),
+            Some("list")
+        );
         let states = parsed
             .get("agentsStates")
             .and_then(|v| v.as_object())
@@ -12340,7 +12379,10 @@ mod tests {
             })
             .expect("spawn Agent capsule present");
         let parsed: serde_json::Value = serde_json::from_str(input).expect("JSON");
-        assert_eq!(parsed.get("subagent_type").and_then(|v| v.as_str()), Some("worker"));
+        assert_eq!(
+            parsed.get("subagent_type").and_then(|v| v.as_str()),
+            Some("worker")
+        );
         assert_eq!(parsed.get("prompt").and_then(|v| v.as_str()), Some("do it"));
         assert!(parsed.get(CODEX_SUBAGENT_LAUNCH_KEY).is_none());
 
@@ -12403,7 +12445,10 @@ mod tests {
     fn redaction_leaves_ordinary_arguments_untouched() {
         let mut args = serde_json::json!({"cmd":"pnpm build","timeout_ms":3600000});
         assert!(!redact_encrypted_args(&mut args));
-        assert_eq!(args, serde_json::json!({"cmd":"pnpm build","timeout_ms":3600000}));
+        assert_eq!(
+            args,
+            serde_json::json!({"cmd":"pnpm build","timeout_ms":3600000})
+        );
         // Nested and array positions are reached.
         let sealed = format!("gAAAAAB{}", "0g7gOInVU3UTzqL".repeat(10));
         let mut nested = serde_json::json!({"outer":{"list":[sealed.clone(),"keep me"]}});
@@ -12486,14 +12531,17 @@ mod tests {
             })
             .expect("wait capsule present");
         let parsed: serde_json::Value = serde_json::from_str(input).expect("JSON");
-        assert_eq!(parsed.get(COLLAB_OP_KEY).and_then(|v| v.as_str()), Some("wait"));
-        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("completed"));
+        assert_eq!(
+            parsed.get(COLLAB_OP_KEY).and_then(|v| v.as_str()),
+            Some("wait")
+        );
+        assert_eq!(
+            parsed.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
         // No agents and no prompt — the card renders as a bare pill, exactly
         // what the live `collabAgentToolCall` produces for this output.
-        assert_eq!(
-            parsed.get("agentsStates"),
-            Some(&serde_json::json!({}))
-        );
+        assert_eq!(parsed.get("agentsStates"), Some(&serde_json::json!({})));
         let errored = detail
             .turns
             .iter()
@@ -12507,7 +12555,9 @@ mod tests {
     #[test]
     fn native_team_wait_shape_gate_and_timeout() {
         // `timed_out` is the shape gate: only the native-team output has it.
-        assert!(native_team_wait_input(&serde_json::json!({"message":"Wait completed."})).is_none());
+        assert!(
+            native_team_wait_input(&serde_json::json!({"message":"Wait completed."})).is_none()
+        );
         assert!(native_team_wait_input(&serde_json::json!({})).is_none());
         // A timeout is a real outcome — flag the capsule failed.
         let (input, is_error) =
@@ -12515,7 +12565,10 @@ mod tests {
                 .expect("native shape");
         assert!(is_error);
         let parsed: serde_json::Value = serde_json::from_str(&input).expect("JSON");
-        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("failed"));
+        assert_eq!(
+            parsed.get("status").and_then(|v| v.as_str()),
+            Some("failed")
+        );
     }
 
     #[test]
@@ -12826,8 +12879,8 @@ mod tests {
         let script = concat!(
             "const wd=\"/tmp\";const taskA=\"A\";const taskB=\"B\";",
             "const [a,b]=await Promise.all([",
-            "tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:wd,task:taskA}),",
-            "tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:wd,task:taskB})",
+            "tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:wd,task:taskA}),",
+            "tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:wd,task:taskB})",
             "]);text(JSON.stringify({a,b}));"
         );
         assert!(
@@ -12843,12 +12896,9 @@ mod tests {
                 {"type":"input_text","text":"{\"a\":{},\"b\":{}}"},
             ]),
         );
-        for (offset, (id, task_id, task)) in [
-            ("exec-b", "task-b", "B"),
-            ("exec-a", "task-a", "A"),
-        ]
-        .into_iter()
-        .enumerate()
+        for (offset, (id, task_id, task)) in [("exec-b", "task-b", "B"), ("exec-a", "task-a", "A")]
+            .into_iter()
+            .enumerate()
         {
             lines.insert(
                 2 + offset,
@@ -12860,7 +12910,7 @@ mod tests {
                         "item": {
                             "type": "McpToolCall",
                             "id": id,
-                            "server": "codeg-mcp",
+                            "server": "harness-studio-mcp",
                             "tool": "delegate_to_agent",
                             "arguments": {"agent_type":"codex", "task":task},
                             "status": "completed",
@@ -12884,8 +12934,8 @@ mod tests {
                 .map(|(id, name, _)| (id.as_str(), name.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("exec-b", "mcp__codeg_mcp__delegate_to_agent"),
-                ("exec-a", "mcp__codeg_mcp__delegate_to_agent"),
+                ("exec-b", "mcp__harness_studio_mcp__delegate_to_agent"),
+                ("exec-a", "mcp__harness_studio_mcp__delegate_to_agent"),
             ],
             "semantic items replace the outer script with real MCP cards"
         );
@@ -12903,8 +12953,14 @@ mod tests {
                 .map(|(id, output, _)| (id, output))
                 .collect::<Vec<_>>(),
             vec![
-                ("exec-b".into(), Some("Delegation successful. task_id=task-b.".into())),
-                ("exec-a".into(), Some("Delegation successful. task_id=task-a.".into())),
+                (
+                    "exec-b".into(),
+                    Some("Delegation successful. task_id=task-b.".into())
+                ),
+                (
+                    "exec-a".into(),
+                    Some("Delegation successful. task_id=task-a.".into())
+                ),
             ]
         );
     }
@@ -12918,9 +12974,9 @@ mod tests {
         let sealed = format!("gAAAAAB{}", "qgWsi0g7nV3UTzqL".repeat(30));
         let native = native_team_0153_lines("FINAL_ANSWER", &sealed);
         let initial_script =
-            "const r = await tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:\"/tmp/mcp-worker\",task:\"semantic initial\"});text(JSON.stringify(r));";
+            "const r = await tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:\"/tmp/mcp-worker\",task:\"semantic initial\"});text(JSON.stringify(r));";
         let continuation_script =
-            "const r = await tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:\"/tmp/mcp-worker\",task:\"semantic followup\",continue_from_task_id:\"task-semantic-initial\"});text(JSON.stringify(r));";
+            "const r = await tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:\"/tmp/mcp-worker\",task:\"semantic followup\",continue_from_task_id:\"task-semantic-initial\"});text(JSON.stringify(r));";
         let initial_status = serde_json::json!({
             "task_id": "task-semantic-initial",
             "child_conversation_id": 901,
@@ -12951,7 +13007,7 @@ mod tests {
                     "item": {
                         "type": "McpToolCall",
                         "id": "mcp-semantic-initial",
-                        "server": "codeg-mcp",
+                        "server": "harness-studio-mcp",
                         "tool": "delegate_to_agent",
                         "arguments": {
                             "agent_type": "codex",
@@ -13008,7 +13064,7 @@ mod tests {
                     "item": {
                         "type": "McpToolCall",
                         "id": "mcp-semantic-continuation",
-                        "server": "codeg-mcp",
+                        "server": "harness-studio-mcp",
                         "tool": "delegate_to_agent",
                         "arguments": {
                             "agent_type": "codex",
@@ -13061,14 +13117,14 @@ mod tests {
             vec![
                 (
                     "mcp-semantic-initial",
-                    "mcp__codeg_mcp__delegate_to_agent",
+                    "mcp__harness_studio_mcp__delegate_to_agent",
                     Some(
                         r#"{"agent_type":"codex","working_dir":"/tmp/mcp-worker","task":"semantic initial"}"#,
                     ),
                 ),
                 (
                     "mcp-semantic-continuation",
-                    "mcp__codeg_mcp__delegate_to_agent",
+                    "mcp__harness_studio_mcp__delegate_to_agent",
                     Some(
                         r#"{"agent_type":"codex","working_dir":"/tmp/mcp-worker","task":"semantic followup","continue_from_task_id":"task-semantic-initial"}"#,
                     ),
@@ -13112,7 +13168,9 @@ mod tests {
 
         let (native_input, native_result) = spawn_capsule(&detail);
         assert_eq!(
-            native_input.get("agent_id").and_then(|value| value.as_str()),
+            native_input
+                .get("agent_id")
+                .and_then(|value| value.as_str()),
             Some("01a07fc2-db62-78b3-9762-9cb2540216c2"),
             "native activity must keep its own child session id"
         );
@@ -13125,7 +13183,7 @@ mod tests {
 
     #[test]
     fn a_deferred_scripts_late_mcp_item_cannot_bind_to_the_next_script() {
-        let script = "const r=await tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",task:\"A\"});text(JSON.stringify(r));";
+        let script = "const r=await tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",task:\"A\"});text(JSON.stringify(r));";
         let mut lines = code_mode_rollout(
             script,
             serde_json::json!("Script running with cell ID 34\nWall time 30.0 seconds\nOutput:\n"),
@@ -13144,7 +13202,7 @@ mod tests {
             serde_json::json!({
                 "type":"item_completed",
                 "item": {
-                    "type":"McpToolCall", "id":"exec-from-a", "server":"codeg-mcp",
+                    "type":"McpToolCall", "id":"exec-from-a", "server":"harness-studio-mcp",
                     "tool":"delegate_to_agent", "arguments":{"task":"A"},
                     "status":"completed", "result":{"content":[], "isError":false}
                 }
@@ -13169,13 +13227,13 @@ mod tests {
     /// A refused MCP call still lets the SCRIPT finish, so the wrapper's own
     /// `Script completed` says nothing about the call inside it. The card has to
     /// settle on the semantic item's outcome or it contradicts the result block
-    /// written beside it. Shape taken verbatim from a real rollout: codeg-mcp
+    /// written beside it. Shape taken verbatim from a real rollout: harness-studio-mcp
     /// refuses a `delegate_to_agent` past the delegation depth limit.
     #[test]
     fn a_failed_semantic_mcp_item_settles_its_card_as_failed() {
         let script = concat!(
             "const dir=\"/tmp/w\";",
-            "const res=await tools.mcp__codeg_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:dir,task:t});",
+            "const res=await tools.mcp__harness_studio_mcp__delegate_to_agent({agent_type:\"codex\",working_dir:dir,task:t});",
             "text(res.content[0].text);"
         );
         let mut lines = code_mode_rollout(
@@ -13195,7 +13253,7 @@ mod tests {
                     "item": {
                         "type": "McpToolCall",
                         "id": "exec-depth-limit",
-                        "server": "codeg-mcp",
+                        "server": "harness-studio-mcp",
                         "tool": "delegate_to_agent",
                         "arguments": {"agent_type":"codex", "working_dir":"/tmp/w"},
                         "status": "failed",
@@ -13289,7 +13347,8 @@ mod tests {
     /// the script card used to show the run.
     #[test]
     fn a_textless_semantic_result_still_says_something() {
-        let script = "const shot=await tools.mcp__shot_srv__capture({url:target});text(\"captured\");";
+        let script =
+            "const shot=await tools.mcp__shot_srv__capture({url:target});text(\"captured\");";
         let mut lines = code_mode_rollout(
             script,
             serde_json::json!([
@@ -13344,7 +13403,7 @@ mod tests {
             let mut lines = code_mode_rollout(
                 concat!(
                     "const rs = await Promise.all([\n",
-                    "  tools.mcp__codeg_mcp__get_delegation_status({task_ids:[\"t1\"],wait_ms:30000}),\n",
+                    "  tools.mcp__harness_studio_mcp__get_delegation_status({task_ids:[\"t1\"],wait_ms:30000}),\n",
                     "  tools.write_stdin({session_id:480,chars:\"y\\n\"}),\n",
                     "]);\ntext(JSON.stringify(rs));"
                 ),
@@ -13364,7 +13423,7 @@ mod tests {
                             "item": {
                                 "type": "McpToolCall",
                                 "id": "exec-poll",
-                                "server": "codeg-mcp",
+                                "server": "harness-studio-mcp",
                                 "tool": "get_delegation_status",
                                 "arguments": {"task_ids":["t1"], "wall_ms":30000},
                                 "status": "completed",
@@ -13376,7 +13435,11 @@ mod tests {
             }
             let detail = parse_lines(
                 &lines,
-                if item { "mixed-with-item" } else { "mixed-baseline" },
+                if item {
+                    "mixed-with-item"
+                } else {
+                    "mixed-baseline"
+                },
             );
             (tool_uses(&detail), tool_results(&detail))
         };
@@ -13402,7 +13465,7 @@ mod tests {
     #[test]
     fn a_thrown_script_keeps_its_own_card_over_a_matching_semantic_item() {
         let script = concat!(
-            "const r=await tools.mcp__codeg_mcp__task_progress({message:m});",
+            "const r=await tools.mcp__harness_studio_mcp__task_progress({message:m});",
             "text(r.content[0].text.toUpperCase());"
         );
         let mut lines = code_mode_rollout(
@@ -13422,7 +13485,7 @@ mod tests {
                     "item": {
                         "type": "McpToolCall",
                         "id": "exec-progress",
-                        "server": "codeg-mcp",
+                        "server": "harness-studio-mcp",
                         "tool": "task_progress",
                         "arguments": {"message":"halfway"},
                         "status": "completed",
@@ -13462,7 +13525,10 @@ mod tests {
             buf: Vec::new(),
             budget: 8,
         };
-        assert!(sink.write_all(&[b'x'; 5]).is_ok(), "room for the first write");
+        assert!(
+            sink.write_all(&[b'x'; 5]).is_ok(),
+            "room for the first write"
+        );
         assert!(
             sink.write_all(&[b'x'; 100]).is_err(),
             "a write past the budget must fail so serialization aborts"
@@ -13479,7 +13545,10 @@ mod tests {
     #[test]
     fn a_budgeted_preview_reads_exactly_like_an_unbounded_one() {
         for (name, value) in [
-            ("a small object", serde_json::json!({"a": 1, "b": [true, null]})),
+            (
+                "a small object",
+                serde_json::json!({"a": 1, "b": [true, null]}),
+            ),
             ("empty", serde_json::json!({})),
             ("exactly the cap", serde_json::json!("x".repeat(3998))),
             ("one past the cap", serde_json::json!("x".repeat(3999))),
@@ -14378,7 +14447,7 @@ mod tests {
     #[test]
     fn polling_a_background_session_appends_to_the_card_of_its_command() {
         let mut lines = background_session_head(serde_json::json!(
-            "Chunk ID: 523e44\nWall time: 30.0 seconds\nProcess running with session ID 22068\nOutput:\n   Compiling codeg"
+            "Chunk ID: 523e44\nWall time: 30.0 seconds\nProcess running with session ID 22068\nOutput:\n   Compiling harness_studio"
         ));
         // Nothing new yet, and the session says so by naming itself again.
         lines.extend(poll_lines(
@@ -14404,7 +14473,10 @@ mod tests {
         let results = tool_results(&detail);
         assert_eq!(results.len(), 1, "{results:?}");
         let output = results[0].1.clone().expect("output");
-        assert_eq!(output, "   Compiling codeg\ntest result: ok. 1 passed");
+        assert_eq!(
+            output,
+            "   Compiling harness_studio\ntest result: ok. 1 passed"
+        );
     }
 
     /// The poll ended the reasoning run when it was read, but it is folded away
@@ -14414,7 +14486,7 @@ mod tests {
     #[test]
     fn reasoning_on_both_sides_of_a_folded_poll_is_one_thinking_card() {
         let mut lines = background_session_head(serde_json::json!(
-            "Chunk ID: 523e44\nWall time: 30.0 seconds\nProcess running with session ID 22068\nOutput:\n   Compiling codeg"
+            "Chunk ID: 523e44\nWall time: 30.0 seconds\nProcess running with session ID 22068\nOutput:\n   Compiling harness_studio"
         ));
         lines.extend(announced_reasoning(
             "2026-07-20T08:40:02.500Z",
@@ -14700,7 +14772,7 @@ mod tests {
     /// terminal card further down the transcript.
     fn deferred_script_rollout(wait_output: serde_json::Value) -> Vec<String> {
         let mut lines = code_mode_rollout(
-            "const r = await tools.mcp__codeg_mcp__get_delegation_status({task_ids:[\"t1\"],wait_ms:60000});\ntext(JSON.stringify(r));\n",
+            "const r = await tools.mcp__harness_studio_mcp__get_delegation_status({task_ids:[\"t1\"],wait_ms:60000});\ntext(JSON.stringify(r));\n",
             serde_json::json!("Script running with cell ID 34\nWall time 11.0 seconds\nOutput:\n"),
         );
         lines.push(rollout_line(
@@ -14729,7 +14801,7 @@ mod tests {
     fn a_deferred_script_completed_mcp_item_replaces_its_wrapper_card() {
         let script = concat!(
             "const task=\"t1\";",
-            "const r=await tools.mcp__codeg_mcp__get_delegation_status({task_ids:[task],wait_ms:60000});",
+            "const r=await tools.mcp__harness_studio_mcp__get_delegation_status({task_ids:[task],wait_ms:60000});",
             "text(JSON.stringify(r));"
         );
         let mut lines = code_mode_rollout(
@@ -14744,7 +14816,7 @@ mod tests {
                 "item": {
                     "type": "McpToolCall",
                     "id": "mcp-deferred-status",
-                    "server": "codeg-mcp",
+                    "server": "harness-studio-mcp",
                     "tool": "get_delegation_status",
                     "arguments": {"task_ids":["t1"], "wait_ms":60000},
                     "result": {
@@ -14777,11 +14849,11 @@ mod tests {
         let detail = parse_lines(&lines, "deferred-semantic-mcp");
         assert_eq!(
             tool_uses(&detail),
-            vec![ (
+            vec![(
                 "mcp-deferred-status".into(),
-                "mcp__codeg_mcp__get_delegation_status".into(),
+                "mcp__harness_studio_mcp__get_delegation_status".into(),
                 Some(r#"{"task_ids":["t1"],"wait_ms":60000}"#.into()),
-            ) ],
+            )],
             "the completed semantic item replaces the parked script card"
         );
         assert_eq!(
@@ -14813,7 +14885,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(
                 "call_1".to_string(),
-                "mcp__codeg_mcp__get_delegation_status".to_string()
+                "mcp__harness_studio_mcp__get_delegation_status".to_string()
             )]
         );
         assert_eq!(
@@ -14921,7 +14993,7 @@ mod tests {
         // session map either: that cell is not a shell, and the long-running
         // call here is not even a command.
         let mut lines = code_mode_rollout(
-            "const r = await tools.mcp__codeg_mcp__ask_user_question({questions: []});\ntext(JSON.stringify(r));\n",
+            "const r = await tools.mcp__harness_studio_mcp__ask_user_question({questions: []});\ntext(JSON.stringify(r));\n",
             serde_json::json!([
                 {"type": "input_text", "text": "Script running with cell ID 15\nWall time 11.0 seconds\nOutput:\n"},
             ]),
@@ -14946,7 +15018,7 @@ mod tests {
             uses.iter()
                 .map(|(id, name, _)| (id.as_str(), name.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("call_1", "mcp__codeg_mcp__ask_user_question")]
+            vec![("call_1", "mcp__harness_studio_mcp__ask_user_question")]
         );
 
         let _ = fs::remove_file(path);
@@ -15037,7 +15109,7 @@ mod tests {
             .filter_map(|b| match b {
                 ContentBlock::ToolUse { meta, .. } => Some(
                     meta.clone()
-                        .and_then(|m| m.get("codeg.codexScript").cloned())
+                        .and_then(|m| m.get("harness_studio.codexScript").cloned())
                         .unwrap_or(serde_json::Value::Null),
                 ),
                 _ => None,
@@ -15049,20 +15121,35 @@ mod tests {
     fn a_labelled_fanout_splits_a_collapsed_blob_per_command() {
         let detail = code_mode_detail(
             &labelled_fanout(&["query-entry", "formula-service", "factor-full"]),
-            labelled_blob(6, &[
-                ("query-entry", "one"),
-                ("formula-service", "two"),
-                ("factor-full", "three"),
-            ]),
+            labelled_blob(
+                6,
+                &[
+                    ("query-entry", "one"),
+                    ("formula-service", "two"),
+                    ("factor-full", "three"),
+                ],
+            ),
             "code-mode-labelled",
         );
 
         assert_eq!(
             tool_uses(&detail),
             vec![
-                ("call_1#0".into(), "exec_command".into(), Some("echo 0".into())),
-                ("call_1#1".into(), "exec_command".into(), Some("echo 1".into())),
-                ("call_1#2".into(), "exec_command".into(), Some("echo 2".into())),
+                (
+                    "call_1#0".into(),
+                    "exec_command".into(),
+                    Some("echo 0".into())
+                ),
+                (
+                    "call_1#1".into(),
+                    "exec_command".into(),
+                    Some("echo 1".into())
+                ),
+                (
+                    "call_1#2".into(),
+                    "exec_command".into(),
+                    Some("echo 2".into())
+                ),
             ]
         );
         assert_eq!(
@@ -15086,12 +15173,21 @@ mod tests {
     #[test]
     fn a_truncated_separator_leaves_its_command_without_output() {
         let detail = code_mode_detail(
-            &labelled_fanout(&["query-entry", "formula-service", "vo", "formula-splice", "factor-full"]),
-            labelled_blob(20, &[
-                ("query-entry", "first"),
-                ("formula-service", "second\nvo-output\nsplice-output"),
-                ("factor-full", "last"),
+            &labelled_fanout(&[
+                "query-entry",
+                "formula-service",
+                "vo",
+                "formula-splice",
+                "factor-full",
             ]),
+            labelled_blob(
+                20,
+                &[
+                    ("query-entry", "first"),
+                    ("formula-service", "second\nvo-output\nsplice-output"),
+                    ("factor-full", "last"),
+                ],
+            ),
             "code-mode-labelled-partial",
         );
 
@@ -15099,7 +15195,11 @@ mod tests {
             tool_results(&detail),
             vec![
                 ("call_1#0".into(), Some("first".into()), false),
-                ("call_1#1".into(), Some("second\nvo-output\nsplice-output".into()), false),
+                (
+                    "call_1#1".into(),
+                    Some("second\nvo-output\nsplice-output".into()),
+                    false
+                ),
                 ("call_1#2".into(), None, false),
                 ("call_1#3".into(), None, false),
                 ("call_1#4".into(), Some("last".into()), false),
@@ -15107,7 +15207,10 @@ mod tests {
         );
 
         let metas = tool_metas(&detail);
-        assert_eq!(metas[1]["sharedWith"], serde_json::json!(["vo", "formula-splice"]));
+        assert_eq!(
+            metas[1]["sharedWith"],
+            serde_json::json!(["vo", "formula-splice"])
+        );
         assert_eq!(metas[2]["outputMissing"], true);
         assert_eq!(metas[3]["outputMissing"], true);
         assert!(metas[0].get("sharedWith").is_none());
@@ -15121,10 +15224,7 @@ mod tests {
     fn a_repeated_separator_line_keeps_the_script_card() {
         let detail = code_mode_detail(
             &labelled_fanout(&["alpha", "beta"]),
-            labelled_blob(8, &[
-                ("alpha", "one\n===== beta ====="),
-                ("beta", "two"),
-            ]),
+            labelled_blob(8, &[("alpha", "one\n===== beta ====="), ("beta", "two")]),
             "code-mode-labelled-dup",
         );
 
@@ -15140,11 +15240,14 @@ mod tests {
     fn a_repeated_output_line_still_splits() {
         let detail = code_mode_detail(
             &labelled_fanout(&["alpha", "beta", "gamma"]),
-            labelled_blob(8, &[
-                ("alpha", "shared line\none"),
-                ("beta", "shared line\ntwo"),
-                ("gamma", "three"),
-            ]),
+            labelled_blob(
+                8,
+                &[
+                    ("alpha", "shared line\none"),
+                    ("beta", "shared line\ntwo"),
+                    ("gamma", "three"),
+                ],
+            ),
             "code-mode-labelled-repeat",
         );
 
@@ -15229,7 +15332,9 @@ mod tests {
     /// want. Tool-only turns come back with `None`. The role is stringified
     /// because `TurnRole` is not `PartialEq` and a production model should not
     /// grow a derive to serve a test.
-    fn turn_texts(detail: &crate::models::ConversationDetail) -> Vec<(&'static str, Option<String>)> {
+    fn turn_texts(
+        detail: &crate::models::ConversationDetail,
+    ) -> Vec<(&'static str, Option<String>)> {
         detail
             .turns
             .iter()
@@ -15255,7 +15360,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time ok")
             .as_nanos();
-        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-{label}-{nanos}.jsonl"));
+        let path: PathBuf =
+            env::temp_dir().join(format!("harness-studio-codex-{label}-{nanos}.jsonl"));
         fs::write(&path, content).expect("write test jsonl");
         let summary = CodexParser::new()
             .parse_jsonl_summary(&path)
@@ -15346,7 +15452,7 @@ mod tests {
     #[test]
     fn a_resumed_mixed_rollout_keeps_both_halves_exactly_once() {
         // The reported workflow: the session is created elsewhere, then resumed
-        // in codeg — which appends NATIVE `event_msg` turns to the SAME file.
+        // in harness_studio — which appends NATIVE `event_msg` turns to the SAME file.
         // A whole-file gate would drop the imported prefix the moment that
         // happened; the per-segment gate keeps it.
         let content = concat!(
@@ -15492,22 +15598,58 @@ mod tests {
     #[test]
     fn a_compaction_draws_the_live_divider_and_opens_onto_its_handoff() {
         let content = jsonl(&[
-            record("2026-09-29T00:00:00Z", "session_meta", serde_json::json!({"id": "cmp-2", "cwd": "/tmp/demo", "cli_version": "0.156.1"})),
-            record("2026-09-29T00:00:01Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t1"})),
-            record("2026-09-29T00:00:02Z", "response_item", serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "look at /private/tmp"}]})),
+            record(
+                "2026-09-29T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": "cmp-2", "cwd": "/tmp/demo", "cli_version": "0.156.1"}),
+            ),
+            record(
+                "2026-09-29T00:00:01Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "look at /private/tmp"}]}),
+            ),
             assistant_item("2026-09-29T00:00:03Z", "It holds 40 stale folders."),
             token_count("2026-09-29T00:00:04Z", 1000, 100),
-            record("2026-09-29T00:00:05Z", "event_msg", serde_json::json!({"type": "task_complete", "turn_id": "t1"})),
-            record("2026-09-29T00:01:00Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t2"})),
+            record(
+                "2026-09-29T00:00:05Z",
+                "event_msg",
+                serde_json::json!({"type": "task_complete", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:01:00Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t2"}),
+            ),
             token_count("2026-09-29T00:01:01Z", 1000, 100),
             assistant_item("2026-09-29T00:01:40Z", HANDOFF),
-            record("2026-09-29T00:01:40.100Z", "token_usage_record", serde_json::json!({"thread_id": "cmp-2", "turn_id": "t2"})),
+            record(
+                "2026-09-29T00:01:40.100Z",
+                "token_usage_record",
+                serde_json::json!({"thread_id": "cmp-2", "turn_id": "t2"}),
+            ),
             token_count("2026-09-29T00:01:40.200Z", 2400, 180),
             compacted("2026-09-29T00:01:40.300Z", HANDOFF),
-            record("2026-09-29T00:01:40.400Z", "event_msg", serde_json::json!({"type": "thread_settings_applied"})),
+            record(
+                "2026-09-29T00:01:40.400Z",
+                "event_msg",
+                serde_json::json!({"type": "thread_settings_applied"}),
+            ),
             token_count("2026-09-29T00:01:40.500Z", 2400, 180),
-            record("2026-09-29T00:01:40.600Z", "event_msg", serde_json::json!({"type": "item_completed", "turn_id": "t2", "item": {"type": "ContextCompaction", "id": "01a0eaed-d00a-7480"}})),
-            record("2026-09-29T00:01:41Z", "event_msg", serde_json::json!({"type": "task_complete", "turn_id": "t2"})),
+            record(
+                "2026-09-29T00:01:40.600Z",
+                "event_msg",
+                serde_json::json!({"type": "item_completed", "turn_id": "t2", "item": {"type": "ContextCompaction", "id": "01a0eaed-d00a-7480"}}),
+            ),
+            record(
+                "2026-09-29T00:01:41Z",
+                "event_msg",
+                serde_json::json!({"type": "task_complete", "turn_id": "t2"}),
+            ),
         ]);
         let detail = parse_rollout("compaction-handoff", &content, "cmp-2");
 
@@ -15530,7 +15672,10 @@ mod tests {
         assert_eq!(turn_usage_total(&detail), 2580);
         // The sidebar entry counts what the conversation renders: the prompt
         // and the reply, not the handoff.
-        assert_eq!(summary_of("compaction-handoff-sum", &content).message_count, 2);
+        assert_eq!(
+            summary_of("compaction-handoff-sum", &content).message_count,
+            2
+        );
     }
 
     /// An automatic compaction mid-turn. The compaction's own model call thinks
@@ -15541,29 +15686,93 @@ mod tests {
     #[test]
     fn a_mid_turn_compaction_keeps_its_own_thinking_out_of_the_reply() {
         let content = jsonl(&[
-            record("2026-09-29T00:00:00Z", "session_meta", serde_json::json!({"id": "cmp-3", "cwd": "/tmp/demo", "cli_version": "0.153.4"})),
-            record("2026-09-29T00:00:01Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t1"})),
-            record("2026-09-29T00:00:02Z", "response_item", serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the race"}]})),
-            record("2026-09-29T00:00:03Z", "event_msg", serde_json::json!({"type": "item_completed", "item": {"type": "Reasoning", "id": "rs_1", "summary_text": ["**Looking at the lock**"]}})),
-            record("2026-09-29T00:00:03.100Z", "response_item", serde_json::json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "**Looking at the lock**"}]})),
-            record("2026-09-29T00:00:04Z", "response_item", serde_json::json!({"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\":[\"rg\",\"lock\"]}"})),
-            record("2026-09-29T00:00:05Z", "response_item", serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "src/lock.rs:1"})),
-            record("2026-09-29T00:00:05.100Z", "token_usage_record", serde_json::json!({"turn_id": "t1"})),
+            record(
+                "2026-09-29T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": "cmp-3", "cwd": "/tmp/demo", "cli_version": "0.153.4"}),
+            ),
+            record(
+                "2026-09-29T00:00:01Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the race"}]}),
+            ),
+            record(
+                "2026-09-29T00:00:03Z",
+                "event_msg",
+                serde_json::json!({"type": "item_completed", "item": {"type": "Reasoning", "id": "rs_1", "summary_text": ["**Looking at the lock**"]}}),
+            ),
+            record(
+                "2026-09-29T00:00:03.100Z",
+                "response_item",
+                serde_json::json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "**Looking at the lock**"}]}),
+            ),
+            record(
+                "2026-09-29T00:00:04Z",
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\":[\"rg\",\"lock\"]}"}),
+            ),
+            record(
+                "2026-09-29T00:00:05Z",
+                "response_item",
+                serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "src/lock.rs:1"}),
+            ),
+            record(
+                "2026-09-29T00:00:05.100Z",
+                "token_usage_record",
+                serde_json::json!({"turn_id": "t1"}),
+            ),
             token_count("2026-09-29T00:00:05.200Z", 1000, 100),
             // The compaction's model call: its thinking, then its handoff.
-            record("2026-09-29T00:00:30Z", "response_item", serde_json::json!({"type": "reasoning", "id": "rs_c", "summary": [{"type": "summary_text", "text": "**Preparing concise handoff summary**"}]})),
+            record(
+                "2026-09-29T00:00:30Z",
+                "response_item",
+                serde_json::json!({"type": "reasoning", "id": "rs_c", "summary": [{"type": "summary_text", "text": "**Preparing concise handoff summary**"}]}),
+            ),
             assistant_item("2026-09-29T00:00:40Z", HANDOFF),
-            record("2026-09-29T00:00:40.100Z", "token_usage_record", serde_json::json!({"turn_id": "t1"})),
+            record(
+                "2026-09-29T00:00:40.100Z",
+                "token_usage_record",
+                serde_json::json!({"turn_id": "t1"}),
+            ),
             token_count("2026-09-29T00:00:40.200Z", 2400, 180),
             compacted("2026-09-29T00:00:40.300Z", HANDOFF),
-            record("2026-09-29T00:00:40.400Z", "world_state", serde_json::json!({"full": true})),
-            record("2026-09-29T00:00:40.500Z", "turn_context", serde_json::json!({"turn_id": "t1", "model": "gpt-6"})),
-            record("2026-09-29T00:00:40.700Z", "event_msg", serde_json::json!({"type": "item_completed", "item": {"type": "ContextCompaction", "id": "cmp-item"}})),
-            record("2026-09-29T00:00:50Z", "event_msg", serde_json::json!({"type": "item_completed", "item": {"type": "Reasoning", "id": "rs_2", "summary_text": ["**Resuming the fix**"]}})),
-            record("2026-09-29T00:00:50.100Z", "response_item", serde_json::json!({"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "**Resuming the fix**"}]})),
+            record(
+                "2026-09-29T00:00:40.400Z",
+                "world_state",
+                serde_json::json!({"full": true}),
+            ),
+            record(
+                "2026-09-29T00:00:40.500Z",
+                "turn_context",
+                serde_json::json!({"turn_id": "t1", "model": "gpt-6"}),
+            ),
+            record(
+                "2026-09-29T00:00:40.700Z",
+                "event_msg",
+                serde_json::json!({"type": "item_completed", "item": {"type": "ContextCompaction", "id": "cmp-item"}}),
+            ),
+            record(
+                "2026-09-29T00:00:50Z",
+                "event_msg",
+                serde_json::json!({"type": "item_completed", "item": {"type": "Reasoning", "id": "rs_2", "summary_text": ["**Resuming the fix**"]}}),
+            ),
+            record(
+                "2026-09-29T00:00:50.100Z",
+                "response_item",
+                serde_json::json!({"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "**Resuming the fix**"}]}),
+            ),
             assistant_item("2026-09-29T00:01:00Z", "Fixed the race."),
             token_count("2026-09-29T00:01:00.100Z", 3500, 260),
-            record("2026-09-29T00:01:01Z", "event_msg", serde_json::json!({"type": "task_complete", "turn_id": "t1"})),
+            record(
+                "2026-09-29T00:01:01Z",
+                "event_msg",
+                serde_json::json!({"type": "task_complete", "turn_id": "t1"}),
+            ),
         ]);
         let detail = parse_rollout("compaction-midturn", &content, "cmp-3");
 
@@ -15599,8 +15808,13 @@ mod tests {
             .blocks
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse { tool_use_id: Some(id), .. } if id == "c1"))));
-        assert_eq!(texts.last(), Some(&("assistant", Some("Fixed the race.".into()))));
-        assert!(!texts.iter().any(|(_, text)| text.as_deref() == Some(HANDOFF)));
+        assert_eq!(
+            texts.last(),
+            Some(&("assistant", Some("Fixed the race.".into())))
+        );
+        assert!(!texts
+            .iter()
+            .any(|(_, text)| text.as_deref() == Some(HANDOFF)));
         // The thinking card that went away had the compaction's round billed
         // to it; that spend stays in the conversation, on the reply before.
         assert_eq!(turn_usage_total(&detail), 3760);
@@ -15609,7 +15823,10 @@ mod tests {
             .filter_map(|turn| turn.usage.as_ref())
             .map(|usage| usage.input_tokens + usage.output_tokens)
             .sum();
-        assert_eq!(before_divider, 2580, "both rounds before the divider stay there");
+        assert_eq!(
+            before_divider, 2580,
+            "both rounds before the divider stay there"
+        );
     }
 
     /// Codex before ~0.137 wrote no handoff record at all: the summary exists
@@ -15618,14 +15835,42 @@ mod tests {
     #[test]
     fn an_older_compaction_opens_onto_the_summary_its_record_restates() {
         let content = jsonl(&[
-            record("2026-05-31T10:00:00Z", "session_meta", serde_json::json!({"id": "cmp-4", "cwd": "/tmp/demo", "cli_version": "0.133.0"})),
-            record("2026-05-31T10:00:01Z", "event_msg", serde_json::json!({"type": "user_message", "message": "run the tests"})),
-            record("2026-05-31T10:00:02Z", "event_msg", serde_json::json!({"type": "agent_message", "message": "Running them."})),
-            record("2026-05-31T10:00:03Z", "response_item", serde_json::json!({"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\":[\"make\",\"test\"]}"})),
-            record("2026-05-31T10:00:04Z", "response_item", serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "ok"})),
+            record(
+                "2026-05-31T10:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": "cmp-4", "cwd": "/tmp/demo", "cli_version": "0.133.0"}),
+            ),
+            record(
+                "2026-05-31T10:00:01Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "run the tests"}),
+            ),
+            record(
+                "2026-05-31T10:00:02Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "Running them."}),
+            ),
+            record(
+                "2026-05-31T10:00:03Z",
+                "response_item",
+                serde_json::json!({"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\":[\"make\",\"test\"]}"}),
+            ),
+            record(
+                "2026-05-31T10:00:04Z",
+                "response_item",
+                serde_json::json!({"type": "function_call_output", "call_id": "c1", "output": "ok"}),
+            ),
             compacted("2026-05-31T10:00:05Z", HANDOFF),
-            record("2026-05-31T10:00:06Z", "event_msg", serde_json::json!({"type": "context_compacted"})),
-            record("2026-05-31T10:00:07Z", "event_msg", serde_json::json!({"type": "agent_message", "message": "All green."})),
+            record(
+                "2026-05-31T10:00:06Z",
+                "event_msg",
+                serde_json::json!({"type": "context_compacted"}),
+            ),
+            record(
+                "2026-05-31T10:00:07Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "All green."}),
+            ),
         ]);
         let detail = parse_rollout("compaction-legacy", &content, "cmp-4");
 
@@ -15635,7 +15880,10 @@ mod tests {
         );
         let texts = turn_texts(&detail);
         assert_eq!(texts.first(), Some(&("user", Some("run the tests".into()))));
-        assert_eq!(texts.last(), Some(&("assistant", Some("All green.".into()))));
+        assert_eq!(
+            texts.last(),
+            Some(&("assistant", Some("All green.".into())))
+        );
     }
 
     /// The text fallback only looks at what was written since the previous
@@ -15645,14 +15893,34 @@ mod tests {
     fn the_text_fallback_never_reaches_past_the_previous_compaction() {
         let call = |ts: &str, id: &str| {
             [
-                record(ts, "response_item", serde_json::json!({"type": "function_call", "name": "shell", "call_id": id, "arguments": "{\"command\":[\"ls\"]}"})),
-                record(ts, "response_item", serde_json::json!({"type": "function_call_output", "call_id": id, "output": "ok"})),
+                record(
+                    ts,
+                    "response_item",
+                    serde_json::json!({"type": "function_call", "name": "shell", "call_id": id, "arguments": "{\"command\":[\"ls\"]}"}),
+                ),
+                record(
+                    ts,
+                    "response_item",
+                    serde_json::json!({"type": "function_call_output", "call_id": id, "output": "ok"}),
+                ),
             ]
         };
         let mut records = vec![
-            record("2026-09-29T00:00:00Z", "session_meta", serde_json::json!({"id": "cmp-6", "cwd": "/tmp/demo"})),
-            record("2026-09-29T00:00:01Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t1"})),
-            record("2026-09-29T00:00:02Z", "response_item", serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q1"}]})),
+            record(
+                "2026-09-29T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": "cmp-6", "cwd": "/tmp/demo"}),
+            ),
+            record(
+                "2026-09-29T00:00:01Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q1"}]}),
+            ),
             // A real reply that happens to read exactly like a later summary.
             assistant_item("2026-09-29T00:00:03Z", HANDOFF),
         ];
@@ -15696,14 +15964,38 @@ mod tests {
     #[test]
     fn the_handoff_is_recognized_by_its_text_when_adjacency_breaks() {
         let content = jsonl(&[
-            record("2026-09-29T00:00:00Z", "session_meta", serde_json::json!({"id": "cmp-5", "cwd": "/tmp/demo"})),
-            record("2026-09-29T00:00:01Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t1"})),
-            record("2026-09-29T00:00:02Z", "response_item", serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]})),
+            record(
+                "2026-09-29T00:00:00Z",
+                "session_meta",
+                serde_json::json!({"id": "cmp-5", "cwd": "/tmp/demo"}),
+            ),
+            record(
+                "2026-09-29T00:00:01Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:00:02Z",
+                "response_item",
+                serde_json::json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}),
+            ),
             assistant_item("2026-09-29T00:00:03Z", "Hello."),
-            record("2026-09-29T00:00:04Z", "event_msg", serde_json::json!({"type": "task_complete", "turn_id": "t1"})),
-            record("2026-09-29T00:01:00Z", "event_msg", serde_json::json!({"type": "task_started", "turn_id": "t2"})),
+            record(
+                "2026-09-29T00:00:04Z",
+                "event_msg",
+                serde_json::json!({"type": "task_complete", "turn_id": "t1"}),
+            ),
+            record(
+                "2026-09-29T00:01:00Z",
+                "event_msg",
+                serde_json::json!({"type": "task_started", "turn_id": "t2"}),
+            ),
             assistant_item("2026-09-29T00:01:40Z", HANDOFF),
-            record("2026-09-29T00:01:40.100Z", "some_future_accounting", serde_json::json!({"turn_id": "t2"})),
+            record(
+                "2026-09-29T00:01:40.100Z",
+                "some_future_accounting",
+                serde_json::json!({"turn_id": "t2"}),
+            ),
             compacted("2026-09-29T00:01:40.300Z", HANDOFF),
         ]);
         let detail = parse_rollout("compaction-text", &content, "cmp-5");
@@ -15851,7 +16143,8 @@ mod tests {
         // ("如果你希望调整…" is codex's habit). Rendering the announcement and
         // dropping the record would silently lose that prose, so the record
         // takes the announcement's message over rather than adding a second.
-        let record = "<proposed_plan>\n# Plan\n\n- step one\n</proposed_plan>\n\n如果你希望调整，告诉我。";
+        let record =
+            "<proposed_plan>\n# Plan\n\n- step one\n</proposed_plan>\n\n如果你希望调整，告诉我。";
         let content = plan_turn(true, Some(record));
         let detail = parse_rollout("plan-prose", &content, "plan-1");
 

@@ -88,7 +88,7 @@ function tabState(tabId: string): BrowserTabState {
     channel: "degraded",
     channelError: null,
     url: "",
-    requestedUrl: "codeg-doc://doc/report.html",
+    requestedUrl: "harness-studio-doc://doc/report.html",
     title: "",
     favicon: null,
     loading: true,
@@ -113,7 +113,7 @@ function docState(
     mode: "safe",
     root: "/tmp/site",
     entry: "/tmp/site/report.html",
-    url: "codeg-doc://doc/report.html",
+    url: "harness-studio-doc://doc/report.html",
     reset: null,
     ...overrides,
   }
@@ -305,7 +305,7 @@ describe("DocGuestPreview", () => {
     act(() =>
       setBrowserTabNotice(key, {
         kind: "navigation-blocked",
-        url: "codeg-doc://doc/big.zip",
+        url: "harness-studio-doc://doc/big.zip",
         reason: "download",
       })
     )

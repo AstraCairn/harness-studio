@@ -16,10 +16,10 @@ fn main() {
         // Subprocess mode, before the desktop logging init in `run()`: install a
         // stderr-only subscriber so helper diagnostics aren't dropped, while
         // stdout stays the git credential protocol channel.
-        let _log_guard = codeg_lib::logging::init::init_stderr_only();
-        codeg_lib::git_credential::run_credential_helper();
+        let _log_guard = harness_studio_lib::logging::init::init_stderr_only();
+        harness_studio_lib::git_credential::run_credential_helper();
         return;
     }
 
-    codeg_lib::run()
+    harness_studio_lib::run()
 }

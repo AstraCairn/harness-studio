@@ -2,7 +2,7 @@
 //!
 //! One knob survives across restarts:
 //!   * `feedback.enabled` — feature kill switch (default false). When on,
-//!     `codeg-mcp` exposes the `check_user_feedback` tool so an agent can pull
+//!     `harness-studio-mcp` exposes the `check_user_feedback` tool so an agent can pull
 //!     mid-turn user notes; the conversation UI shows the "send a note" bar.
 //!
 //! On startup `apply_persisted_feedback_config` reads this key from
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::acp::feedback::{FeedbackConfig, FeedbackRuntimeConfig};
 use crate::app_error::AppCommandError;
 use crate::db::service::app_metadata_service;
-use crate::web::event_bridge::{emit_event, EventEmitter, FEEDBACK_SETTINGS_CHANGED_EVENT};
+use crate::events::{emit_event, EventEmitter, FEEDBACK_SETTINGS_CHANGED_EVENT};
 
 pub const KEY_FEEDBACK_ENABLED: &str = "feedback.enabled";
 

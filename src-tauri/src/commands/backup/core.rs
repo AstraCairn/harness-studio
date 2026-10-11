@@ -12,11 +12,14 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use sea_orm_migration::MigratorTrait;
 use tokio_util::sync::CancellationToken;
 
-use crate::app_error::{AppCommandError, BACKUP_I18N_KEY_NEWER_VERSION, BACKUP_I18N_KEY_UNKNOWN_FORMAT};
+use crate::app_error::{
+    AppCommandError, BACKUP_I18N_KEY_NEWER_VERSION, BACKUP_I18N_KEY_UNKNOWN_FORMAT,
+};
 use crate::db::migration::Migrator;
-use crate::web::event_bridge::{emit_event, EventEmitter};
+use crate::events::{emit_event, EventEmitter};
 
 use super::archive::ArchiveBuilder;
+use super::cancelled_error;
 use super::crypto;
 use super::external;
 use super::manifest::{
@@ -24,7 +27,6 @@ use super::manifest::{
     BACKUP_PROGRESS_EVENT,
 };
 use super::sections::{self, LiveRoots, SectionKind};
-use super::cancelled_error;
 
 /// Options that shape a backup.
 #[derive(Debug, Clone, Default)]
@@ -63,7 +65,7 @@ pub(crate) async fn create_backup_core(
     // and a cross-filesystem temp turns every later rename into a full copy.
     // `cleanup_transient_dirs` already sweeps this root at startup.
     let work = tempfile::tempdir_in(scratch_root(inputs.data_dir)?).map_err(AppCommandError::io)?;
-    let db_snapshot = work.path().join("codeg.db");
+    let db_snapshot = work.path().join("harness-studio.db");
     let zip_tmp = work.path().join("payload.zip");
     let external_scratch = work.path().to_path_buf();
 
@@ -114,55 +116,58 @@ pub(crate) async fn create_backup_core(
         Some(total_estimate),
         None,
     );
-    let manifest = tokio::task::spawn_blocking(move || -> Result<BackupManifest, AppCommandError> {
-        let mut builder = ArchiveBuilder::create(&zip_tmp_c)?;
-        let mut prog = |path: &str, processed: u64| {
-            emit(
-                &emitter_c,
-                &op_id_c,
-                BackupPhase::Archiving,
-                processed,
-                Some(total_estimate.max(processed)),
-                Some(path.to_string()),
-            );
-        };
-        builder.add_file("db/codeg.db", &db_snapshot_c, &cancel_c, &mut prog)?;
-        // Every codeg-owned section, straight off the shared table — see
-        // `sections.rs` for why this must not be re-hardcoded here.
-        let exclude = |rel: &Path| sections::is_excluded_section_entry(rel);
-        for section in sections::MANAGED_SECTIONS {
-            let Some(live) = live_roots.path(section.id) else {
-                continue;
+    let manifest =
+        tokio::task::spawn_blocking(move || -> Result<BackupManifest, AppCommandError> {
+            let mut builder = ArchiveBuilder::create(&zip_tmp_c)?;
+            let mut prog = |path: &str, processed: u64| {
+                emit(
+                    &emitter_c,
+                    &op_id_c,
+                    BackupPhase::Archiving,
+                    processed,
+                    Some(total_estimate.max(processed)),
+                    Some(path.to_string()),
+                );
             };
-            match section.kind {
-                SectionKind::Dir => {
-                    builder.add_dir(section.id, live, &exclude, &cancel_c, &mut prog)?
-                }
-                SectionKind::File => {
-                    if live.is_file() {
-                        builder.add_file(section.id, live, &cancel_c, &mut prog)?;
+            builder.add_file("db/harness-studio.db", &db_snapshot_c, &cancel_c, &mut prog)?;
+            // Every harness-studio-owned section, straight off the shared table — see
+            // `sections.rs` for why this must not be re-hardcoded here.
+            let exclude = |rel: &Path| sections::is_excluded_section_entry(rel);
+            for section in sections::MANAGED_SECTIONS {
+                let Some(live) = live_roots.path(section.id) else {
+                    continue;
+                };
+                match section.kind {
+                    SectionKind::Dir => {
+                        builder.add_dir(section.id, live, &exclude, &cancel_c, &mut prog)?
+                    }
+                    SectionKind::File => {
+                        if live.is_file() {
+                            builder.add_file(section.id, live, &cancel_c, &mut prog)?;
+                        }
                     }
                 }
             }
-        }
-        let mut manifest = manifest_template;
-        if include_external {
-            let pack = external::add_external_sources(
-                &mut builder,
-                &external_scratch,
-                &cancel_c,
-                &mut prog,
-            )?;
-            manifest.includes_external_transcripts = pack.packed;
-            // A store that could not be snapshotted cleanly must reach the UI;
-            // a `tracing::warn!` would let a degraded backup be reported as a
-            // clean one.
-            manifest.degraded_sqlite = pack.degraded;
-        }
-        builder.finish(manifest)
-    })
-    .await
-    .map_err(|e| AppCommandError::task_execution_failed("Archive task failed").with_detail(e.to_string()))??;
+            let mut manifest = manifest_template;
+            if include_external {
+                let pack = external::add_external_sources(
+                    &mut builder,
+                    &external_scratch,
+                    &cancel_c,
+                    &mut prog,
+                )?;
+                manifest.includes_external_transcripts = pack.packed;
+                // A store that could not be snapshotted cleanly must reach the UI;
+                // a `tracing::warn!` would let a degraded backup be reported as a
+                // clean one.
+                manifest.degraded_sqlite = pack.degraded;
+            }
+            builder.finish(manifest)
+        })
+        .await
+        .map_err(|e| {
+            AppCommandError::task_execution_failed("Archive task failed").with_detail(e.to_string())
+        })??;
 
     // ── Phase 3: deliver (encrypt or copy) into dest_path atomically ─────
     let part = with_part_suffix(dest_path);
@@ -176,9 +181,14 @@ pub(crate) async fn create_backup_core(
             let part_c = part.clone();
             let pass = pass.to_string();
             let cancel_c = cancel.clone();
-            tokio::task::spawn_blocking(move || crypto::encrypt_file(&zip_tmp_c, &part_c, &pass, &cancel_c))
-                .await
-                .map_err(|e| AppCommandError::task_execution_failed("Encrypt task failed").with_detail(e.to_string()))??;
+            tokio::task::spawn_blocking(move || {
+                crypto::encrypt_file(&zip_tmp_c, &part_c, &pass, &cancel_c)
+            })
+            .await
+            .map_err(|e| {
+                AppCommandError::task_execution_failed("Encrypt task failed")
+                    .with_detail(e.to_string())
+            })??;
         }
         None => {
             tokio::fs::copy(&zip_tmp, &part)
@@ -186,7 +196,9 @@ pub(crate) async fn create_backup_core(
                 .map_err(super::map_disk_full)?;
         }
     }
-    tokio::fs::rename(&part, dest_path).await.map_err(AppCommandError::io)?;
+    tokio::fs::rename(&part, dest_path)
+        .await
+        .map_err(AppCommandError::io)?;
 
     let total = manifest.total_bytes();
     emit(emitter, op_id, BackupPhase::Done, total, Some(total), None);
@@ -202,7 +214,9 @@ pub(crate) async fn scan_external_conflicts_core(
     let zip = zip_path.to_path_buf();
     tokio::task::spawn_blocking(move || super::external::scan_external_conflicts(&zip))
         .await
-        .map_err(|e| AppCommandError::task_execution_failed("Scan task failed").with_detail(e.to_string()))?
+        .map_err(|e| {
+            AppCommandError::task_execution_failed("Scan task failed").with_detail(e.to_string())
+        })?
 }
 
 /// Run `VACUUM INTO` to produce a transactionally-consistent, defragmented
@@ -213,19 +227,27 @@ pub(crate) async fn snapshot_db_to(
 ) -> Result<(), AppCommandError> {
     // VACUUM INTO requires the destination not to exist.
     if dest.exists() {
-        tokio::fs::remove_file(dest).await.map_err(AppCommandError::io)?;
+        tokio::fs::remove_file(dest)
+            .await
+            .map_err(AppCommandError::io)?;
     }
     let dest_lit = dest.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{dest_lit}';");
     conn.execute(Statement::from_string(DbBackend::Sqlite, sql))
         .await
-        .map_err(|e| AppCommandError::database_error("VACUUM INTO failed").with_detail(e.to_string()))?;
+        .map_err(|e| {
+            AppCommandError::database_error("VACUUM INTO failed").with_detail(e.to_string())
+        })?;
     Ok(())
 }
 
 /// Plaintext bytes the archive is about to hold, so the progress bar is not
 /// stuck in the indeterminate state for the whole run. Stat-only.
-fn total_plaintext_bytes(live_roots: &LiveRoots, db_snapshot: &Path, include_external: bool) -> u64 {
+fn total_plaintext_bytes(
+    live_roots: &LiveRoots,
+    db_snapshot: &Path,
+    include_external: bool,
+) -> u64 {
     fn dir_bytes(root: &Path, exclude: &dyn Fn(&Path) -> bool) -> u64 {
         walkdir::WalkDir::new(root)
             .follow_links(false)
@@ -347,7 +369,7 @@ mod tests {
     }
 
     /// Every managed section rooted under `live_base/<id>` so the test drives
-    /// the real `MANAGED_SECTIONS` table without touching the user's `~/.codeg`.
+    /// the real `MANAGED_SECTIONS` table without touching the user's `~/.harnessstudio`.
     fn inputs<'a>(
         conn: &'a DatabaseConnection,
         data_dir: &'a Path,
@@ -375,7 +397,7 @@ mod tests {
         std::fs::create_dir_all(uploads.join(".tmp")).unwrap();
         std::fs::write(uploads.join("att.txt"), b"attachment").unwrap();
         std::fs::write(uploads.join(".tmp/partial"), b"should be skipped").unwrap();
-        let dest = dir.path().join("backup.codeg.zip");
+        let dest = dir.path().join("backup.harnessstudio.zip");
 
         let cancel = CancellationToken::new();
         let manifest = create_backup_core(
@@ -399,7 +421,10 @@ mod tests {
                 .is_dir(),
             "the archive must be assembled under the data dir"
         );
-        assert!(manifest.entries.iter().any(|e| e.path == "db/codeg.db"));
+        assert!(manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "db/harness-studio.db"));
         assert!(manifest.entries.iter().any(|e| e.path == "uploads/att.txt"));
         assert!(!manifest.entries.iter().any(|e| e.path.contains(".tmp")));
 
@@ -417,9 +442,15 @@ mod tests {
 
         // Extract and confirm the snapshot is a real DB carrying our row.
         let out = dir.path().join("out");
-        archive::extract_all(&dest, &out, &manifest, &cancel, &mut archive::null_progress())
-            .unwrap();
-        assert_eq!(count_folders(&out.join("db/codeg.db")).await, 1);
+        archive::extract_all(
+            &dest,
+            &out,
+            &manifest,
+            &cancel,
+            &mut archive::null_progress(),
+        )
+        .unwrap();
+        assert_eq!(count_folders(&out.join("db/harness-studio.db")).await, 1);
     }
 
     #[tokio::test]
@@ -428,7 +459,7 @@ mod tests {
         let db = fresh_disk_db(dir.path()).await;
         let live = dir.path().join("live");
         std::fs::create_dir_all(live.join("uploads")).unwrap();
-        let dest = dir.path().join("backup.codegbak");
+        let dest = dir.path().join("backup.harness_studiobak");
 
         let cancel = CancellationToken::new();
         create_backup_core(
@@ -466,9 +497,10 @@ mod tests {
         );
 
         // Correct passphrase → manifest readable + compatible.
-        let unlocked = super::super::source::prepare_source_core(&dest, dir.path(), Some("s3cret"), false)
-            .await
-            .unwrap();
+        let unlocked =
+            super::super::source::prepare_source_core(&dest, dir.path(), Some("s3cret"), false)
+                .await
+                .unwrap();
         assert!(unlocked.source_id.is_some());
         assert!(unlocked.preview.manifest.is_some());
         assert!(unlocked.preview.compatible);
@@ -477,8 +509,7 @@ mod tests {
     #[tokio::test]
     async fn backup_then_stage_then_apply_roundtrip() {
         use super::super::restore::{
-            apply_pending_restore_with_paths, stage_restore_core, RestoreApplied,
-            PENDING_MARKER,
+            apply_pending_restore_with_paths, stage_restore_core, RestoreApplied, PENDING_MARKER,
         };
 
         let src_dir = tempfile::tempdir().unwrap();
@@ -491,7 +522,7 @@ mod tests {
             .unwrap();
         let live = src_dir.path().join("live");
         std::fs::create_dir_all(live.join("uploads")).unwrap();
-        let dest = src_dir.path().join("backup.codeg.zip");
+        let dest = src_dir.path().join("backup.harnessstudio.zip");
 
         let cancel = CancellationToken::new();
         create_backup_core(
@@ -510,20 +541,21 @@ mod tests {
         let staged = stage_restore_core(
             &dest,
             restore_dir.path(),
-                        &EventEmitter::Noop,
+            &EventEmitter::Noop,
             "r1",
             &cancel,
         )
         .await
         .unwrap();
-        assert!(PathBuf::from(&staged.staging_dir).join("db/codeg.db").exists());
+        assert!(PathBuf::from(&staged.staging_dir)
+            .join("db/harness-studio.db")
+            .exists());
         assert!(restore_dir.path().join(PENDING_MARKER).is_file());
 
         // Apply on "startup" → live DB carries the two seeded folders. Inject
-        // temp section roots so the test never touches ~/.codeg.
+        // temp section roots so the test never touches ~/.harnessstudio.
         let restore_live = LiveRoots::rooted_at(&restore_dir.path().join("live"));
-        let applied =
-            apply_pending_restore_with_paths(restore_dir.path(), &restore_live).unwrap();
+        let applied = apply_pending_restore_with_paths(restore_dir.path(), &restore_live).unwrap();
         assert!(matches!(applied, RestoreApplied::Applied { .. }));
         let db_name = crate::db::database_file_name();
         assert_eq!(count_folders(&restore_dir.path().join(db_name)).await, 2);
@@ -535,14 +567,12 @@ mod tests {
         // A backup whose uploads section is empty must REPLACE (clear) live
         // uploads, not merge — the prior file survives only in the safety
         // snapshot.
-        use super::super::restore::{
-            apply_pending_restore_with_paths, stage_restore_core,
-        };
+        use super::super::restore::{apply_pending_restore_with_paths, stage_restore_core};
         let src_dir = tempfile::tempdir().unwrap();
         let db = fresh_disk_db(src_dir.path()).await;
         let live = src_dir.path().join("live");
         std::fs::create_dir_all(live.join("uploads")).unwrap(); // exists, no files
-        let dest = src_dir.path().join("backup.codeg.zip");
+        let dest = src_dir.path().join("backup.harnessstudio.zip");
         let cancel = CancellationToken::new();
         create_backup_core(
             inputs(&db.conn, src_dir.path(), &live),
@@ -559,7 +589,7 @@ mod tests {
         stage_restore_core(
             &dest,
             restore_dir.path(),
-                        &EventEmitter::Noop,
+            &EventEmitter::Noop,
             "e2",
             &cancel,
         )
@@ -588,9 +618,7 @@ mod tests {
     /// vanishing from users' backups.
     #[tokio::test]
     async fn every_section_is_packed_and_swapped() {
-        use super::super::restore::{
-            apply_pending_restore_with_paths, stage_restore_core,
-        };
+        use super::super::restore::{apply_pending_restore_with_paths, stage_restore_core};
         use super::super::sections::{SectionKind, MANAGED_SECTIONS};
 
         let src_dir = tempfile::tempdir().unwrap();
@@ -612,7 +640,7 @@ mod tests {
             }
         }
 
-        let dest = src_dir.path().join("backup.codeg.zip");
+        let dest = src_dir.path().join("backup.harnessstudio.zip");
         let cancel = CancellationToken::new();
         let manifest = create_backup_core(
             inputs(&db.conn, src_dir.path(), &live),
@@ -658,7 +686,7 @@ mod tests {
         stage_restore_core(
             &dest,
             restore_dir.path(),
-                        &EventEmitter::Noop,
+            &EventEmitter::Noop,
             "sec2",
             &cancel,
         )
@@ -684,13 +712,11 @@ mod tests {
     }
 
     /// D1 itself: the conversation text of a custom ACP agent lives ONLY in
-    /// `~/.codeg/acp-transcripts`, so this is the round-trip that used to lose
+    /// `~/.harnessstudio/acp-transcripts`, so this is the round-trip that used to lose
     /// every message while keeping the conversation row.
     #[tokio::test]
     async fn custom_agent_transcript_survives_roundtrip() {
-        use super::super::restore::{
-            apply_pending_restore_with_paths, stage_restore_core,
-        };
+        use super::super::restore::{apply_pending_restore_with_paths, stage_restore_core};
         let src_dir = tempfile::tempdir().unwrap();
         let db = fresh_disk_db(src_dir.path()).await;
         let live = src_dir.path().join("live");
@@ -698,7 +724,7 @@ mod tests {
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         std::fs::write(&transcript, b"{\"type\":\"user\",\"text\":\"hello\"}\n").unwrap();
 
-        let dest = src_dir.path().join("backup.codeg.zip");
+        let dest = src_dir.path().join("backup.harnessstudio.zip");
         let cancel = CancellationToken::new();
         create_backup_core(
             inputs(&db.conn, src_dir.path(), &live),
@@ -715,7 +741,7 @@ mod tests {
         stage_restore_core(
             &dest,
             restore_dir.path(),
-                        &EventEmitter::Noop,
+            &EventEmitter::Noop,
             "d1b",
             &cancel,
         )
@@ -755,8 +781,10 @@ mod tests {
         assert!(ok && reason.is_none());
 
         // A migration we don't know → newer version, rejected.
-        let (ok, reason) =
-            evaluate_compat(&manifest_with_migration("m99999999_000001_from_the_future", 1));
+        let (ok, reason) = evaluate_compat(&manifest_with_migration(
+            "m99999999_000001_from_the_future",
+            1,
+        ));
         assert!(!ok);
         assert_eq!(reason.as_deref(), Some(BACKUP_I18N_KEY_NEWER_VERSION));
 

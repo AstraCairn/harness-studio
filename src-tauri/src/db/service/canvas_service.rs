@@ -437,9 +437,7 @@ pub async fn create_node(
             CanvasNodeKind::Note => input.content.filter(|s| !s.is_empty()),
             _ => {
                 if input.content.as_deref().is_some_and(|s| !s.is_empty()) {
-                    return Err(DbError::Validation(
-                        "content only applies to notes".into(),
-                    ));
+                    return Err(DbError::Validation("content only applies to notes".into()));
                 }
                 None
             }
@@ -649,9 +647,9 @@ pub async fn group_into_region(
             active.update(&txn).await?
         }
         None => {
-            let geometry = input.geometry.ok_or_else(|| {
-                DbError::Validation("a new region needs its geometry".into())
-            })?;
+            let geometry = input
+                .geometry
+                .ok_or_else(|| DbError::Validation("a new region needs its geometry".into()))?;
             canvas_node::ActiveModel {
                 id: NotSet,
                 board_id: Set(input.board_id),
@@ -942,10 +940,7 @@ pub async fn detach_member(
 
 /// Delete a node. `None` when the node was already gone — nothing changed, so
 /// the caller must not bump-broadcast a phantom event.
-pub async fn delete_node(
-    conn: &DatabaseConnection,
-    node_id: i32,
-) -> Result<Option<i64>, DbError> {
+pub async fn delete_node(conn: &DatabaseConnection, node_id: i32) -> Result<Option<i64>, DbError> {
     let _guard = revision_lock().lock().await;
     let txn = conn.begin().await?;
     claim_writer(&txn).await?;
@@ -1187,14 +1182,17 @@ pub async fn list_boards(conn: &DatabaseConnection) -> Result<Vec<BoardSummary>,
 
     let mut by_board: HashMap<i32, Vec<BoardPreviewRect>> = HashMap::new();
     for f in footprints {
-        by_board.entry(f.board_id).or_default().push(BoardPreviewRect {
-            kind: f.kind,
-            x: f.x,
-            y: f.y,
-            width: f.width,
-            height: f.height,
-            color: f.color,
-        });
+        by_board
+            .entry(f.board_id)
+            .or_default()
+            .push(BoardPreviewRect {
+                kind: f.kind,
+                x: f.x,
+                y: f.y,
+                width: f.width,
+                height: f.height,
+                color: f.color,
+            });
     }
 
     Ok(boards

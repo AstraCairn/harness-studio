@@ -6,8 +6,8 @@ Nine files, copied byte-for-byte from
 
 They are the complete import closure of `injected/ariaSnapshot.ts` — the tree
 Playwright itself builds for `page.ariaSnapshot()` and Playwright MCP. We call
-it in `ai` mode, so the shape an agent reads from a codeg tab is the shape it
-already knows from Playwright MCP.
+it in `ai` mode, so the shape an agent reads from a harness studio tab is the
+shape it already knows from Playwright MCP.
 
 | upstream path | bytes |
 | --- | --- |

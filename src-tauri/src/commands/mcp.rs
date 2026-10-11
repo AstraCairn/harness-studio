@@ -16,7 +16,7 @@ static MARKETPLACE_HTTP_CLIENT: LazyLock<Result<reqwest::Client, String>> = Lazy
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
-        .user_agent("codeg-mcp-market/1.0")
+        .user_agent("harness-studio-mcp-market/1.0")
         .build()
         .map_err(|e| format!("failed to initialize marketplace HTTP client: {e}"))
 });
@@ -71,7 +71,7 @@ pub enum McpAppType {
     Qoder,
     /// Serializes as `antigravity`, matching `AgentType::as_wire`.
     Antigravity,
-    /// Serializes as `pi`, matching `AgentType::as_wire`. Scan-only: codeg
+    /// Serializes as `pi`, matching `AgentType::as_wire`. Scan-only: harness_studio
     /// reads and round-trips the pi MCP EXTENSION's config, but pi is not an
     /// assignable target and gets no MCP over the ACP wire. See the pi section
     /// below.
@@ -124,7 +124,7 @@ pub struct LocalMcpSourceWarning {
     pub message: String,
 }
 
-/// A local scan: every server codeg could read, plus a warning per source it
+/// A local scan: every server harness_studio could read, plus a warning per source it
 /// could not.
 ///
 /// Deliberately not a bare `Vec<LocalMcpServer>` with a fail-fast error. These
@@ -574,7 +574,7 @@ fn normalize_apps(apps: Vec<McpAppType>) -> Vec<McpAppType> {
 /// Whether `app`'s on-disk config can faithfully host `canonical_spec`. Codex's
 /// config.toml has only stdio and streamable-HTTP transports, so it cannot host an
 /// SSE server — writing one would persist a url-only entry that Codex loads as HTTP
-/// and codeg then reads back as `http`, silently reclassifying the shared canonical
+/// and harness_studio then reads back as `http`, silently reclassifying the shared canonical
 /// spec. Write paths preflight-exclude such (app, spec) pairs instead of writing a
 /// misrepresented entry or aborting the whole multi-agent operation. See issue #325.
 fn app_can_host_spec(app: McpAppType, canonical_spec: &Value) -> bool {
@@ -736,7 +736,7 @@ fn claude_settings_path() -> PathBuf {
     home_dir_or_default().join(".claude").join("settings.json")
 }
 
-/// The marketplace suffix codeg uses when toggling user-scope Claude Code
+/// The marketplace suffix harness_studio uses when toggling user-scope Claude Code
 /// MCP servers via `enabledPlugins`. Empirically validated: `figma@local`
 /// activates a user-scope MCP, `figma@user` does not. The suffix is treated
 /// by Claude Code CLI as a free-form tag identifying the source — `local`
@@ -777,12 +777,12 @@ fn cline_config_path() -> PathBuf {
 }
 
 /// Read a file that is absent for most users, distinguishing "nobody has
-/// configured this agent" from "this agent's config exists and codeg could not
+/// configured this agent" from "this agent's config exists and harness_studio could not
 /// read it".
 ///
 /// The absence test is the read itself, not `Path::exists()`: `exists()`
 /// answers `false` for ANY failed stat — a permission wall on a parent
-/// directory, a symlink loop — so it would report a file codeg simply could not
+/// directory, a symlink loop — so it would report a file harness_studio simply could not
 /// open as an empty config. `scan_local_servers` would then leave that agent
 /// out with no warning, and `require_complete_scan` would wave through a
 /// reassignment that strips the server from the agents it COULD read and then
@@ -815,13 +815,13 @@ fn read_json_file(path: &Path) -> Result<Value, AppCommandError> {
     // JSON-backed source.
     //
     // The writers share this reader, so an agent that truncates its config
-    // before rewriting it can be caught mid-write and have codeg start from
+    // before rewriting it can be caught mid-write and have harness_studio start from
     // `{}` — and unlike the ordinary stale read this subsystem already lives
     // with (nothing locks these files), that one loses settings even when the
     // agent's rewrite changed nothing. It is accepted deliberately: the window
     // is one non-atomic rewrite wide, while REFUSING empty files would leave a
     // user whose config is PERSISTENTLY 0 bytes — the reported case — unable to
-    // assign a server to that agent at all, and codeg cannot tell the two
+    // assign a server to that agent at all, and harness_studio cannot tell the two
     // apart from a single read.
     if raw.trim().is_empty() {
         return Ok(json!({}));
@@ -1344,10 +1344,10 @@ fn codex_entry_to_canonical(id: &str, value: &toml::Value) -> Result<Value, AppC
 
     // Codex's native `[mcp_servers.*]` tables carry no `type` key — the transport
     // is implied by the keys present (`command` = stdio, `url` = streamable HTTP).
-    // Honor an explicit `type` when present (older codeg output or hand-written
+    // Honor an explicit `type` when present (older harness_studio output or hand-written
     // configs), but when it is absent infer the transport from the keys rather
     // than blindly assuming stdio, which would drop every url-only HTTP server
-    // (including the ones codeg now writes). See issue #325.
+    // (including the ones harness_studio now writes). See issue #325.
     let raw_type = table
         .get("type")
         .and_then(toml::Value::as_str)
@@ -1605,7 +1605,7 @@ fn canonical_to_codex_entry(spec: &Value) -> Result<toml::Value, AppCommandError
         "sse" => {
             // Codex's config.toml has only stdio and streamable-HTTP transports — it
             // cannot represent SSE. Reject rather than degrade to a bare `url`, which
-            // Codex would load as HTTP and codeg would then read back as `http`,
+            // Codex would load as HTTP and harness_studio would then read back as `http`,
             // silently reclassifying the shared canonical spec (and defeating the ACP
             // wire-path SSE capability gate). Batch callers preflight-exclude Codex
             // from an SSE server's targets (see `app_can_host_spec`); this is the
@@ -1801,7 +1801,9 @@ fn codebuddy_config_path() -> PathBuf {
 }
 
 fn codebuddy_settings_path() -> PathBuf {
-    home_dir_or_default().join(".codebuddy").join("settings.json")
+    home_dir_or_default()
+        .join(".codebuddy")
+        .join("settings.json")
 }
 
 fn read_codebuddy_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
@@ -2363,13 +2365,13 @@ fn read_cline_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
     Ok(out)
 }
 
-/// Convert codeg's canonical spec into a Cline `mcpServers` entry.
+/// Convert harness_studio's canonical spec into a Cline `mcpServers` entry.
 ///
 /// Cline validates each entry with a zod union whose `type` is a literal enum of
 /// exactly `stdio | sse | streamableHttp` — it does NOT accept the canonical
 /// `http`. Worse, `mcpServers` is validated as one `z.record`, so a single
 /// rejected entry makes Cline load *zero* servers. Remap `http` → `streamableHttp`
-/// (which codeg's reader collapses straight back to canonical `http` via
+/// (which harness_studio's reader collapses straight back to canonical `http` via
 /// `normalize_mcp_type`); stdio/sse already match Cline's literals and pass
 /// through untouched. See issue #325.
 fn canonical_to_cline_entry(spec: &Value) -> Result<Value, AppCommandError> {
@@ -2439,14 +2441,14 @@ fn remove_cline_server(id: &str) -> Result<bool, AppCommandError> {
 // Unlike every other agent above, this file is NOT read by the agent: the
 // deepseek-acp bridge takes MCP servers exclusively as `session/new`'s
 // `mcpServers` parameter and mounts them per session (that isolation is the
-// whole point of its design). The store below is therefore codeg's own record
+// whole point of its design). The store below is therefore harness_studio's own record
 // of "which servers should DeepSeek get", and `load_mcp_servers_for_agent`
 // forwards it over the ACP wire at every session birth — which is also why
 // `DeepSeek` is deliberately NOT on the forward skip list in `connection.rs`.
 //
 // It lives under the harness home (relocatable via `DSH_HOME`) rather than in
-// codeg's own data dir so it travels with the rest of the DeepSeek state a
-// user backs up or moves, and it holds codeg's canonical spec shape verbatim
+// harness_studio's own data dir so it travels with the rest of the DeepSeek state a
+// user backs up or moves, and it holds harness_studio's canonical spec shape verbatim
 // (`type` + `command`/`args`/`env` | `url`/`headers`) — there is no foreign
 // schema to translate to.
 //
@@ -2464,7 +2466,7 @@ fn deepseek_mcp_json_path() -> PathBuf {
 /// Write the DeepSeek MCP store with owner-only permissions.
 ///
 /// Every other agent's store is created by the agent itself, with whatever
-/// mode that agent chose; this one is created by CODEG, so its mode is codeg's
+/// mode that agent chose; this one is created by HARNESS_STUDIO, so its mode is harness_studio's
 /// responsibility — and a stdio entry's `env` map routinely carries the token
 /// the server authenticates with. Under the usual `022` umask a plain
 /// `fs::write` would leave a fresh file `0644`, readable by every local user.
@@ -2619,10 +2621,10 @@ fn remove_deepseek_server_at(path: &Path, id: &str) -> Result<bool, AppCommandEr
 // ---------------------------------------------------------------------------
 // pi  (<PI_CODING_AGENT_DIR|~/.pi/agent>/mcp.json  →  top-level `mcpServers`)
 //
-// The odd one out: this file belongs to neither pi nor codeg but to a
+// The odd one out: this file belongs to neither pi nor harness_studio but to a
 // THIRD-PARTY pi extension — pi itself has no MCP support, and the extension is
 // what reads `mcpServers` and mounts the servers. The schema it accepts is
-// Claude Code's (`command`/`args`/`env` | `url`/`headers`), which is codeg's
+// Claude Code's (`command`/`args`/`env` | `url`/`headers`), which is harness_studio's
 // canonical shape, so no translation layer is needed (issue #653).
 //
 // SCAN-ONLY, in both directions:
@@ -2848,13 +2850,13 @@ fn remove_qoder_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError
 // `antigravity-acp/`. Entries are Claude-shaped — `command`/`args`/`env` for
 // stdio, `url` for remote (the loader keys off which of the two is present) —
 // and it tolerates both `{"mcpServers": {...}}` and a bare top-level map;
-// codeg always writes the explicit `mcpServers` wrapper.
+// harness_studio always writes the explicit `mcpServers` wrapper.
 //
 // Antigravity therefore sits ON the ACP forward skip list in `connection.rs`
 // (with Hermes/Kimi/Grok/Cursor/Qoder). The server would in fact MERGE the two
 // sources by name with the wire winning, so a double-mount is not possible —
 // but defining the same server twice is still noise, and the built-in
-// `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so
+// `harness-studio-mcp` companion is injected separately by `inject_harness_studio_mcp`, so
 // delegation keeps working either way.
 // ---------------------------------------------------------------------------
 
@@ -2862,7 +2864,7 @@ fn antigravity_mcp_config_path() -> PathBuf {
     crate::parsers::antigravity::resolve_antigravity_shared_config_dir().join("mcp_config.json")
 }
 
-/// Whether Antigravity's config holds an `mcpServers` value codeg refuses to
+/// Whether Antigravity's config holds an `mcpServers` value harness_studio refuses to
 /// touch (see [`antigravity_servers_object`]). Pure, and shared by the writer
 /// and the preflight below so the two can never disagree about what is
 /// editable.
@@ -2934,14 +2936,14 @@ fn read_antigravity_servers() -> Result<BTreeMap<String, Value>, AppCommandError
 /// The loader accepts BOTH `{"mcpServers": {...}}` and a bare top-level map —
 /// literally `data.get("mcpServers", data)`. That fallback is winner-take-all:
 /// the moment an `mcpServers` key exists, every bare sibling stops being read.
-/// So codeg cannot just add the wrapper to a bare document; doing that would
+/// So harness_studio cannot just add the wrapper to a bare document; doing that would
 /// silently unmount every server the user already had. Bare entries are moved
 /// INTO the wrapper instead, which is exactly the set the loader was returning
 /// before, so the agent sees no change.
 ///
 /// A present-but-not-an-object `mcpServers` is an `Err`, not something to
 /// migrate around: the loader hands that value straight to its `isinstance`
-/// check and rejects the WHOLE file, so codeg cannot know what the key means,
+/// check and rejects the WHOLE file, so harness_studio cannot know what the key means,
 /// and dropping it to make room for a wrapper would destroy it. Refusing the
 /// edit leaves the file exactly as the user wrote it — the same fail-closed
 /// rule the Antigravity settings writer follows.
@@ -2977,7 +2979,7 @@ fn antigravity_servers_object(root: &mut Value) -> Result<&mut Map<String, Value
 /// reports both for a non-object root and for a malformed `mcpServers` —
 /// `data.get("mcpServers", data)` returns that malformed value and the
 /// `isinstance` check below it then rejects the file. It does NOT fall back to
-/// the root in that case, so neither may codeg: reporting the root's siblings
+/// the root in that case, so neither may harness_studio: reporting the root's siblings
 /// as mounted servers would claim something the agent never sees.
 fn antigravity_servers_view(root: &Value) -> Option<&Map<String, Value>> {
     match root.get("mcpServers") {
@@ -3102,7 +3104,7 @@ fn local_mcp_readers() -> [LocalMcpReader; 15] {
 /// be read into a warning instead of failing the whole scan.
 ///
 /// These files belong to the other agents and to the user, so any of them can be
-/// empty, half-written or hand-edited into something codeg cannot parse. A
+/// empty, half-written or hand-edited into something harness_studio cannot parse. A
 /// fail-fast `?` here meant one such file hid every OTHER agent's servers too
 /// (issue #632: an empty `~/.gemini/config/mcp_config.json` emptied the entire
 /// local MCP list). The broken source drops out; the rest of the scan stands.
@@ -3114,7 +3116,7 @@ fn scan_local_servers_from_readers(readers: &[LocalMcpReader]) -> LocalMcpScan {
     let mut warnings: Vec<LocalMcpSourceWarning> = Vec::new();
     // OpenClaw is the one agent that shares a key with Kimi (`auth`), so keep
     // what its own config declares: below, that is what tells Kimi's pass an
-    // OpenClaw setting from an echo codeg once wrote into some other agent's
+    // OpenClaw setting from an echo harness_studio once wrote into some other agent's
     // file — and it has to be the VALUE, since the agent that wins the merge may
     // carry neither. See `KIMI_SHARED_KEYS`.
     let mut openclaw_declares: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
@@ -3263,7 +3265,7 @@ pub fn read_servers_for_agent_type(
         // change the servers forwarded to a pi ACP session.
         AgentType::Pi => Ok(BTreeMap::new()),
         // deepseek-acp has no native MCP config file: it takes servers only
-        // as `session/new`'s `mcpServers`. `$DSH_HOME/mcp.json` is codeg's own
+        // as `session/new`'s `mcpServers`. `$DSH_HOME/mcp.json` is harness_studio's own
         // record of what to send, and the ACP wire is the delivery path — so
         // unlike Kimi/Grok/Cursor, DeepSeek must stay OFF the forward skip
         // list in `connection.rs` or these servers never arrive.
@@ -3277,7 +3279,7 @@ pub fn read_servers_for_agent_type(
         // it rides the forward skip list rather than the wire.
         AgentType::Antigravity => read_antigravity_servers(),
         // Custom agents get MCP purely over the ACP wire (`session/new`'s
-        // `mcpServers`); codeg deliberately knows nothing about their native
+        // `mcpServers`); harness_studio deliberately knows nothing about their native
         // config files, so there is no per-agent store to read back here.
         AgentType::Custom(_) => Ok(BTreeMap::new()),
     }
@@ -3293,8 +3295,8 @@ pub fn read_servers_for_agent_type(
 //
 // Because Kimi loads this file natively at session start, `KimiCode` is on the
 // ACP forward skip list in `connection.rs` (like Hermes) so the same user
-// servers aren't double-registered over `session/new`. The built-in `codeg-mcp`
-// companion is injected separately by `inject_codeg_mcp`, so it still reaches
+// servers aren't double-registered over `session/new`. The built-in `harness-studio-mcp`
+// companion is injected separately by `inject_harness_studio_mcp`, so it still reaches
 // Kimi regardless.
 // ---------------------------------------------------------------------------
 
@@ -3306,12 +3308,12 @@ fn read_kimi_code_servers() -> Result<BTreeMap<String, Value>, AppCommandError> 
     read_kimi_code_servers_at(&kimi_code_mcp_json_path())
 }
 
-/// Convert one Kimi `mcpServers` entry into codeg's canonical spec.
+/// Convert one Kimi `mcpServers` entry into harness_studio's canonical spec.
 ///
 /// Kimi Code validates `mcp.json` with a Zod discriminated union keyed on
 /// `transport` (`stdio`/`http`/`sse`): `command` ⇒ stdio, and a url-only remote
 /// entry DEFAULTS to streamable HTTP — it never infers SSE from the URL path, and
-/// `type` is not a recognized field (silently stripped). Mirror that so codeg
+/// `type` is not a recognized field (silently stripped). Mirror that so harness_studio
 /// classifies an entry the way Kimi actually will: stdio from `command`; otherwise
 /// a `url` is remote with transport taken from an explicit `transport` key (only
 /// `sse` yields SSE), else HTTP. `type` is intentionally NOT consulted for remote
@@ -3339,7 +3341,10 @@ fn kimi_code_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, AppComm
     // Read the discriminant into an owned value first so the map isn't borrowed when
     // we mutate it below. `transport` absent ⇒ infer; present-but-non-string or an
     // unknown literal ⇒ reject (as Kimi would).
-    let explicit_transport = obj.get("transport").and_then(Value::as_str).map(str::to_string);
+    let explicit_transport = obj
+        .get("transport")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if obj.contains_key("transport") {
         let canonical_type = match explicit_transport.as_deref() {
             Some("stdio") => "stdio",
@@ -3352,7 +3357,10 @@ fn kimi_code_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, AppComm
                 )));
             }
         };
-        obj.insert("type".to_string(), Value::String(canonical_type.to_string()));
+        obj.insert(
+            "type".to_string(),
+            Value::String(canonical_type.to_string()),
+        );
     }
     obj.remove("transport");
     canonicalize_spec(&Value::Object(obj), &format!("Kimi Code config '{id}'"))
@@ -3401,7 +3409,7 @@ fn is_kimi_timeout_ms(value: &Value) -> bool {
     ms.fract() == 0.0 && (1.0..=f64::from(i32::MAX)).contains(&ms)
 }
 
-/// The `mcp.json` fields Kimi models that no other agent codeg writes models —
+/// The `mcp.json` fields Kimi models that no other agent harness_studio writes models —
 /// checked against every per-server schema in this file plus OpenClaw's
 /// `McpServerConfig` and Cline's `McpServerRegistration`, the two richest. That
 /// exclusivity is what lets Kimi's copy be authoritative for them in
@@ -3421,7 +3429,7 @@ const KIMI_OWNED_KEYS: &[&str] = &[
 /// `McpServerConfig`. For these the OWNER's value wins, with Kimi's as the
 /// fallback — `scan_local_servers` collects it during the OpenClaw pass and
 /// hands it to `merge_kimi_extension_fields`. A copy held by any OTHER agent is
-/// only an echo codeg once wrote there and never wins, so removing the key in
+/// only an echo harness_studio once wrote there and never wins, so removing the key in
 /// either owner's config still takes effect.
 const KIMI_SHARED_KEYS: &[&str] = &["auth"];
 
@@ -3452,7 +3460,7 @@ fn is_kimi_extension_field(key: &str, value: &Value, stdio: bool) -> bool {
 /// Resolve the Kimi-only fields of the canonical spec a server resolved to from
 /// Kimi's own copy.
 ///
-/// codeg keeps ONE canonical spec per server across every agent, and
+/// harness_studio keeps ONE canonical spec per server across every agent, and
 /// `scan_local_servers` resolves a server present in several agents to the FIRST
 /// agent's copy. A server that also lives in, say, Codex's config would
 /// otherwise surface as Codex's projection, which never carried Kimi's fields —
@@ -3463,7 +3471,7 @@ fn is_kimi_extension_field(key: &str, value: &Value, stdio: bool) -> bool {
 /// removed it, not that some other agent's reader never had it.
 ///
 /// For [`KIMI_OWNED_KEYS`] Kimi's copy wins outright, its ABSENCE included.
-/// Those keys mean nothing to any other agent, but codeg's permissive writers do
+/// Those keys mean nothing to any other agent, but harness_studio's permissive writers do
 /// copy them into other agents' config files — so an earlier-scanned agent can
 /// hold a stale echo of one, and letting that echo stand would pin the canonical
 /// spec to a value the user has since changed or deleted in Kimi's own
@@ -3503,7 +3511,7 @@ fn merge_kimi_extension_fields(
     }
 }
 
-/// Convert codeg's canonical spec into a Kimi `mcpServers` entry.
+/// Convert harness_studio's canonical spec into a Kimi `mcpServers` entry.
 ///
 /// Kimi Code keys the transport off a `transport` field (Zod
 /// discriminated union), defaulting a url-only remote entry to streamable HTTP — an
@@ -3531,7 +3539,7 @@ fn canonical_to_kimi_code_entry(spec: &Value) -> Result<Value, AppCommandError> 
     // carry Kimi-compatible types; `type` is kept but Kimi ignores/strips it.
     // See issue #325.
     //
-    // `is_kimi_extension_field` covers the keys Kimi models but codeg has no UI
+    // `is_kimi_extension_field` covers the keys Kimi models but harness_studio has no UI
     // for. They exist on disk when the user set them through Kimi's own
     // `/mcp-config`, and dropping them would quietly break that server — an
     // OAuth'd remote losing its `auth`, or a `runtime_id`/`executor` entry
@@ -3549,7 +3557,10 @@ fn canonical_to_kimi_code_entry(spec: &Value) -> Result<Value, AppCommandError> 
         }
     }
     if let Some(transport) = transport {
-        out.insert("transport".to_string(), Value::String(transport.to_string()));
+        out.insert(
+            "transport".to_string(),
+            Value::String(transport.to_string()),
+        );
     }
     Ok(Value::Object(out))
 }
@@ -3558,11 +3569,7 @@ fn upsert_kimi_code_server(id: &str, spec: &Value) -> Result<(), AppCommandError
     upsert_kimi_code_server_at(&kimi_code_mcp_json_path(), id, spec)
 }
 
-fn upsert_kimi_code_server_at(
-    path: &Path,
-    id: &str,
-    spec: &Value,
-) -> Result<(), AppCommandError> {
+fn upsert_kimi_code_server_at(path: &Path, id: &str, spec: &Value) -> Result<(), AppCommandError> {
     let mut root = read_json_file(path)?;
     if !root.is_object() {
         root = json!({});
@@ -3624,8 +3631,8 @@ fn remove_kimi_code_server_at(path: &Path, id: &str) -> Result<bool, AppCommandE
 //
 // Because Grok loads this file natively at session start, `Grok` is on the ACP
 // forward skip list in `connection.rs` (like Hermes/Kimi) so the same user
-// servers aren't double-registered over `session/new`. The built-in `codeg-mcp`
-// companion is injected separately by `inject_codeg_mcp`, so it still reaches
+// servers aren't double-registered over `session/new`. The built-in `harness-studio-mcp`
+// companion is injected separately by `inject_harness_studio_mcp`, so it still reaches
 // Grok over the wire regardless.
 // ---------------------------------------------------------------------------
 
@@ -3654,7 +3661,10 @@ fn write_grok_root_toml_at(path: &Path, root: &toml::Value) -> Result<(), AppCom
         fs::create_dir_all(parent).map_err(AppCommandError::io)?;
     }
     let serialized = toml::to_string_pretty(root).map_err(|e| {
-        mcp_configuration_invalid(format!("failed to serialize TOML for {}: {e}", path.display()))
+        mcp_configuration_invalid(format!(
+            "failed to serialize TOML for {}: {e}",
+            path.display()
+        ))
     })?;
     fs::write(path, format!("{serialized}\n")).map_err(AppCommandError::io)
 }
@@ -3675,7 +3685,10 @@ fn canonical_to_grok_entry(spec: &Value) -> Result<toml::Value, AppCommandError>
             let command = obj.get("command").and_then(Value::as_str).ok_or_else(|| {
                 mcp_invalid_input("Grok conversion: stdio MCP spec missing command")
             })?;
-            table.insert("command".to_string(), toml::Value::String(command.to_string()));
+            table.insert(
+                "command".to_string(),
+                toml::Value::String(command.to_string()),
+            );
             if let Some(args) = obj.get("args").and_then(Value::as_array) {
                 let values = args
                     .iter()
@@ -3784,8 +3797,15 @@ fn grok_entry_to_canonical(id: &str, value: &toml::Value) -> Result<Value, AppCo
         || (has_url && explicit_type != Some("stdio"));
 
     if is_remote {
-        let canonical_type = if explicit_type == Some("sse") { "sse" } else { "http" };
-        spec.insert("type".to_string(), Value::String(canonical_type.to_string()));
+        let canonical_type = if explicit_type == Some("sse") {
+            "sse"
+        } else {
+            "http"
+        };
+        spec.insert(
+            "type".to_string(),
+            Value::String(canonical_type.to_string()),
+        );
         if let Some(url) = table.get("url").and_then(toml::Value::as_str) {
             spec.insert("url".to_string(), Value::String(url.trim().to_string()));
         }
@@ -3926,7 +3946,10 @@ fn remove_grok_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError>
         return Ok(false);
     };
     let mut removed = false;
-    if let Some(mcp_servers) = table.get_mut("mcp_servers").and_then(toml::Value::as_table_mut) {
+    if let Some(mcp_servers) = table
+        .get_mut("mcp_servers")
+        .and_then(toml::Value::as_table_mut)
+    {
         removed |= mcp_servers.remove(id).is_some();
         if mcp_servers.is_empty() {
             table.remove("mcp_servers");
@@ -3954,7 +3977,7 @@ fn remove_grok_server_at(path: &Path, id: &str) -> Result<bool, AppCommandError>
 // Because Cursor loads this file natively at session start, `Cursor` is on the
 // ACP forward skip list in `connection.rs` (like Hermes/Kimi/Grok) so the same
 // user servers aren't double-registered over `session/new`. The built-in
-// `codeg-mcp` companion is injected separately by `inject_codeg_mcp`, so it
+// `harness-studio-mcp` companion is injected separately by `inject_harness_studio_mcp`, so it
 // still reaches Cursor over the wire regardless.
 // ---------------------------------------------------------------------------
 
@@ -3963,7 +3986,10 @@ fn cursor_mcp_json_path() -> PathBuf {
     // user-level MCP config from a hardcoded `~/.cursor/mcp.json` (every
     // loader in the 2026.07.16 bundle joins `homedir()`), even when
     // `CURSOR_CONFIG_DIR`/`XDG_CONFIG_HOME` relocate chats + cli-config.json.
-    dirs::home_dir().unwrap_or_default().join(".cursor").join("mcp.json")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".cursor")
+        .join("mcp.json")
 }
 
 fn read_cursor_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
@@ -3999,7 +4025,7 @@ fn read_cursor_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, AppCom
     Ok(out)
 }
 
-/// Convert codeg's canonical spec into a Cursor `mcpServers` entry: only the
+/// Convert harness_studio's canonical spec into a Cursor `mcpServers` entry: only the
 /// fields Cursor models, shape-discriminated (no `type`/`transport` key).
 fn canonical_to_cursor_entry(spec: &Value) -> Result<Value, AppCommandError> {
     let canonical = canonicalize_spec(spec, "Cursor write")?;
@@ -4077,7 +4103,7 @@ fn remove_cursor_server_at(path: &Path, id: &str) -> Result<bool, AppCommandErro
 // Hermes Agent  (~/.hermes/config.yaml  →  mcp_servers)
 //
 // Hermes reads the `mcp_servers` section of its own config.yaml natively at
-// launch (registering each as an `mcp-<name>` toolset), so codeg manages that
+// launch (registering each as an `mcp-<name>` toolset), so harness_studio manages that
 // section directly — the same "write the agent's own config file" model used
 // for Codex/OpenCode — rather than forwarding servers over the ACP wire. The
 // ACP forward path (`load_mcp_servers_for_agent`) deliberately skips Hermes to
@@ -4085,10 +4111,10 @@ fn remove_cursor_server_at(path: &Path, id: &str) -> Result<bool, AppCommandErro
 //
 // Hermes' entry shape: stdio = `{command, args, env}`; remote = `{url}` (+
 // `transport: sse` for SSE, optional `headers` / `client_cert` / `client_key`).
-// Translate to/from codeg's canonical spec, whose discriminator is `type`.
+// Translate to/from harness_studio's canonical spec, whose discriminator is `type`.
 // ---------------------------------------------------------------------------
 
-/// Convert one Hermes `mcp_servers` YAML entry into codeg's canonical spec.
+/// Convert one Hermes `mcp_servers` YAML entry into harness_studio's canonical spec.
 fn hermes_entry_to_canonical(
     entry: &serde_yaml::Value,
     id: &str,
@@ -4128,7 +4154,7 @@ fn hermes_entry_to_canonical(
     canonicalize_spec(&json, &source)
 }
 
-/// Convert codeg's canonical spec into a Hermes `mcp_servers` YAML entry.
+/// Convert harness_studio's canonical spec into a Hermes `mcp_servers` YAML entry.
 fn canonical_to_hermes_entry(spec: &Value) -> Result<serde_yaml::Value, AppCommandError> {
     let canonical = canonicalize_spec(spec, "Hermes conversion")?;
     let obj = canonical
@@ -4237,7 +4263,7 @@ fn read_hermes_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, AppCom
 /// preserving every other key. Written through the Hermes secret writer
 /// (owner-only perms, symlink-preserving) since the file can carry env secrets.
 /// Note: like the structured model save, this round-trips config.yaml through
-/// serde_yaml and so drops comments — consistent with codeg's existing Hermes
+/// serde_yaml and so drops comments — consistent with harness_studio's existing Hermes
 /// config edits.
 fn upsert_hermes_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
     use serde_yaml::{Mapping, Value as Yaml};
@@ -6330,7 +6356,7 @@ mod tests {
 
         // The list survives the broken source; a reassignment computed from that
         // same list must not, or Antigravity is dropped from the "keep it here"
-        // set purely because codeg could not read it.
+        // set purely because harness_studio could not read it.
         let err = require_complete_scan(&scan_local_servers_from_readers(&readers))
             .expect_err("writers must stay fail-closed on a degraded scan");
         assert!(
@@ -6466,7 +6492,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mcp.json");
 
-        assert!(read_cursor_servers_at(&path).expect("read missing").is_empty());
+        assert!(read_cursor_servers_at(&path)
+            .expect("read missing")
+            .is_empty());
         assert!(!remove_cursor_server_at(&path, "ctx7").expect("remove missing"));
 
         // Upsert a stdio server; the canonical `type` must not reach disk.
@@ -6486,7 +6514,10 @@ mod tests {
         // Read-back canonicalizes (command ⇒ stdio).
         let servers = read_cursor_servers_at(&path).expect("read back");
         assert_eq!(
-            servers.get("ctx7").and_then(|s| s.get("type")).and_then(Value::as_str),
+            servers
+                .get("ctx7")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str),
             Some("stdio")
         );
 
@@ -6503,7 +6534,10 @@ mod tests {
         assert!(root2.pointer("/mcpServers/remote/type").is_none());
         let servers2 = read_cursor_servers_at(&path).expect("read back 2");
         assert_eq!(
-            servers2.get("remote").and_then(|s| s.get("type")).and_then(Value::as_str),
+            servers2
+                .get("remote")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str),
             Some("http"),
             "url-only entries classify as http (Cursor auto-negotiates)"
         );
@@ -6511,12 +6545,14 @@ mod tests {
         // Remove round-trips.
         assert!(remove_cursor_server_at(&path, "ctx7").expect("remove"));
         assert!(remove_cursor_server_at(&path, "remote").expect("remove remote"));
-        assert!(read_cursor_servers_at(&path).expect("read after remove").is_empty());
+        assert!(read_cursor_servers_at(&path)
+            .expect("read after remove")
+            .is_empty());
     }
 
     #[test]
     fn deepseek_mcp_json_round_trips_the_canonical_spec() {
-        // `$DSH_HOME/mcp.json` is codeg's OWN store (deepseek-acp reads no MCP
+        // `$DSH_HOME/mcp.json` is harness_studio's OWN store (deepseek-acp reads no MCP
         // file; the wire is the delivery path), so unlike every other agent it
         // keeps the canonical spec verbatim — `type` included. Round-tripping
         // it unchanged is what lets `load_mcp_servers_for_agent` map the entry
@@ -6572,11 +6608,11 @@ mod tests {
             Some("http")
         );
         // The type IS persisted here (no foreign schema to strip it for).
-        let root: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("read file"))
-                .expect("parse json");
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read file"))
+            .expect("parse json");
         assert_eq!(
-            root.pointer("/mcpServers/ctx7/type").and_then(Value::as_str),
+            root.pointer("/mcpServers/ctx7/type")
+                .and_then(Value::as_str),
             Some("stdio")
         );
 
@@ -6602,7 +6638,7 @@ mod tests {
     fn deepseek_mcp_store_is_not_world_readable() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        // codeg CREATES this file (no other agent's store works that way), and
+        // harness_studio CREATES this file (no other agent's store works that way), and
         // a stdio entry's `env` carries the server's token — so a fresh file
         // must not inherit the umask's `0644`.
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6615,7 +6651,11 @@ mod tests {
         .expect("upsert");
 
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-        assert_eq!(mode & 0o077, 0, "fresh store must be owner-only, got {mode:o}");
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "fresh store must be owner-only, got {mode:o}"
+        );
         let parent_mode = std::fs::metadata(path.parent().expect("parent"))
             .expect("stat parent")
             .permissions()
@@ -6637,7 +6677,8 @@ mod tests {
         );
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod 640");
-        upsert_deepseek_server_at(&path, "ctx7", &json!({ "command": "npx" })).expect("re-upsert 2");
+        upsert_deepseek_server_at(&path, "ctx7", &json!({ "command": "npx" }))
+            .expect("re-upsert 2");
         assert_eq!(
             std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777,
             0o640,
@@ -6698,7 +6739,7 @@ mod tests {
 
         // A MALFORMED `mcpServers` is not something to migrate around. The
         // loader hands that value to its `isinstance` check and rejects the
-        // WHOLE file — it does NOT fall back to the root — so codeg must
+        // WHOLE file — it does NOT fall back to the root — so harness_studio must
         // report no servers, and must refuse to edit rather than delete a key
         // whose meaning it cannot read.
         let malformed = dir.path().join("malformed.json");
@@ -6708,7 +6749,7 @@ mod tests {
         let seen = read_antigravity_servers_at(&malformed).expect("read malformed");
         assert!(
             seen.is_empty(),
-            "the agent sees nothing here, so neither may codeg: {seen:?}"
+            "the agent sees nothing here, so neither may harness_studio: {seen:?}"
         );
         assert!(
             upsert_antigravity_server_at(&malformed, "x", &json!({ "command": "x" })).is_err(),
@@ -6833,7 +6874,7 @@ mod tests {
                 .contains_key("ctx7"));
         }
 
-        // A file with actual content that is not JSON is still an error: codeg
+        // A file with actual content that is not JSON is still an error: harness_studio
         // must not overwrite something the user wrote and it failed to read.
         let broken = dir.path().join("broken.json");
         std::fs::write(&broken, "{ not json").expect("seed broken");
@@ -6843,7 +6884,7 @@ mod tests {
     #[test]
     fn a_config_that_cannot_be_stat_ed_is_an_error_not_an_empty_one() {
         // Absence is decided by the read, not by `Path::exists()`: `exists()`
-        // answers `false` for any failed stat, so a config codeg cannot open
+        // answers `false` for any failed stat, so a config harness_studio cannot open
         // would be reported as "this agent has none" — silently, with no
         // warning for `require_complete_scan` to refuse a reassignment on.
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6915,7 +6956,11 @@ mod tests {
         // `?`, so a single broken config hid EVERY agent's servers behind one
         // "load failed" banner. A bad source must degrade to a warning.
         let scan = scan_local_servers_from_readers(&[
-            LocalMcpReader::new("Claude Code", McpAppType::ClaudeCode, test_one_readable_server),
+            LocalMcpReader::new(
+                "Claude Code",
+                McpAppType::ClaudeCode,
+                test_one_readable_server,
+            ),
             LocalMcpReader::new("Antigravity", McpAppType::Antigravity, test_parse_failure),
             LocalMcpReader::new("Cursor", McpAppType::Cursor, test_io_failure),
             LocalMcpReader::new("Codex", McpAppType::Codex, test_late_server),
@@ -7031,7 +7076,7 @@ mod tests {
 
     #[test]
     fn qoder_settings_json_round_trips_and_preserves_foreign_keys() {
-        // `~/.qoder/settings.json` is QODER'S file, not codeg's: the CLI owns
+        // `~/.qoder/settings.json` is QODER'S file, not harness_studio's: the CLI owns
         // unrelated keys beside `mcpServers` (`securityScan`, `security.auth`,
         // `model.name`, the `projects` map, …). Every write must be a
         // read-modify-write merge that leaves those keys intact — the property
@@ -7046,7 +7091,7 @@ mod tests {
 
         // A realistic settings.json: foreign keys plus one valid server and
         // one entry too malformed to canonicalize (exercises the skip path
-        // on read — codeg must skip it, never rewrite the file to "fix" it).
+        // on read — harness_studio must skip it, never rewrite the file to "fix" it).
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&json!({
@@ -7113,14 +7158,10 @@ mod tests {
 
         // The merge promise: after both writes, every foreign key and the
         // skipped malformed entry are still on disk.
-        let root: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("read file"))
-                .expect("parse json");
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("read file"))
+            .expect("parse json");
         assert_eq!(root.pointer("/securityScan"), Some(&json!(true)));
-        assert_eq!(
-            root.pointer("/model/name"),
-            Some(&json!("qmodel_38max"))
-        );
+        assert_eq!(root.pointer("/model/name"), Some(&json!("qmodel_38max")));
         assert_eq!(
             root.pointer("/permissions/trustDirectories"),
             Some(&json!(true))
@@ -7142,9 +7183,8 @@ mod tests {
         assert_eq!(after.len(), 2);
         assert!(after.contains_key("remote"));
         assert!(after.contains_key("existing"));
-        let root: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).expect("re-read"))
-                .expect("re-parse");
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("re-read"))
+            .expect("re-parse");
         assert_eq!(root.pointer("/model/name"), Some(&json!("qmodel_38max")));
     }
 
@@ -7192,7 +7232,7 @@ mod tests {
         );
 
         // Every app the scan can ATTRIBUTE a server to must also be one the
-        // write paths can reach; otherwise the UI shows an assignment codeg can
+        // write paths can reach; otherwise the UI shows an assignment harness_studio can
         // neither edit nor clear. (The reverse is allowed: a write-only target
         // with no reader would just never show up.)
         let scannable = local_mcp_readers()
@@ -7255,11 +7295,8 @@ mod tests {
         // file also holds unrelated `[cli]`/`[ui]` sections that must survive.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[cli]\nauto_update = true\n\n[ui]\nyolo = false\n",
-        )
-        .expect("seed config");
+        std::fs::write(&path, "[cli]\nauto_update = true\n\n[ui]\nyolo = false\n")
+            .expect("seed config");
 
         // Missing entry → no servers; removing is a no-op.
         assert!(read_grok_servers_at(&path).expect("read seed").is_empty());
@@ -7303,7 +7340,9 @@ mod tests {
         let remote = servers.get("remote").expect("remote present");
         assert_eq!(remote.get("type").and_then(Value::as_str), Some("http"));
         assert_eq!(
-            remote.pointer("/headers/Authorization").and_then(Value::as_str),
+            remote
+                .pointer("/headers/Authorization")
+                .and_then(Value::as_str),
             Some("Bearer xyz")
         );
         let linear = servers.get("linear").expect("linear present");
@@ -7491,7 +7530,7 @@ mod tests {
 
     #[test]
     fn codex_entry_infers_transport_when_type_absent() {
-        // Native Codex tables (and codeg's own post-#325 output) carry no `type`;
+        // Native Codex tables (and harness_studio's own post-#325 output) carry no `type`;
         // the reader must infer it from the transport keys, not assume stdio (which
         // silently dropped every url-only server). Mirrors the issue's config.
         let http = codex_entry("url = \"https://mcp.exa.ai/mcp\"\n");
@@ -7562,7 +7601,7 @@ mod tests {
             .expect("sse entry");
         assert_eq!(sse.get("type").and_then(Value::as_str), Some("sse"));
 
-        // And codeg reads `streamableHttp` straight back to canonical `http`.
+        // And harness_studio reads `streamableHttp` straight back to canonical `http`.
         let round_trip = canonicalize_spec(
             &json!({"type": "streamableHttp", "url": "https://mcp.exa.ai/mcp"}),
             "test",
@@ -7574,7 +7613,7 @@ mod tests {
     #[test]
     fn canonical_to_kimi_code_entry_pins_remote_transport() {
         // Kimi 0.23.3 keys the transport off `transport` (defaulting url-only to
-        // HTTP), so codeg must emit an explicit `transport` or an SSE server silently
+        // HTTP), so harness_studio must emit an explicit `transport` or an SSE server silently
         // downgrades to HTTP (#325). stdio is left as-is (Kimi infers it from
         // `command`).
         let sse = canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
@@ -7609,8 +7648,9 @@ mod tests {
         );
 
         // Full writer→reader round-trip stays canonical and transport-free.
-        let written = canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
-            .expect("write sse");
+        let written =
+            canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
+                .expect("write sse");
         let back = kimi_code_entry_to_canonical(&written, "srv").expect("read back");
         assert_eq!(back.get("type").and_then(Value::as_str), Some("sse"));
         assert!(back.get("transport").is_none());
@@ -7635,12 +7675,10 @@ mod tests {
         assert_eq!(http_url.get("type").and_then(Value::as_str), Some("http"));
 
         // An on-disk `type` with NO `transport` does not classify: Kimi strips `type`
-        // and infers HTTP from the url, so codeg must too (not report it as SSE).
-        let stale_type = kimi_code_entry_to_canonical(
-            &json!({"type": "sse", "url": "https://host/mcp"}),
-            "s",
-        )
-        .expect("type-without-transport");
+        // and infers HTTP from the url, so harness_studio must too (not report it as SSE).
+        let stale_type =
+            kimi_code_entry_to_canonical(&json!({"type": "sse", "url": "https://host/mcp"}), "s")
+                .expect("type-without-transport");
         assert_eq!(stale_type.get("type").and_then(Value::as_str), Some("http"));
 
         // Explicit `transport: "sse"` yields SSE (and `type` is ignored, matching
@@ -7667,10 +7705,11 @@ mod tests {
             );
         }
         // A non-string transport is rejected too (Kimi's literals are exact).
-        assert!(
-            kimi_code_entry_to_canonical(&json!({"url": "https://host/mcp", "transport": 3}), "s")
-                .is_err()
-        );
+        assert!(kimi_code_entry_to_canonical(
+            &json!({"url": "https://host/mcp", "transport": 3}),
+            "s"
+        )
+        .is_err());
 
         // The `transport` discriminant wins over the entry's key shape: an explicit
         // `sse` on an entry that ALSO carries `command` is SSE (Kimi ignores the
@@ -7680,7 +7719,10 @@ mod tests {
             "s",
         )
         .expect("transport wins over command");
-        assert_eq!(sse_over_cmd.get("type").and_then(Value::as_str), Some("sse"));
+        assert_eq!(
+            sse_over_cmd.get("type").and_then(Value::as_str),
+            Some("sse")
+        );
     }
 
     #[test]
@@ -7697,8 +7739,14 @@ mod tests {
         .expect("http entry");
         let obj = entry.as_object().expect("object");
         assert_eq!(obj.get("transport").and_then(Value::as_str), Some("http"));
-        assert!(!obj.contains_key("enabled"), "wrong-typed enabled must be dropped");
-        assert!(!obj.contains_key("autoApprove"), "foreign key must be dropped");
+        assert!(
+            !obj.contains_key("enabled"),
+            "wrong-typed enabled must be dropped"
+        );
+        assert!(
+            !obj.contains_key("autoApprove"),
+            "foreign key must be dropped"
+        );
 
         // A correctly-typed `enabled` bool is preserved.
         let ok = canonical_to_kimi_code_entry(&json!({
@@ -7706,16 +7754,18 @@ mod tests {
         }))
         .expect("http entry");
         assert_eq!(
-            ok.as_object().and_then(|o| o.get("enabled")).and_then(Value::as_bool),
+            ok.as_object()
+                .and_then(|o| o.get("enabled"))
+                .and_then(Value::as_bool),
             Some(true)
         );
     }
 
     #[test]
     fn kimi_code_entry_preserves_kimi_only_fields_through_a_round_trip() {
-        // Fields Kimi models but codeg has no UI for must survive read→write:
+        // Fields Kimi models but harness_studio has no UI for must survive read→write:
         // dropping them breaks a server the user configured through Kimi's own
-        // `/mcp-config` the first time they touch it in codeg's editor.
+        // `/mcp-config` the first time they touch it in harness_studio's editor.
         let on_disk = json!({
             "command": "npx",
             "args": ["-y", "server"],
@@ -7729,10 +7779,19 @@ mod tests {
         let canonical = kimi_code_entry_to_canonical(&on_disk, "srv").expect("canonical");
         let written = canonical_to_kimi_code_entry(&canonical).expect("write");
         let obj = written.as_object().expect("object");
-        assert_eq!(obj.get("runtime_id").and_then(Value::as_str), Some("remote-box"));
+        assert_eq!(
+            obj.get("runtime_id").and_then(Value::as_str),
+            Some("remote-box")
+        );
         assert_eq!(obj.get("executor").and_then(Value::as_str), Some("kaos"));
-        assert_eq!(obj.get("startupTimeoutMs").and_then(Value::as_i64), Some(30_000));
-        assert_eq!(obj.get("toolTimeoutMs").and_then(Value::as_i64), Some(120_000));
+        assert_eq!(
+            obj.get("startupTimeoutMs").and_then(Value::as_i64),
+            Some(30_000)
+        );
+        assert_eq!(
+            obj.get("toolTimeoutMs").and_then(Value::as_i64),
+            Some(120_000)
+        );
         assert_eq!(obj.get("enabledTools"), Some(&json!(["a", "b"])));
         assert_eq!(obj.get("disabledTools"), Some(&json!([])));
 
@@ -7771,15 +7830,21 @@ mod tests {
         let mut canonical = json!({"type": "stdio", "command": "npx", "args": ["-y", "ctx7"]});
         merge_kimi_extension_fields(&mut canonical, &kimi, &none);
         let obj = canonical.as_object().expect("object");
-        assert_eq!(obj.get("runtime_id").and_then(Value::as_str), Some("remote-box"));
+        assert_eq!(
+            obj.get("runtime_id").and_then(Value::as_str),
+            Some("remote-box")
+        );
         assert_eq!(obj.get("executor").and_then(Value::as_str), Some("kaos"));
-        assert_eq!(obj.get("toolTimeoutMs").and_then(Value::as_i64), Some(120_000));
+        assert_eq!(
+            obj.get("toolTimeoutMs").and_then(Value::as_i64),
+            Some(120_000)
+        );
         assert_eq!(obj.get("disabledTools"), Some(&json!(["danger"])));
         // The winning spec still owns every key it already had.
         assert_eq!(obj.get("args"), Some(&json!(["-y", "ctx7"])));
 
         // Kimi's copy is authoritative for the keys it owns, absence included:
-        // codeg's permissive writers copy them into other agents' files, so an
+        // harness_studio's permissive writers copy them into other agents' files, so an
         // earlier-scanned agent's stale copy must not pin the canonical spec.
         let mut stale = json!({
             "type": "stdio",
@@ -7793,7 +7858,10 @@ mod tests {
             Some("remote-box")
         );
         assert!(
-            !stale.as_object().expect("object").contains_key("enabledTools"),
+            !stale
+                .as_object()
+                .expect("object")
+                .contains_key("enabledTools"),
             "a key Kimi no longer sets must not survive in another agent's copy"
         );
         // Only the Kimi-owned keys are touched.
@@ -7820,7 +7888,9 @@ mod tests {
             "OpenClaw declared `auth` itself; Kimi's copy must not clear it"
         );
         assert_eq!(
-            openclaw_first.get("bearerTokenEnvVar").and_then(Value::as_str),
+            openclaw_first
+                .get("bearerTokenEnvVar")
+                .and_then(Value::as_str),
             Some("TOKEN")
         );
 
@@ -7835,7 +7905,7 @@ mod tests {
         );
 
         // But the same value in an agent that does NOT model `auth` is only an
-        // echo codeg wrote there, so removing it in Kimi must take effect.
+        // echo harness_studio wrote there, so removing it in Kimi must take effect.
         let mut echo = json!({
             "type": "http",
             "url": "https://host/mcp",
@@ -7854,7 +7924,10 @@ mod tests {
         let remote_obj = remote.as_object().expect("object");
         assert!(!remote_obj.contains_key("runtime_id"));
         assert!(!remote_obj.contains_key("executor"));
-        assert_eq!(remote_obj.get("toolTimeoutMs").and_then(Value::as_i64), Some(120_000));
+        assert_eq!(
+            remote_obj.get("toolTimeoutMs").and_then(Value::as_i64),
+            Some(120_000)
+        );
 
         let mut stdio = json!({"type": "stdio", "command": "npx"});
         merge_kimi_extension_fields(
@@ -7933,7 +8006,7 @@ mod tests {
         let obj = after["remote"].as_object().expect("object");
         assert!(
             !obj.contains_key("bearerTokenEnvVar"),
-            "removing a field in codeg's editor must reach disk"
+            "removing a field in harness_studio's editor must reach disk"
         );
         assert_eq!(obj.get("auth").and_then(Value::as_str), Some("oauth"));
     }
@@ -7973,7 +8046,7 @@ mod tests {
 
     #[test]
     fn codex_entry_rejects_both_command_and_url() {
-        // Codex hard-errors on a mixed-transport entry; codeg must reject it rather
+        // Codex hard-errors on a mixed-transport entry; harness_studio must reject it rather
         // than silently classify as stdio and drop the `url` (#325).
         let both = codex_entry("command = \"npx\"\nurl = \"https://x/mcp\"\n");
         assert!(codex_entry_to_canonical("mixed", &both).is_err());
@@ -8003,7 +8076,10 @@ mod tests {
         .as_table()
         .cloned()
         .expect("table");
-        assert_eq!(entry.get("enabled").and_then(toml::Value::as_bool), Some(true));
+        assert_eq!(
+            entry.get("enabled").and_then(toml::Value::as_bool),
+            Some(true)
+        );
         for dropped in [
             "type",
             "required",

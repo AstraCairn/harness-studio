@@ -26,7 +26,7 @@
 //! non-`file://` uri (`clipboard://…` synth ids), a non-image resource — is
 //! left untouched, so the desktop flow is byte-identical to before.
 //!
-//! Security: only files under `codeg_uploads_root()` are readable here. The
+//! Security: only files under `harness_studio_uploads_root()` are readable here. The
 //! uri is percent-decoded, canonicalized, and prefix-checked against the
 //! canonicalized root, so `acp_prompt` cannot be used as an arbitrary-file
 //! read oracle (the viewer broadcast would otherwise ship the bytes to every
@@ -40,7 +40,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 use crate::acp::error::AcpError;
 use crate::acp::types::PromptInputBlock;
-use crate::web::handlers::files::UPLOAD_MAX_BYTES;
+const UPLOAD_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Aggregate ceiling on the raw bytes one prompt may hydrate, summed across
 /// every marker occurrence — the SAME file referenced N times counts N times,

@@ -181,19 +181,15 @@ describe("StatusBarUpdate — popover", () => {
     expect(startUpdate).toHaveBeenCalledTimes(1)
   })
 
-  it("links to the release page when this client can't install in place", async () => {
+  it("shows the available version without an external release link", async () => {
     // Older remote server: driving the detached flow against it would hang on
     // its legacy blocking endpoint.
     renderWith({ available: RELEASE, canInstallInPlace: false })
     fireEvent.click(screen.getByRole("button", { name: /New v0\.21\.9/ }))
 
-    const link = await screen.findByRole("button", {
-      name: /View v0\.21\.9 release/,
-    })
-    fireEvent.click(link)
-    expect(openUrl).toHaveBeenCalledWith(
-      "https://github.com/spacering-net/codeg/releases/latest"
-    )
+    const link = await screen.findByText("v0.21.9")
+    expect(link).toBeVisible()
+    expect(openUrl).not.toHaveBeenCalled()
     expect(startUpdate).not.toHaveBeenCalled()
   })
 
@@ -268,9 +264,7 @@ describe("StatusBarUpdate — popover", () => {
         "Cannot write to /usr/local/bin, so updates can't be installed in place. Update manually with administrator privileges or check installation permissions."
       )
     ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: /View v0\.21\.9 release/ })
-    ).toBeVisible()
+    expect(screen.getByText("v0.21.9")).toBeVisible()
     expect(screen.queryByRole("button", { name: /Upgrade to/ })).toBeNull()
   })
 
@@ -298,9 +292,7 @@ describe("StatusBarUpdate — popover", () => {
       screen.getAllByText(/Cannot write to \/usr\/local\/bin/)
     ).toHaveLength(1)
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
-    expect(
-      screen.getByRole("button", { name: /View v0\.21\.9 release/ })
-    ).toBeVisible()
+    expect(screen.getByText("v0.21.9")).toBeVisible()
   })
 
   it("reports transferred bytes while downloading", async () => {

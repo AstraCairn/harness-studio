@@ -1,4 +1,4 @@
-//! codeg's own **ACP-native transcript** for custom agents.
+//! harness_studio's own **ACP-native transcript** for custom agents.
 //!
 //! Every built-in agent ships a dedicated parser (`crate::parsers::*`) that
 //! reverse-engineers that agent's private session store to rebuild history.
@@ -7,18 +7,18 @@
 //!
 //! The observation that makes this unnecessary is the same one
 //! [`crate::turn_timings`] already relies on: **every session runs through
-//! codeg**, so the connection layer witnesses the entire conversation. Here we
+//! harness_studio**, so the connection layer witnesses the entire conversation. Here we
 //! take it all the way — instead of recording a derived measurement, we record
 //! the ACP wire itself:
 //!
-//! * each prompt codeg sends (`session/prompt`'s content blocks), and
+//! * each prompt harness_studio sends (`session/prompt`'s content blocks), and
 //! * each `session/update` notification the agent sends back, verbatim.
 //!
 //! [`crate::parsers::acp_native`] reads that back and projects it into
 //! `MessageTurn`s using nothing but ACP semantics — no agent-specific
 //! knowledge anywhere in the loop.
 //!
-//! ## Why raw ACP and not codeg's own `AcpEvent`
+//! ## Why raw ACP and not harness_studio's own `AcpEvent`
 //!
 //! `AcpEvent` is an internal type that changes with every UI feature; persisting
 //! it would silently corrupt old history on refactors. The ACP `SessionUpdate`
@@ -27,7 +27,7 @@
 //!
 //! ## File layout
 //!
-//! `<paths::codeg_acp_transcripts_root()>/<registry-id>/<session-id>.jsonl`
+//! `<paths::harness_studio_acp_transcripts_root()>/<registry-id>/<session-id>.jsonl`
 //!
 //! Line 0 is a [`TranscriptHeader`]; every later line is a [`TranscriptEntry`]:
 //!
@@ -92,8 +92,8 @@ pub struct TranscriptHeader {
     /// Session id this transcript continues.
     ///
     /// Agents are not required to persist sessions, and many custom ones keep
-    /// them in memory only — so after a restart `session/load` fails and codeg
-    /// starts a fresh agent session for the SAME conversation. The turns codeg
+    /// them in memory only — so after a restart `session/load` fails and harness_studio
+    /// starts a fresh agent session for the SAME conversation. The turns harness_studio
     /// already recorded are not lost by that; they simply live under the old
     /// session id. Rather than move them (a rename could be interrupted between
     /// the file operation and the `external_id` write, stranding the history),
@@ -128,7 +128,7 @@ impl TranscriptHeader {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
-    /// A prompt codeg sent to the agent. `payload` is the ACP content-block
+    /// A prompt harness_studio sent to the agent. `payload` is the ACP content-block
     /// array from `session/prompt`.
     Prompt,
     /// A `session/update` notification from the agent. `payload` is the
@@ -136,7 +136,7 @@ pub enum EntryKind {
     Update,
     /// End of a prompt turn, as reported by the `session/prompt` **response**.
     /// ACP has no turn-end notification, so without this line turn boundaries
-    /// could only be inferred; codeg is the party that receives the response,
+    /// could only be inferred; harness_studio is the party that receives the response,
     /// so it records it. Payload: `{"stopReason":…, "durationMs":…,
     /// "model":…, "usage":{…}}` (all optional but `stopReason`).
     ///
@@ -149,7 +149,7 @@ pub enum EntryKind {
 /// One recorded line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntry {
-    /// Epoch milliseconds when codeg observed this.
+    /// Epoch milliseconds when harness_studio observed this.
     pub t: u64,
     pub k: EntryKind,
     pub p: serde_json::Value,
@@ -180,7 +180,7 @@ pub fn now_epoch_ms() -> u64 {
 
 /// Whether `s` is safe as a single path component. Mirrors
 /// `turn_timings::safe_component` — the registry id and the session id both
-/// come from outside codeg (user input / the agent's own id generator), so
+/// come from outside harness_studio (user input / the agent's own id generator), so
 /// neither may introduce a separator, a parent ref, or a hidden-file prefix.
 fn safe_component(s: &str) -> bool {
     !s.is_empty()
@@ -232,7 +232,7 @@ impl PendingRecord {
     /// They mark the turn boundaries the reader reconstructs turns from, and —
     /// decisively — a `Prompt` is what makes [`has_entries_in`] answer true.
     /// That answer is the gate keeping a `session/load` replay from appending a
-    /// second copy of history codeg already recorded.
+    /// second copy of history harness_studio already recorded.
     ///
     /// Flushing on arrival is only half of that guarantee: it bounds how long a
     /// prompt sits in the WRITER, not how long it sits in the queue ahead of
@@ -564,7 +564,10 @@ impl SessionWriter {
                 self.pending.len()
             );
         } else {
-            tracing::debug!("[acp-transcript] deferring write to {}: {e}", self.path.display());
+            tracing::debug!(
+                "[acp-transcript] deferring write to {}: {e}",
+                self.path.display()
+            );
         }
     }
 }
@@ -618,7 +621,9 @@ fn mergeable_chunk_kind(payload: &serde_json::Value) -> Option<&'static str> {
     };
     let content = payload.get("content")?;
     (content.get("type").and_then(|v| v.as_str()) == Some("text")
-        && content.get("text").is_some_and(serde_json::Value::is_string))
+        && content
+            .get("text")
+            .is_some_and(serde_json::Value::is_string))
     .then_some(kind)
 }
 
@@ -834,7 +839,11 @@ pub fn record_header(
     agent_dir: &str,
     header: &TranscriptHeader,
 ) -> tokio::sync::oneshot::Receiver<()> {
-    record_header_in(&crate::paths::codeg_acp_transcripts_root(), agent_dir, header)
+    record_header_in(
+        &crate::paths::harness_studio_acp_transcripts_root(),
+        agent_dir,
+        header,
+    )
 }
 
 /// Root-injectable core of [`record_header`].
@@ -846,7 +855,12 @@ pub fn record_header_in(
     // Idempotence is decided on the writer thread, which is the only party that
     // knows about a header still sitting in its buffer — and which, being the
     // only writer, cannot race the file it checks.
-    queue_for(root, agent_dir, &header.session_id, PendingRecord::Header(header.clone()))
+    queue_for(
+        root,
+        agent_dir,
+        &header.session_id,
+        PendingRecord::Header(header.clone()),
+    )
 }
 
 /// Record one prompt or update.
@@ -857,7 +871,7 @@ pub fn record_entry(
     payload: serde_json::Value,
 ) -> tokio::sync::oneshot::Receiver<()> {
     record_entry_in(
-        &crate::paths::codeg_acp_transcripts_root(),
+        &crate::paths::harness_studio_acp_transcripts_root(),
         agent_dir,
         session_id,
         kind,
@@ -926,10 +940,7 @@ pub fn append_line_in(root: &Path, agent_dir: &str, session_id: &str, line: &str
         f.write_all(format!("{line}\n").as_bytes())
     };
     if let Err(e) = write() {
-        tracing::debug!(
-            "[acp-transcript] append failed for {}: {e}",
-            path.display()
-        );
+        tracing::debug!("[acp-transcript] append failed for {}: {e}", path.display());
     }
 }
 
@@ -938,7 +949,7 @@ pub fn append_line_in(root: &Path, agent_dir: &str, session_id: &str, line: &str
 /// cannot poison the rest of the history.
 pub fn read_transcript(agent_dir: &str, session_id: &str) -> Transcript {
     read_transcript_in(
-        &crate::paths::codeg_acp_transcripts_root(),
+        &crate::paths::harness_studio_acp_transcripts_root(),
         agent_dir,
         session_id,
     )
@@ -1044,12 +1055,12 @@ pub fn read_header_in(root: &Path, agent_dir: &str, session_id: &str) -> Option<
     found
 }
 
-/// **The replay gate.** True when this conversation already has history codeg
+/// **The replay gate.** True when this conversation already has history harness_studio
 /// recorded — whether it has reached the file yet or is still on its way there.
 ///
 /// A `session/load` replay may be recorded only when this is false. Answering
 /// "no history" for a conversation that has some is the one dangerous mistake:
-/// the replay is then appended to history codeg already had, and because the
+/// the replay is then appended to history harness_studio already had, and because the
 /// gate reads non-empty from then on, the duplicate is permanent and silent.
 ///
 /// So it is deliberately conservative in exactly one direction — a prompt that
@@ -1058,7 +1069,7 @@ pub fn read_header_in(root: &Path, agent_dir: &str, session_id: &str) -> Option<
 /// that was redundant anyway.
 pub fn has_recorded_history(agent_dir: &str, session_id: &str) -> bool {
     has_recorded_history_in(
-        &crate::paths::codeg_acp_transcripts_root(),
+        &crate::paths::harness_studio_acp_transcripts_root(),
         agent_dir,
         session_id,
     )
@@ -1158,7 +1169,7 @@ pub fn read_chain_in(root: &Path, agent_dir: &str, session_id: &str) -> Transcri
 /// after a single read. Shares [`read_chain_in`]'s cycle and depth guards.
 ///
 /// This is the "same conversation, new agent session" signal. When a custom
-/// agent has forgotten a session, codeg opens a fresh one and links it back
+/// agent has forgotten a session, harness_studio opens a fresh one and links it back
 /// (see [`TranscriptHeader::continues_from`]); the reader then renders the
 /// whole chain as ONE conversation, and the generic parser hides the
 /// superseded ids for exactly that reason. So a bind moving from an id in
@@ -1190,7 +1201,7 @@ pub fn continuation_ancestors_in(root: &Path, agent_dir: &str, session_id: &str)
 /// [`continuation_ancestors_in`] against the real transcripts root.
 pub fn continuation_ancestors(agent_dir: &str, session_id: &str) -> Vec<String> {
     continuation_ancestors_in(
-        &crate::paths::codeg_acp_transcripts_root(),
+        &crate::paths::harness_studio_acp_transcripts_root(),
         agent_dir,
         session_id,
     )
@@ -1259,7 +1270,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "codeg-acp-transcript-test-{}-{:?}",
+            "harness-studio-acp-transcript-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -1295,7 +1306,10 @@ mod tests {
             &root,
             "goose",
             "s1",
-            &entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"hi"}])),
+            &entry_line(
+                EntryKind::Prompt,
+                serde_json::json!([{"type":"text","text":"hi"}]),
+            ),
         );
         append_line_in(
             &root,
@@ -1384,22 +1398,32 @@ mod tests {
             &root,
             "goose",
             "s0",
-            &entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"first"}])),
+            &entry_line(
+                EntryKind::Prompt,
+                serde_json::json!([{"type":"text","text":"first"}]),
+            ),
         );
         for (id, prev, text) in [("s1", "s0", "second"), ("s2", "s1", "third")] {
-            let header = TranscriptHeader::new("custom:goose", id, "/elsewhere", 9_999)
-                .continuing(prev);
+            let header =
+                TranscriptHeader::new("custom:goose", id, "/elsewhere", 9_999).continuing(prev);
             append_line_in(&root, "goose", id, &serde_json::to_string(&header).unwrap());
             append_line_in(
                 &root,
                 "goose",
                 id,
-                &entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":text}])),
+                &entry_line(
+                    EntryKind::Prompt,
+                    serde_json::json!([{"type":"text","text":text}]),
+                ),
             );
         }
 
         let merged = read_chain_in(&root, "goose", "s2");
-        assert_eq!(merged.entries.len(), 3, "every link contributes its entries");
+        assert_eq!(
+            merged.entries.len(),
+            3,
+            "every link contributes its entries"
+        );
         let header = merged.header.expect("oldest header survives");
         assert_eq!(header.session_id, "s0", "the root header wins");
         assert_eq!(
@@ -1430,8 +1454,8 @@ mod tests {
         let root = temp_root();
         append_line_in(&root, "goose", "s0", &header_line("s0"));
         for (id, prev) in [("s1", "s0"), ("s2", "s1")] {
-            let header = TranscriptHeader::new("custom:goose", id, "/elsewhere", 9_999)
-                .continuing(prev);
+            let header =
+                TranscriptHeader::new("custom:goose", id, "/elsewhere", 9_999).continuing(prev);
             append_line_in(&root, "goose", id, &serde_json::to_string(&header).unwrap());
         }
 
@@ -1462,8 +1486,7 @@ mod tests {
         // headers must not hang the bind path.
         let root = temp_root();
         for (id, prev) in [("a", "b"), ("b", "a")] {
-            let header =
-                TranscriptHeader::new("custom:goose", id, "/repo", 1).continuing(prev);
+            let header = TranscriptHeader::new("custom:goose", id, "/repo", 1).continuing(prev);
             append_line_in(&root, "goose", id, &serde_json::to_string(&header).unwrap());
         }
         assert_eq!(
@@ -1479,7 +1502,12 @@ mod tests {
         let root = temp_root();
         // A hand-edited file pointing at itself must not hang the reader.
         let looped = TranscriptHeader::new("custom:goose", "loop", "/repo", 1).continuing("loop");
-        append_line_in(&root, "goose", "loop", &serde_json::to_string(&looped).unwrap());
+        append_line_in(
+            &root,
+            "goose",
+            "loop",
+            &serde_json::to_string(&looped).unwrap(),
+        );
         append_line_in(
             &root,
             "goose",
@@ -1492,7 +1520,12 @@ mod tests {
         // never to an error or an empty result.
         let orphan =
             TranscriptHeader::new("custom:goose", "orphan", "/repo", 2).continuing("deleted");
-        append_line_in(&root, "goose", "orphan", &serde_json::to_string(&orphan).unwrap());
+        append_line_in(
+            &root,
+            "goose",
+            "orphan",
+            &serde_json::to_string(&orphan).unwrap(),
+        );
         append_line_in(
             &root,
             "goose",
@@ -1560,7 +1593,10 @@ mod tests {
             &root,
             "goose",
             "e1",
-            &entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"hi"}])),
+            &entry_line(
+                EntryKind::Prompt,
+                serde_json::json!([{"type":"text","text":"hi"}]),
+            ),
         );
         assert!(has_entries_in(&root, "goose", "e1"));
 
@@ -1594,12 +1630,18 @@ mod tests {
         raw.extend_from_slice(header_line("torn").as_bytes());
         raw.push(b'\n');
         raw.extend_from_slice(
-            entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"你好"}]))
-                .as_bytes(),
+            entry_line(
+                EntryKind::Prompt,
+                serde_json::json!([{"type":"text","text":"你好"}]),
+            )
+            .as_bytes(),
         );
         raw.push(b'\n');
         // A prompt line cut in the middle of a 3-byte character.
-        let torn = entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"世界"}]));
+        let torn = entry_line(
+            EntryKind::Prompt,
+            serde_json::json!([{"type":"text","text":"世界"}]),
+        );
         let cut = torn.find('世').unwrap() + 2;
         raw.extend_from_slice(&torn.as_bytes()[..cut]);
         std::fs::write(&path, &raw).unwrap();
@@ -1638,9 +1680,10 @@ mod tests {
         let root = temp_root();
         let path = transcript_path_in(&root, "goose", "new").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let header =
-            serde_json::to_string(&TranscriptHeader::new("custom:goose", "new", "/repo", 1).continuing("old"))
-                .unwrap();
+        let header = serde_json::to_string(
+            &TranscriptHeader::new("custom:goose", "new", "/repo", 1).continuing("old"),
+        )
+        .unwrap();
         let mut raw = Vec::from(header.as_bytes());
         raw.push(b'\n');
         raw.extend_from_slice(&[0xff, 0xfe, b'\n']);
@@ -1651,7 +1694,10 @@ mod tests {
             &root,
             "goose",
             "old",
-            &entry_line(EntryKind::Prompt, serde_json::json!([{"type":"text","text":"hi"}])),
+            &entry_line(
+                EntryKind::Prompt,
+                serde_json::json!([{"type":"text","text":"hi"}]),
+            ),
         );
 
         // `new` is readable despite the garbage line, so `old` is legitimately
@@ -1689,10 +1735,12 @@ mod tests {
         a.await.unwrap();
         b.await.unwrap();
 
-        let raw = std::fs::read_to_string(transcript_path_in(&root, "goose", "s3").unwrap())
-            .unwrap();
+        let raw =
+            std::fs::read_to_string(transcript_path_in(&root, "goose", "s3").unwrap()).unwrap();
         assert_eq!(
-            raw.lines().filter(|l| parse_header_line(l).is_some()).count(),
+            raw.lines()
+                .filter(|l| parse_header_line(l).is_some())
+                .count(),
             1,
             "exactly one header, no matter how many reconnects raced"
         );
@@ -2120,10 +2168,15 @@ mod tests {
         }
 
         let entries = read_transcript_in(&root, "goose", "wedged").entries;
-        assert_eq!(entries.len(), 4, "every buffered record landed exactly once");
+        assert_eq!(
+            entries.len(),
+            4,
+            "every buffered record landed exactly once"
+        );
         for (i, entry) in entries.iter().enumerate() {
             assert_eq!(
-                entry.p[0]["text"], format!("p{i}"),
+                entry.p[0]["text"],
+                format!("p{i}"),
                 "and in the order they were recorded"
             );
         }
@@ -2226,7 +2279,7 @@ mod tests {
     }
 
     /// The gate that keeps a `session/load` replay from appending a second copy
-    /// of history codeg already has. It reads the file, so a prompt sitting in
+    /// of history harness_studio already has. It reads the file, so a prompt sitting in
     /// the writer's buffer would make it answer "empty" and let the replay in.
     #[tokio::test]
     async fn a_continuation_link_is_readable_as_soon_as_its_ack_resolves() {

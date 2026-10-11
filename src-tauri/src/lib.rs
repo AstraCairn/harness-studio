@@ -7,16 +7,16 @@
 // `acp/connection.rs` for the sibling *runtime* mitigation of the same frame.
 #![recursion_limit = "256"]
 // The unoptimized lib test binary trips the same harmless macOS
-// "__eh_frame section too large" linker warning as the `codeg` binary; see the
+// "__eh_frame section too large" linker warning as the `harness_studio` binary; see the
 // note at the top of `main.rs`.
 #![cfg_attr(debug_assertions, allow(linker_messages))]
 
 pub mod acp;
 pub mod acp_transcript;
+pub use acp::scratch_dir::scratch_sweep_task;
 pub use acp::{
     idle_sweep_task, idle_timeout_from_env, lifecycle_subscriber_task, SWEEP_INTERVAL_SECS,
 };
-pub use acp::scratch_dir::scratch_sweep_task;
 pub use network::proxy::init_proxy_from_db;
 mod app_error;
 #[cfg(all(feature = "tauri-runtime", target_os = "macos"))]
@@ -32,6 +32,7 @@ pub mod commands;
 pub mod computer;
 pub mod db;
 pub mod deep_link;
+pub mod events;
 pub mod folder_links;
 pub mod forge;
 pub mod git_credential;
@@ -49,12 +50,11 @@ pub mod pet_state_mapper;
 pub mod pets;
 #[cfg(feature = "tauri-runtime")]
 pub mod preferences;
+mod probe;
 pub mod process;
-pub mod supervise;
 mod terminal;
 pub mod turn_timings;
 pub mod update;
-pub mod web;
 pub mod work_task;
 pub mod workspace_state;
 pub mod workspace_transfer;
@@ -74,7 +74,7 @@ pub fn sweep_acp_binary_trash() {
 ///
 /// Deletes only directories whose recorded owner is positively confirmed dead
 /// (or is this process and not live — see `acp::scratch_dir`), and never leaves
-/// codeg's own `codeg-acp/` subtree, so a peer codeg instance's work and any
+/// harness_studio's own `harness-studio-acp/` subtree, so a peer harness_studio instance's work and any
 /// other application's temp files are both out of reach by construction.
 pub fn sweep_acp_scratch_dirs() {
     crate::acp::scratch_dir::sweep_foreign_orphans();
@@ -88,32 +88,25 @@ mod tauri_app {
     use crate::acp::manager::ConnectionManager;
     use crate::chat_channel::manager::ChatChannelManager;
     use crate::commands::{
-        acp as acp_commands, app_update as app_update_commands,
-        automation as automation_commands, background as background_commands, backup,
-        browser as browser_commands,
-        canvas as canvas_commands,
-        chat_authoring as chat_authoring_commands, chat_channel as chat_channel_commands,
-        clipboard as clipboard_commands,
-        config_sync,
-        conversation_tags,
-        conversations,
-        custom_skills as custom_skills_commands,
+        acp as acp_commands, app_update as app_update_commands, automation as automation_commands,
+        background as background_commands, backup, browser as browser_commands,
+        canvas as canvas_commands, chat_authoring as chat_authoring_commands,
+        chat_channel as chat_channel_commands, clipboard as clipboard_commands, config_sync,
+        conversation_tags, conversations, custom_skills as custom_skills_commands,
         deepseek_settings as deepseek_settings_commands, delegation as delegation_commands,
         experts as experts_commands, feedback as feedback_commands, file_io, folder_commands,
-        folder_links, office_tools as office_tools_commands, open_in,
-        folders, logging as logging_commands, mcp as mcp_commands,
-        model_provider as model_provider_commands, notification, pet as pet_commands, project_boot,
+        folder_links, folders, forge as forge_commands, logging as logging_commands,
+        mcp as mcp_commands, model_provider as model_provider_commands, notification,
+        office_tools as office_tools_commands, open_in, pet as pet_commands, project_boot,
         question as question_commands, quick_messages as quick_messages_commands,
-        remote_proxy as remote_proxy_commands,
-        science as science_commands,
-        session_info as session_info_commands,
-        system_settings, terminal as terminal_commands,
-        token_usage as token_usage_commands,
-        forge as forge_commands, version_control, windows, work_task as work_task_commands,
-        workspace_state as workspace_state_commands, workspace_windows,
+        remote_proxy as remote_proxy_commands, science as science_commands,
+        session_info as session_info_commands, system_settings, terminal as terminal_commands,
+        token_usage as token_usage_commands, version_control, windows,
+        work_task as work_task_commands, workspace_state as workspace_state_commands,
+        workspace_windows,
     };
     use crate::terminal::manager::TerminalManager;
-    use crate::{db, git_credential, network, paths, process, web};
+    use crate::{db, events, git_credential, network, paths, process};
     use tauri::Manager;
 
     static APP_QUITTING: AtomicBool = AtomicBool::new(false);
@@ -146,9 +139,6 @@ mod tauri_app {
             if let Some(db) = app.try_state::<db::AppDatabase>() {
                 tauri::async_runtime::block_on(persist_pet_closed(&db.conn));
             }
-        }
-        if let Some(ws) = app.try_state::<web::WebServerState>() {
-            tauri::async_runtime::block_on(web::do_stop_web_server(&ws));
         }
         if let Some(tm) = app.try_state::<TerminalManager>() {
             tm.kill_all();
@@ -217,7 +207,7 @@ mod tauri_app {
         let running_terminals = |app: &tauri::AppHandle| {
             app.try_state::<TerminalManager>()
                 .map(|tm| {
-                    let emitter = web::event_bridge::EventEmitter::Tauri(app.clone());
+                    let emitter = events::EventEmitter::Tauri(app.clone());
                     tm.count_live_by_owner_window(label, Some(&emitter))
                 })
                 .unwrap_or(0)
@@ -289,43 +279,13 @@ mod tauri_app {
             CloseWindowBehavior::Ask => {
                 let count = running_terminals(&app);
                 if !prompt("ask", count) {
-                    // Fall back to the behavior codeg has always had. Exiting
+                    // Fall back to the behavior harness_studio has always had. Exiting
                     // on a press the user never got to answer would discard
                     // work; hiding discards nothing.
                     hide();
                 }
             }
         }
-    }
-
-    fn summarize_web_auto_start_error(err: &crate::app_error::AppCommandError) -> String {
-        match err
-            .detail
-            .as_deref()
-            .filter(|detail| !detail.trim().is_empty())
-        {
-            Some(detail) if detail != err.message.as_str() => {
-                format!("{}: {}", err.message, detail)
-            }
-            _ => err.message.clone(),
-        }
-    }
-
-    fn notify_web_auto_start_failed(
-        app: &tauri::AppHandle,
-        port: u16,
-        err: &crate::app_error::AppCommandError,
-    ) {
-        let app = app.clone();
-        let body = format!(
-            "Could not start the Web service on port {}: {}",
-            port,
-            summarize_web_auto_start_error(err)
-        );
-        tauri::async_runtime::spawn(async move {
-            let _ =
-                notification::send_notification(app, "Codeg Web service".to_string(), body).await;
-        });
     }
 
     /// Chromium command line WebView2 appends to its own when launching.
@@ -368,11 +328,11 @@ mod tauri_app {
     /// take effect: the next launch would read `false`, do nothing, and still
     /// hand WebKitGTK/WebView2 the inherited flags.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    const RENDERING_OVERRIDE_OWNED_ENV: &str = "CODEG_WEBVIEW_RENDERING_OVERRIDE";
+    const RENDERING_OVERRIDE_OWNED_ENV: &str = "HARNESS_STUDIO_WEBVIEW_RENDERING_OVERRIDE";
 
     /// Opt-out users can disable webview hardware acceleration to work around
     /// GPU driver bugs that produce a black-screen or glitching webview. The
-    /// flag is stored in a tiny sidecar file at `~/.codeg/preferences.json` so
+    /// flag is stored in a tiny sidecar file at `~/.harnessstudio/preferences.json` so
     /// it can be read **before** anything else in `run()` — `set_var` is only
     /// sound while the process is single-threaded, and the logging init alone
     /// spawns a `tracing_appender` worker.
@@ -542,12 +502,12 @@ mod tauri_app {
         // initialization. The callback runs in the *original* process.
         //
         // Skipped in debug builds so a locally-built `cargo run` instance
-        // can run alongside an installed release build of codeg during
+        // can run alongside an installed release build of harness_studio during
         // development. Debug desktop builds use an isolated SQLite file, but
-        // they still share other `app.codeg` data-dir artifacts with release.
+        // they still share other `com.harnessstudio.desktop` data-dir artifacts with release.
         #[cfg(not(debug_assertions))]
         let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // Second launches on Windows/Linux carry `codeg://…` on argv.
+            // Second launches on Windows/Linux carry `harnessstudio://…` on argv.
             // macOS delivers the same URL via the deep-link plugin instead.
             crate::deep_link::handle_argv(app, &argv);
         }));
@@ -561,7 +521,7 @@ mod tauri_app {
             // window is built and re-add the native title bar on top of the
             // app's own toolbar — the Linux "double title bar".
             //
-            // Computer use's strip and action marker are placed by codeg each
+            // Computer use's strip and action marker are placed by harness_studio each
             // time they are made and must never come back where (or as
             // visible as) a previous run left them.
             .plugin(
@@ -586,9 +546,9 @@ mod tauri_app {
             // webview is granted the plugin's commands.
             .plugin(tauri_plugin_global_shortcut::Builder::new().build())
             // "Launch at login". LaunchAgent rather than AppleScript on macOS:
-            // writing `~/Library/LaunchAgents/codeg.plist` needs no Automation
+            // writing `~/Library/LaunchAgents/harness_studio.plist` needs no Automation
             // consent prompt, where scripting System Events does. No extra
-            // startup args — an auto-started codeg is the same app the user
+            // startup args — an auto-started harness_studio is the same app the user
             // would have launched by hand.
             //
             // Nothing rewrites the registration at startup, deliberately. The
@@ -598,7 +558,7 @@ mod tauri_app {
             // an entry in place: GNOME sets `X-GNOME-Autostart-enabled=false`
             // inside the .desktop file the plugin would overwrite from a fixed
             // template. Refreshing would therefore silently undo a disable the
-            // user made outside codeg. Re-toggling the setting rewrites the
+            // user made outside harness_studio. Re-toggling the setting rewrites the
             // path, which is the same repair with consent attached.
             //
             // Two accepted defects live in `auto-launch`, which this plugin
@@ -607,7 +567,7 @@ mod tauri_app {
             // the plugin requires) would not help:
             //   * Windows writes the Run value as `{app_path} {args}` with the
             //     path unquoted. Per-user installs land under
-            //     `C:\Users\<name>\AppData\Local\codeg\`, so a username with a
+            //     `C:\Users\<name>\AppData\Local\harness_studio\`, so a username with a
             //     space produces the classic unquoted-path value. Windows'
             //     successive-prefix parsing still resolves it; the residual
             //     risk is the usual hijack, which already requires the attacker
@@ -634,9 +594,8 @@ mod tauri_app {
             .manage(windows::MergeWindowState::new())
             .manage(windows::AuxWindowState::new())
             .manage(workspace_windows::WorkspaceWindowSession::new())
-            .manage(web::WebServerState::new())
             // Remote-workspace IPC proxy. Routes HTTP / WS for windows
-            // opened against a remote codeg-server through Rust so we
+            // opened against a remote harness-studio-server through Rust so we
             // bypass webview mixed-content blocking and can centrally
             // manage per-window subscriptions.
             .manage(std::sync::Arc::new(
@@ -646,11 +605,11 @@ mod tauri_app {
                 crate::workspace_transfer::WorkspaceTransferManager::new_from_env(),
             ))
             .manage(std::sync::Arc::new(
-                web::event_bridge::WebEventBroadcaster::new(),
+                events::EventBroadcaster::new(),
             ))
             // In-process ACP event bus — typed `Arc<EventEnvelope>` delivery
             // to lifecycle / pet / chat-channel subscribers. Distinct from
-            // the JSON-shape `WebEventBroadcaster` above. The metrics handle
+            // the JSON-shape `EventBroadcaster` above. The metrics handle
             // lives inside the bus so the `/debug/event_metrics` endpoint
             // and shutdown logs can read it.
             .manage({
@@ -668,7 +627,7 @@ mod tauri_app {
 
                 // Unify the data root across every consumer:
                 //   * SQLite database (initialised below)
-                //   * `paths::codeg_uploads_root` / `codeg_pets_root`
+                //   * `paths::harness_studio_uploads_root` / `harness_studio_pets_root`
                 //   * `AppState.data_dir` and every desktop command
                 //     that injects a git credential helper / askpass
                 //     into a subprocess (terminal, ACP, folder ops)
@@ -678,13 +637,13 @@ mod tauri_app {
                 // source of truth; every desktop call site that
                 // historically read `app.path().app_data_dir()` and
                 // passed it to a credential helper has been migrated
-                // to the same helper so a pre-set `CODEG_DATA_DIR` is
+                // to the same helper so a pre-set `HARNESS_STUDIO_DATA_DIR` is
                 // honored end-to-end.
                 //
                 // We also write the absolutized value back to the env,
                 // even when the operator pre-set it, so:
                 //   * subprocesses inherit an absolute path (a relative
-                //     `CODEG_DATA_DIR` would otherwise re-resolve
+                //     `HARNESS_STUDIO_DATA_DIR` would otherwise re-resolve
                 //     against the subprocess CWD, which may differ
                 //     from ours), and
                 //   * any future caller that reaches for the env
@@ -696,7 +655,7 @@ mod tauri_app {
                 // main thread before any window or async runtime task
                 // reads the var, the Tauri plugins registered above
                 // (window state, opener, dialog, updater, process,
-                // notification) do not read `CODEG_DATA_DIR`, and the
+                // notification) do not read `HARNESS_STUDIO_DATA_DIR`, and the
                 // value is never mutated again for the lifetime of the
                 // process.
                 let effective_data_dir = paths::resolve_effective_data_dir(&app_data_dir);
@@ -705,24 +664,24 @@ mod tauri_app {
                 // the `unsafe` block, mirroring the WebView2 rendering
                 // override.
                 unsafe {
-                    std::env::set_var("CODEG_DATA_DIR", &effective_data_dir);
+                    std::env::set_var("HARNESS_STUDIO_DATA_DIR", &effective_data_dir);
                 }
 
-                // `CODEG_HOME` overrides `CODEG_DATA_DIR` inside
-                // `paths::codeg_uploads_root` / `codeg_pets_root` for
-                // backwards-compatibility with the legacy `~/.codeg/`
+                // `HARNESS_STUDIO_HOME` overrides `HARNESS_STUDIO_DATA_DIR` inside
+                // `paths::harness_studio_uploads_root` / `harness_studio_pets_root` for
+                // backwards-compatibility with the legacy `~/.harnessstudio/`
                 // layout. If both are set and point at different roots,
-                // uploads/pets land on `CODEG_HOME` while the database
-                // lands on `CODEG_DATA_DIR` — a silent split. The
+                // uploads/pets land on `HARNESS_STUDIO_HOME` while the database
+                // lands on `HARNESS_STUDIO_DATA_DIR` — a silent split. The
                 // backup story here is "loud warning, no automatic
                 // override": the operator likely meant one of them, but
                 // we don't know which.
-                if let Some(home) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
+                if let Some(home) = std::env::var_os("HARNESS_STUDIO_HOME").filter(|s| !s.is_empty()) {
                     let home_path = git_credential::absolutize(std::path::Path::new(&home));
                     if home_path != effective_data_dir {
                         tracing::warn!(
-                            "[paths][WARN] CODEG_HOME ({}) and CODEG_DATA_DIR ({}) point at different roots. \
-                             Uploads/pets follow CODEG_HOME; the database follows CODEG_DATA_DIR. \
+                            "[paths][WARN] HARNESS_STUDIO_HOME ({}) and HARNESS_STUDIO_DATA_DIR ({}) point at different roots. \
+                             Uploads/pets follow HARNESS_STUDIO_HOME; the database follows HARNESS_STUDIO_DATA_DIR. \
                              Unset one or align them to avoid split state.",
                             home_path.display(),
                             effective_data_dir.display()
@@ -750,7 +709,7 @@ mod tauri_app {
                     &db.conn,
                 ));
                 if let Some(hub) = crate::logging::hub::log_hub() {
-                    hub.set_emitter(crate::web::event_bridge::EventEmitter::Tauri(
+                    hub.set_emitter(crate::events::EventEmitter::Tauri(
                         app.handle().clone(),
                     ));
                 }
@@ -787,13 +746,13 @@ mod tauri_app {
 
                 // Reclaim scratch directories this process loses track of
                 // mid-session. Its own timer on purpose: the ACP idle sweep is
-                // not spawned at all when `CODEG_ACP_IDLE_TIMEOUT_SECS=0`, and
+                // not spawned at all when `HARNESS_STUDIO_ACP_IDLE_TIMEOUT_SECS=0`, and
                 // turning off idle disconnects must not also turn off disk
                 // reclamation on a machine leaking gigabytes per launch.
                 tauri::async_runtime::spawn(crate::scratch_sweep_task());
 
                 // Install bundled expert skills into the central store
-                // (`~/.codeg/skills/`). Runs in the background and does
+                // (`~/.harnessstudio/skills/`). Runs in the background and does
                 // not block startup; failures are logged but non-fatal.
                 tauri::async_runtime::spawn(async move {
                     let report = crate::commands::experts::ensure_central_experts_installed().await;
@@ -814,7 +773,7 @@ mod tauri_app {
                 });
 
                 // Install bundled scientific-research skills into the same
-                // central store (`~/.codeg/skills/`). Background, non-blocking;
+                // central store (`~/.harnessstudio/skills/`). Background, non-blocking;
                 // failures are logged but non-fatal.
                 tauri::async_runtime::spawn(async move {
                     let report = crate::commands::science::ensure_central_science_installed().await;
@@ -902,7 +861,7 @@ mod tauri_app {
                 // configures a WebDAV endpoint.
                 {
                     let db_for_sync = app.state::<db::AppDatabase>().conn.clone();
-                    let emitter = std::sync::Arc::new(web::event_bridge::EventEmitter::Tauri(
+                    let emitter = std::sync::Arc::new(events::EventEmitter::Tauri(
                         app.handle().clone(),
                     ));
                     tauri::async_runtime::spawn(async move {
@@ -925,7 +884,7 @@ mod tauri_app {
                     let db = db::AppDatabase {
                         conn: app.state::<db::AppDatabase>().conn.clone(),
                     };
-                    let emitter = web::event_bridge::EventEmitter::Tauri(app.handle().clone());
+                    let emitter = events::EventEmitter::Tauri(app.handle().clone());
                     tauri::async_runtime::spawn(async move {
                         let n =
                             crate::commands::folders::backfill_worktree_folder_aliases(&emitter, &db)
@@ -953,7 +912,7 @@ mod tauri_app {
                 {
                     let ccm = app.state::<ChatChannelManager>();
                     let broadcaster =
-                        app.state::<std::sync::Arc<web::event_bridge::WebEventBroadcaster>>();
+                        app.state::<std::sync::Arc<events::EventBroadcaster>>();
                     let db_conn = app.state::<db::AppDatabase>().conn.clone();
                     let data_dir = effective_data_dir.clone();
                     let ccm_ref = ccm.clone_ref();
@@ -963,7 +922,7 @@ mod tauri_app {
                         .inner()
                         .clone();
                     let cm = app.state::<ConnectionManager>().clone_ref();
-                    let emitter = web::event_bridge::EventEmitter::Tauri(app.handle().clone());
+                    let emitter = events::EventEmitter::Tauri(app.handle().clone());
                     tauri::async_runtime::spawn(async move {
                         ccm_ref
                             .start_background(br, bus, db_conn, data_dir, cm, emitter)
@@ -983,10 +942,10 @@ mod tauri_app {
                         .inner()
                         .clone();
                     let broadcaster = app
-                        .state::<std::sync::Arc<web::event_bridge::WebEventBroadcaster>>()
+                        .state::<std::sync::Arc<events::EventBroadcaster>>()
                         .inner()
                         .clone();
-                    let emitter = web::event_bridge::EventEmitter::Tauri(app.handle().clone());
+                    let emitter = events::EventEmitter::Tauri(app.handle().clone());
                     let pet_state_handle = app
                         .state::<crate::pet_state_mapper::PetStateHandle>()
                         .inner()
@@ -1014,10 +973,10 @@ mod tauri_app {
                         .inner()
                         .clone();
                     let broadcaster = app
-                        .state::<std::sync::Arc<web::event_bridge::WebEventBroadcaster>>()
+                        .state::<std::sync::Arc<events::EventBroadcaster>>()
                         .inner()
                         .clone();
-                    let emitter = web::event_bridge::EventEmitter::Tauri(app.handle().clone());
+                    let emitter = events::EventEmitter::Tauri(app.handle().clone());
                     let manager = app.state::<ConnectionManager>().inner().clone_ref();
                     let db_conn = app.state::<db::AppDatabase>().conn.clone();
                     tauri::async_runtime::spawn(
@@ -1162,7 +1121,7 @@ mod tauri_app {
                                 std::sync::Arc::new(db::AppDatabase {
                                     conn: db_conn.clone(),
                                 }),
-                                crate::web::event_bridge::EventEmitter::Tauri(
+                                crate::events::EventEmitter::Tauri(
                                     app.handle().clone(),
                                 ),
                                 chat_authoring_config.clone(),
@@ -1217,31 +1176,10 @@ mod tauri_app {
                     ));
                 }
 
-                match tauri::async_runtime::block_on(web::load_web_service_config(&db.conn)) {
-                    Ok(config) if config.auto_start => {
-                        let port = config.port.unwrap_or(web::DEFAULT_WEB_SERVICE_PORT);
-                        let ws = app.state::<web::WebServerState>();
-                        if let Err(err) =
-                            tauri::async_runtime::block_on(web::do_start_web_server_tauri(
-                                app.handle().clone(),
-                                &ws,
-                                config.port,
-                                None,
-                                config.token,
-                            ))
-                        {
-                            tracing::error!("[WEB] auto-start failed: {err}");
-                            notify_web_auto_start_failed(app.handle(), port, &err);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!("[WEB] failed to load auto-start config: {err}"),
-                }
-
                 // Spawn the idle sweep so connections abandoned without an
                 // explicit disconnect (e.g. window/tab closed without
                 // teardown, panic survivors) are reaped. Override the
-                // 60-second default via `CODEG_ACP_IDLE_TIMEOUT_SECS`
+                // 60-second default via `HARNESS_STUDIO_ACP_IDLE_TIMEOUT_SECS`
                 // (set to `0` to disable).
                 if let Some(idle_timeout) = crate::acp::idle_timeout_from_env() {
                     let cm = app.state::<ConnectionManager>().clone_ref();
@@ -1254,7 +1192,7 @@ mod tauri_app {
 
                 // Office watch preview servers: reap dead children + ref0
                 // stragglers (live previews are never swept). Override via
-                // `CODEG_OFFICE_WATCH_IDLE_TIMEOUT_SECS` (`0` disables).
+                // `HARNESS_STUDIO_OFFICE_WATCH_IDLE_TIMEOUT_SECS` (`0` disables).
                 if let Some(idle_timeout) = crate::office_watch::idle_timeout_from_env() {
                     tauri::async_runtime::spawn(crate::office_watch::office_watch_idle_sweep_task(
                         idle_timeout,
@@ -1264,13 +1202,13 @@ mod tauri_app {
 
                 // Automation engine: drives manual + scheduled fires, settles
                 // runs off the event bus, reconciles, and recovers on boot. One
-                // per process; mirrored in `bin/codeg_server.rs`.
+                // per process; mirrored in `bin/harness_studio_server.rs`.
                 if let Some(engine) = crate::automation::build_engine(
                     crate::db::AppDatabase {
                         conn: app.state::<crate::db::AppDatabase>().conn.clone(),
                     },
                     app.state::<ConnectionManager>().clone_ref(),
-                    crate::web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                    crate::events::EventEmitter::Tauri(app.handle().clone()),
                     app.state::<std::sync::Arc<crate::acp::InternalEventBus>>()
                         .inner()
                         .clone(),
@@ -1281,13 +1219,13 @@ mod tauri_app {
 
                 // Work-task engine: drives the todo→…→done pipeline, settles
                 // runs off the event bus, recovers merges from git truth on
-                // boot. One per process; mirrored in `bin/codeg_server.rs`.
+                // boot. One per process; mirrored in `bin/harness_studio_server.rs`.
                 if let Some(engine) = crate::work_task::build_task_engine(
                     crate::db::AppDatabase {
                         conn: app.state::<crate::db::AppDatabase>().conn.clone(),
                     },
                     app.state::<ConnectionManager>().clone_ref(),
-                    crate::web::event_bridge::EventEmitter::Tauri(app.handle().clone()),
+                    crate::events::EventEmitter::Tauri(app.handle().clone()),
                     app.state::<std::sync::Arc<crate::acp::InternalEventBus>>()
                         .inner()
                         .clone(),
@@ -1296,7 +1234,7 @@ mod tauri_app {
                     tauri::async_runtime::spawn(crate::work_task::run_task_engine(engine));
                 }
 
-                // OS `codeg://` URLs. Register the listener after the DB is
+                // OS `harnessstudio://` URLs. Register the listener after the DB is
                 // live so a warm-start click can look the conversation up.
                 // Cold-start URLs are also read here and baked into the main
                 // window path — an event emitted before the webview subscribes
@@ -1314,7 +1252,7 @@ mod tauri_app {
                     });
                     // The Linux bundler writes a `.desktop` whose `Exec` has no
                     // `%u` field code (tauri#16014), so an installed deb/rpm/
-                    // AppImage is advertised as the `x-scheme-handler/codeg`
+                    // AppImage is advertised as the `x-scheme-handler/harness_studio`
                     // owner but is launched with no argument at all. The
                     // plugin's own registration writes a handler entry that
                     // does pass `%u`; on Windows it adds the HKCU class key a
@@ -1359,7 +1297,7 @@ mod tauri_app {
 
                 // The workspace windows open at the last quit come back: the
                 // local one (`main`) and every remote workspace window (see
-                // `workspace_windows`). A `codeg://` link on the command line
+                // `workspace_windows`). A `harnessstudio://` link on the command line
                 // asks for the local workspace, which then opens in front
                 // whatever the last session left.
                 let restore = tauri::async_runtime::block_on(workspace_windows::load_restore(
@@ -1375,13 +1313,13 @@ mod tauri_app {
                 // `list_open_folder_details` / `list_opened_tabs` inside it. It
                 // starts hidden only when it was hidden to the tray at quit and
                 // other workspace windows are coming back in its place; the
-                // tray, a `codeg://` link and the other explicit local-workspace
+                // tray, a `harnessstudio://` link and the other explicit local-workspace
                 // actions still bring it up, and so do the Dock and a second
                 // launch once no other workspace is open or on its way back.
                 if app.get_webview_window("main").is_none() {
                     let url = tauri::WebviewUrl::App(workspace_path.into());
                     let builder = tauri::WebviewWindowBuilder::new(app, "main", url)
-                        .title("Codeg")
+                        .title("harness studio")
                         .inner_size(1260.0, 860.0)
                         .min_inner_size(400.0, 600.0)
                         .visible(restore.show_local());
@@ -1870,9 +1808,9 @@ mod tauri_app {
                 logging_commands::open_logs_dir,
                 delegation_commands::get_delegation_settings,
                 delegation_commands::set_delegation_settings,
-                crate::commands::mcp_service::get_codeg_mcp_service_status,
-                crate::commands::mcp_service::start_codeg_mcp_service,
-                crate::commands::mcp_service::set_codeg_mcp_tool_group,
+                crate::commands::mcp_service::get_harness_studio_mcp_service_status,
+                crate::commands::mcp_service::start_harness_studio_mcp_service,
+                crate::commands::mcp_service::set_harness_studio_mcp_tool_group,
                 feedback_commands::get_feedback_settings,
                 feedback_commands::set_feedback_settings,
                 feedback_commands::submit_session_feedback,
@@ -1941,6 +1879,7 @@ mod tauri_app {
                 acp_commands::acp_get_session_snapshot_by_conversation,
                 acp_commands::acp_find_connection_for_conversation,
                 acp_commands::acp_list_agents,
+                acp_commands::acp_list_agents_snapshot,
                 acp_commands::acp_get_agent_status,
                 acp_commands::acp_env_diagnostics,
                 acp_commands::acp_clear_binary_cache,
@@ -2177,15 +2116,10 @@ mod tauri_app {
                 chat_channel_commands::weixin_get_qrcode,
                 chat_channel_commands::weixin_check_qrcode,
                 model_provider_commands::list_model_providers,
+                crate::commands::model_discovery::model_provider_fetch_models,
                 model_provider_commands::create_model_provider,
                 model_provider_commands::update_model_provider,
                 model_provider_commands::delete_model_provider,
-                web::start_web_server,
-                web::stop_web_server,
-                web::get_web_server_status,
-                web::get_web_service_config,
-                web::update_web_service_config,
-                web::probe_web_service_port,
             ])
             .build(tauri::generate_context!())
             .expect("error while building tauri application")

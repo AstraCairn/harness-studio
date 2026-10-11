@@ -113,7 +113,7 @@ describe("parseAskQuestionInput", () => {
     // CodexToolCallMapper.ts::createMcpToolCallUpdate. The questions live under
     // `arguments`, not the top level.
     const input = JSON.stringify({
-      server: "codeg-mcp",
+      server: "harness-studio-mcp",
       tool: "ask_user_question",
       arguments: {
         questions: [
@@ -322,7 +322,7 @@ describe("parseAskQuestionOutcome", () => {
   it("parses codex request_user_input's object-keyed answers", () => {
     // Verbatim function_call_output shape from ~/.codex/sessions: answers are
     // keyed by the question id, each carrying its own `answers` array — NOT the
-    // codeg-mcp `{answers:[{…,selected}]}` envelope. Without this the card shows
+    // harness-studio-mcp `{answers:[{…,selected}]}` envelope. Without this the card shows
     // "no selection" (the reported bug).
     const output = JSON.stringify({
       answers: { drink_preference: { answers: ["咖啡（推荐）"] } },
@@ -357,9 +357,9 @@ describe("parseAskQuestionOutcome", () => {
 
   it("decodes codex's note encoding to the text the user chose", () => {
     // codex writes a free-form note as a `user_note: ` entry next to the
-    // option labels. codex-acp 2.1.0 hands codex the free text codeg's card
+    // option labels. codex-acp 2.1.0 hands codex the free text harness_studio's card
     // sends as ["None of the above", "user_note: <text>"] (recorded on the
-    // adapter with codeg's capabilities). Codex's own TUI writes the same pair
+    // adapter with harness_studio's capabilities). Codex's own TUI writes the same pair
     // for its "None of the above" + notes, an option plus a note, and a
     // free-form question as the note alone.
     const output = JSON.stringify({

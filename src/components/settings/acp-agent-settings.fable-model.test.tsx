@@ -13,14 +13,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import enMessages from "@/i18n/messages/en.json"
 import {
-  acpListAgents,
+  acpListAgentsSnapshot,
   acpUpdateAgentConfig,
   acpUpdateAgentEnv,
   listModelProviders,
+  fetchProviderModels,
 } from "@/lib/api"
 import type { AcpAgentInfo, ModelProviderInfo } from "@/lib/types"
 
-import { AcpAgentSettings } from "./acp-agent-settings"
+import {
+  AcpAgentSettings,
+  invalidateAgentCheckCache,
+} from "./acp-agent-settings"
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -124,7 +128,7 @@ async function choose(
 }
 
 async function openPanel(agent: AcpAgentInfo) {
-  vi.mocked(acpListAgents).mockResolvedValue([agent])
+  vi.mocked(acpListAgentsSnapshot).mockResolvedValue([agent])
   render(
     <NextIntlClientProvider locale="en" messages={enMessages}>
       <AcpAgentSettings />
@@ -147,9 +151,83 @@ async function saveConfig(user: ReturnType<typeof userEvent.setup>) {
 
 describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
   beforeEach(() => {
+    invalidateAgentCheckCache()
     vi.mocked(listModelProviders).mockResolvedValue([])
-    vi.mocked(acpUpdateAgentEnv).mockResolvedValue(0)
-    vi.mocked(acpUpdateAgentConfig).mockResolvedValue(0)
+    vi.mocked(acpUpdateAgentEnv).mockReset().mockResolvedValue(0)
+    vi.mocked(acpUpdateAgentConfig).mockReset().mockResolvedValue(0)
+  })
+
+  it("edits named mappings and subagent context through the native draft without clobbering unrelated values", async () => {
+    const user = userEvent.setup()
+    await openPanel(
+      claudeAgent({
+        config_json: JSON.stringify({
+          env: {
+            ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: "Old",
+            CLAUDE_CODE_SUBAGENT_MODEL: "child",
+            ANTHROPIC_REASONING_MODEL: "legacy",
+            UNRELATED: "keep",
+          },
+        }),
+      })
+    )
+    await user.clear(screen.getByLabelText("Sonnet display name"))
+    await user.type(screen.getByLabelText("Opus display name"), "Deep")
+    await user.click(screen.getByLabelText("Declare 1M for Subagent model"))
+    expect(nativeConfigEnv()).toMatchObject({
+      ANTHROPIC_DEFAULT_OPUS_MODEL_NAME: "Deep",
+      CLAUDE_CODE_SUBAGENT_MODEL: "child[1m]",
+      ANTHROPIC_REASONING_MODEL: "legacy",
+      UNRELATED: "keep",
+    })
+    expect(nativeConfigEnv()).not.toHaveProperty(
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"
+    )
+    const saved = await saveConfig(user)
+    expect(saved.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("child[1m]")
+    expect(saved.env).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME")
+  })
+
+  it("fetches models in the custom endpoint draft without saving and fills roles through the draft handlers", async () => {
+    vi.mocked(fetchProviderModels).mockResolvedValue({
+      endpoint: "https://gateway.test/cc/v1/models",
+      models: [{ id: "claude-new" }],
+    })
+    const user = userEvent.setup()
+    await openPanel(
+      claudeAgent({
+        config_json: JSON.stringify({
+          env: {
+            ANTHROPIC_BASE_URL: "https://gateway.test/cc",
+            ANTHROPIC_AUTH_TOKEN: "fixture-key",
+            ANTHROPIC_MODEL: "manual",
+            ANTHROPIC_DEFAULT_OPUS_MODEL: "keep",
+          },
+        }),
+      })
+    )
+    await user.click(screen.getByRole("button", { name: "Fetch models" }))
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Fetched 1 models"
+    )
+    expect(acpUpdateAgentConfig).not.toHaveBeenCalled()
+    expect(controlUnder("Main Model", "textbox")).toHaveValue("manual")
+    await user.click(screen.getByText("Advanced configuration"))
+    await user.click(
+      screen.getByRole("button", { name: "Fill empty roles from main model" })
+    )
+    expect(nativeConfigEnv()).toMatchObject({
+      ANTHROPIC_MODEL: "manual",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "keep",
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "manual",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "manual",
+      ANTHROPIC_DEFAULT_FABLE_MODEL: "manual",
+    })
+    await saveConfig(user)
+    expect(
+      vi.mocked(acpUpdateAgentEnv).mock.calls[0][1].env
+        .ANTHROPIC_DEFAULT_FABLE_MODEL
+    ).toBe("manual")
   })
 
   it("shows the pin from the native config, and an edit saves that key only", async () => {
@@ -165,6 +243,7 @@ describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
         }),
       })
     )
+    await user.click(screen.getByText("Advanced configuration"))
     const fable = controlUnder("Default Fable Model", "textbox")
     await waitFor(() => expect(fable).toHaveValue("gw/fable-old"))
     expect(fable).not.toHaveAttribute("readonly")
@@ -191,7 +270,12 @@ describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
 
   it("follows the bound provider: set by one that pins Fable, cleared by one that does not", async () => {
     vi.mocked(listModelProviders).mockResolvedValue([
-      provider(1, "A", { main: "model-a", fable: "gw/fable-a" }),
+      provider(1, "A", {
+        main: "model-a",
+        fable: "gw/fable-a",
+        fableName: "Long",
+        subagent: "child[1m]",
+      }),
       provider(2, "B", { main: "model-b" }),
     ])
     const user = userEvent.setup()
@@ -199,6 +283,7 @@ describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
 
     // A first-time pick takes the head of the list: Provider A.
     await choose(user, "Auth Mode", "Model Provider")
+    await user.click(screen.getByText("Advanced configuration"))
     const fable = () => controlUnder("Default Fable Model", "textbox")
     await waitFor(() => expect(fable()).toHaveValue("gw/fable-a"))
     expect(fable()).toHaveAttribute("readonly")
@@ -206,6 +291,8 @@ describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
     const boundToA = await saveConfig(user)
     expect(boundToA.modelProviderId).toBe(1)
     expect(boundToA.env[FABLE_KEY]).toBe("gw/fable-a")
+    expect(boundToA.env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME).toBe("Long")
+    expect(boundToA.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("child[1m]")
 
     await choose(user, "Select Model Provider", "Provider B")
     await waitFor(() => expect(fable()).toHaveValue(""))
@@ -213,6 +300,10 @@ describe("AcpAgentSettings — the Claude Code Fable model pin", () => {
     const boundToB = await saveConfig(user)
     expect(boundToB.modelProviderId).toBe(2)
     expect(boundToB.env).not.toHaveProperty(FABLE_KEY)
+    expect(boundToB.env).not.toHaveProperty(
+      "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"
+    )
+    expect(boundToB.env).not.toHaveProperty("CLAUDE_CODE_SUBAGENT_MODEL")
     expect(boundToB.env.ANTHROPIC_MODEL).toBe("model-b")
   })
 })

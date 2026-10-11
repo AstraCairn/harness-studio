@@ -1,14 +1,14 @@
 //! What the frontend is told about computer use.
 //!
-//! On the desktop, deliberately not `web::event_bridge::emit_event`, which
+//! On the desktop, deliberately not `events::emit_event`, which
 //! also fans every event out to the web service's clients. What these carry
 //! — the titles of the windows a person shared, which of their applications
 //! an agent just looked at — is about this machine's screen, and a browser
 //! connected to the desktop's web service is somewhere else: there, sharing
 //! a window is the desktop window's own action, and so is watching it.
 //!
-//! codeg-server has no window of its own. Where the person who runs it has
-//! let it share the screen it runs on (`CODEG_COMPUTER_USE`), its web
+//! harness-studio-server has no window of its own. Where the person who runs it has
+//! let it share the screen it runs on (`HARNESS_STUDIO_COMPUTER_USE`), its web
 //! clients — each holding the server's token — are the only panel there is,
 //! and they are told.
 
@@ -23,7 +23,7 @@ use super::backend::BackendStatus;
 use super::driver_admin::DriverInfo;
 use super::stop_shortcut::StopKeyStatus;
 use super::targets::{SharedApp, SharedScreen, SharedWindow};
-use crate::web::event_bridge::WebEventBroadcaster;
+use crate::events::EventBroadcaster;
 
 /// Every window with a grant in force — the source of truth for the panel.
 pub const STATE_EVENT: &str = "computer://state";
@@ -53,8 +53,8 @@ pub enum ComputerEvents {
     /// service (see the module note).
     #[cfg(feature = "tauri-runtime")]
     Desktop(tauri::AppHandle),
-    /// codeg-server's web clients: the only panel there is in server mode.
-    Web(Arc<WebEventBroadcaster>),
+    /// harness-studio-server's web clients: the only panel there is in server mode.
+    Web(Arc<EventBroadcaster>),
 }
 
 impl ComputerEvents {

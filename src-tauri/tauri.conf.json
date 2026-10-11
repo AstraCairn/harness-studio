@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HarnessStudio",
+  "productName": "harness studio",
   "version": "0.1.0",
   "identifier": "com.harnessstudio.desktop",
   "build": {
@@ -27,10 +27,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../out": "web/"
-    },
-    "externalBin": ["binaries/codeg-mcp", "binaries/codeg-computer-helper"],
+    "externalBin": [
+      "binaries/harness-studio-mcp",
+      "binaries/harness-studio-computer-helper"
+    ],
     "windows": {
       "nsis": {
         "installerHooks": "./windows/installer-hooks.nsh"

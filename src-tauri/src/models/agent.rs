@@ -12,7 +12,7 @@ pub const CUSTOM_AGENT_WIRE_PREFIX: &str = "custom:";
 /// launch metadata (`acp::registry`) and a dedicated transcript parser
 /// (`parsers::*`). [`AgentType::Custom`] is the open end: a user-registered
 /// ACP agent whose launch metadata lives in the database
-/// (`acp::custom_registry`) and whose history comes from codeg's own ACP
+/// (`acp::custom_registry`) and whose history comes from harness_studio's own ACP
 /// transcript (`parsers::acp_native`) rather than an agent-specific store.
 ///
 /// The `Custom` payload is an **interned** slug (`crate::intern`), not a
@@ -247,7 +247,10 @@ mod tests {
             assert_eq!(agent.as_wire(), wire);
             assert_eq!(AgentType::from_wire(wire), Some(agent));
             // The JSON form is what `serde_json::to_string` writes to the DB.
-            assert_eq!(serde_json::to_string(&agent).unwrap(), format!("\"{wire}\""));
+            assert_eq!(
+                serde_json::to_string(&agent).unwrap(),
+                format!("\"{wire}\"")
+            );
             assert_eq!(
                 serde_json::from_str::<AgentType>(&format!("\"{wire}\"")).unwrap(),
                 agent

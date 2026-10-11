@@ -227,9 +227,7 @@ describe("SystemNetworkSettings — install the server can't write", () => {
     renderWithIntl()
 
     expect(await screen.findByText(UNWRITABLE_BIN_TEXT)).toBeVisible()
-    expect(
-      await screen.findByRole("button", { name: "View v0.17.0 release" })
-    ).toBeVisible()
+    expect(await screen.findByText("v0.17.0")).toBeVisible()
     expect(
       screen.queryByRole("button", { name: "Upgrade to v0.17.0" })
     ).not.toBeInTheDocument()
@@ -316,9 +314,7 @@ describe("SystemNetworkSettings — install the server can't write", () => {
     expect(
       await screen.findByRole("button", { name: "Roll back" })
     ).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "View v0.17.0 release" })
-    ).toBeVisible()
+    expect(screen.getByText("v0.17.0")).toBeVisible()
   })
 
   it("looks again when the operator checks for updates after fixing it", async () => {
@@ -454,9 +450,7 @@ describe("SystemNetworkSettings — update source outage", () => {
     renderWithIntl()
 
     // The release-link affordance is shown, not the in-place upgrade button.
-    expect(
-      await screen.findByRole("button", { name: "View v0.16.0 release" })
-    ).toBeInTheDocument()
+    expect(await screen.findByText("v0.16.0")).toBeInTheDocument()
     expect(
       screen.queryByRole("button", { name: "Upgrade to v0.16.0" })
     ).not.toBeInTheDocument()

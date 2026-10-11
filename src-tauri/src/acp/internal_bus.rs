@@ -2,14 +2,14 @@
 //!
 //! Carries `Arc<EventEnvelope>` directly to back-end consumers (lifecycle,
 //! pet state mapper, chat-channel subscribers). Distinct from
-//! `WebEventBroadcaster`, which carries `Arc<serde_json::Value>` for
+//! `EventBroadcaster`, which carries `Arc<serde_json::Value>` for
 //! transport-bound JSON delivery to WS clients.
 //!
 //! Two reasons to split the buses:
 //!
 //! 1. **No JSON parse on the consumer side.** Every back-end subscriber used
 //!    to call `serde_json::from_value(payload.clone())` on the broadcaster's
-//!    `WebEvent.payload`, paying the parse cost per event per subscriber.
+//!    `AppEvent.payload`, paying the parse cost per event per subscriber.
 //!    With a typed bus they receive the envelope directly.
 //!
 //! 2. **No frontend dedup needed.** Before the split, web/remote-desktop WS
@@ -27,7 +27,7 @@ use tokio::sync::broadcast;
 use crate::acp::types::EventEnvelope;
 
 /// Capacity of the broadcast channel. Sized to the same headroom as
-/// `WebEventBroadcaster` (4096) — they observe the same emit rate so the
+/// `EventBroadcaster` (4096) — they observe the same emit rate so the
 /// burst tolerance is identical.
 const BUS_CAPACITY: usize = 4096;
 
@@ -161,7 +161,10 @@ mod tests {
         Arc::new(EventEnvelope {
             seq,
             connection_id: "c1".into(),
-            payload: AcpEvent::ContentDelta { text: "x".into(), parent_tool_use_id: None },
+            payload: AcpEvent::ContentDelta {
+                text: "x".into(),
+                parent_tool_use_id: None,
+            },
         })
     }
 

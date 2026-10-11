@@ -1,4 +1,4 @@
-//! The `codeg-doc:` document guest: a local HTML file shown through a webview
+//! The `harness-studio-doc:` document guest: a local HTML file shown through a webview
 //! of its own, whose every request the host answers from the file's folder.
 //! This is what the desktop shows for an `.html` file instead of an inline
 //! `srcdoc` preview: a real document with a real URL, so routing, `fetch` of
@@ -8,7 +8,7 @@
 //!
 //! - **Only guests have the scheme.** The handler is registered on the guest
 //!   webview's own builder, so the app's webview and ordinary browser tabs
-//!   cannot address `codeg-doc:` at all; and the handler is bound to one
+//!   cannot address `harness-studio-doc:` at all; and the handler is bound to one
 //!   grant (root + entry) and checks the webview id it is called for.
 //! - **Only files under the root.** Same rule as the inline preview: the root
 //!   is the workspace folder the file sits in (else its own directory), the
@@ -48,9 +48,9 @@ use std::fs::{File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(any(unix, test))]
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{header, Request, Response, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
@@ -59,8 +59,8 @@ use tauri::Url;
 
 /// Label prefix of every document guest webview. Like `browser-`, it must
 /// never appear in a capability (`mod.rs` has the test).
-pub const DOC_LABEL_PREFIX: &str = "codeg-doc-";
-pub const DOC_SCHEME: &str = "codeg-doc";
+pub const DOC_LABEL_PREFIX: &str = "harness-studio-doc-";
+pub const DOC_SCHEME: &str = "harness-studio-doc";
 
 /// The host part of one grant's document URLs, minted when the grant is.
 ///
@@ -140,8 +140,8 @@ pub fn engine_url(url: &Url) -> Url {
 /// scheme to `http(s)://<scheme>.<host>` on Windows, so both spellings count
 /// — but only that one host, in either spelling:
 ///
-/// - `codeg-doc.` as a PREFIX would make every registrable domain someone
-///   owns a guest address (`https://codeg-doc.example.com/`), and a guest is
+/// - `harness-studio-doc.` as a PREFIX would make every registrable domain someone
+///   owns a guest address (`https://harness-studio-doc.example.com/`), and a guest is
 ///   allowed to navigate to its own addresses, which is how a document with
 ///   scripts would send what it read to its author.
 /// - any host under the scheme would let one guest address ANOTHER guest's
@@ -375,7 +375,7 @@ impl DocGrant {
     /// The handler is registered per webview and checks the webview it is
     /// called for, but that only says which guest is asking — not what it
     /// asked for. A guest can address any host under the scheme (wry's
-    /// Windows filter is `http://codeg-doc.*`, and the macOS handler takes
+    /// Windows filter is `http://harness-studio-doc.*`, and the macOS handler takes
     /// the scheme whatever the host), so a request for another guest's
     /// origin arrives right here. Answering it would serve this root's files
     /// — no leak in itself — under the other document's origin, which is the
@@ -605,7 +605,10 @@ fn open_beneath(canonical: &Path) -> std::io::Result<File> {
     // SAFETY: plain libc calls with checked arguments; every descriptor is
     // owned by a `File` as soon as it is valid, so none leaks on an error.
     let mut dir = unsafe {
-        let fd = libc::open(c"/".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC);
+        let fd = libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        );
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -767,7 +770,12 @@ impl Served {
 /// The answer to a request from a webview that is not the grant's own. The
 /// handler is per webview already; this is the belt to that suspender.
 pub fn forbidden() -> Response<Vec<u8>> {
-    Served::error(StatusCode::FORBIDDEN, "not this document's webview", DocMode::Safe).response
+    Served::error(
+        StatusCode::FORBIDDEN,
+        "not this document's webview",
+        DocMode::Safe,
+    )
+    .response
 }
 
 // ---------------------------------------------------------------------------
@@ -996,7 +1004,11 @@ mod tests {
     }
 
     fn grant_in(dir: &Path) -> DocGrant {
-        let entry = write(dir, "site/index.html", b"<!doctype html><script src=app.js></script>");
+        let entry = write(
+            dir,
+            "site/index.html",
+            b"<!doctype html><script src=app.js></script>",
+        );
         write(dir, "site/app.js", b"console.log(1)");
         write(dir, "site/img/a.png", &[0x89, b'P', b'N', b'G']);
         write(dir, "secret.txt", b"outside");
@@ -1018,23 +1030,59 @@ mod tests {
         let grant = grant_in(dir.path());
         let page = get(&grant, "/index.html");
         assert_eq!(page.response.status(), StatusCode::OK);
-        assert_eq!(page.response.headers()[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(
+            page.response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
         assert!(csp(&page).contains("script-src 'none'"));
-        assert_eq!(page.response.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-        assert_eq!(page.response.headers()[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(
+            page.response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(
+            page.response.headers()[header::REFERRER_POLICY],
+            "no-referrer"
+        );
         assert_eq!(page.response.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(page.response.body(), b"<!doctype html><script src=app.js></script>");
+        assert_eq!(
+            page.response.body(),
+            b"<!doctype html><script src=app.js></script>"
+        );
         // A directory answers with its index; the root itself too.
         assert_eq!(get(&grant, "/").response.status(), StatusCode::OK);
-        assert_eq!(get(&grant, "/img/a.png").response.headers()[header::CONTENT_TYPE], "image/png");
-        assert_eq!(get(&grant, "/img/").response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(get(&grant, "/missing.css").response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            get(&grant, "/img/a.png").response.headers()[header::CONTENT_TYPE],
+            "image/png"
+        );
+        assert_eq!(
+            get(&grant, "/img/").response.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(&grant, "/missing.css").response.status(),
+            StatusCode::NOT_FOUND
+        );
         // Percent-encoded segments decode; traversal and separators do not.
-        assert_eq!(get(&grant, "/img/%61.png").response.status(), StatusCode::OK);
-        assert_eq!(get(&grant, "/../secret.txt").response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(get(&grant, "/%2e%2e/secret.txt").response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(get(&grant, "/img%2F..%2F..%2Fsecret.txt").response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(get(&grant, "/a%00.html").response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            get(&grant, "/img/%61.png").response.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get(&grant, "/../secret.txt").response.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get(&grant, "/%2e%2e/secret.txt").response.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get(&grant, "/img%2F..%2F..%2Fsecret.txt").response.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get(&grant, "/a%00.html").response.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[cfg(unix)]
@@ -1042,12 +1090,21 @@ mod tests {
     fn a_symlink_out_of_the_root_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let grant = grant_in(dir.path());
-        std::os::unix::fs::symlink(dir.path().join("secret.txt"), dir.path().join("site/leak.txt"))
-            .unwrap();
-        assert_eq!(get(&grant, "/leak.txt").response.status(), StatusCode::FORBIDDEN);
+        std::os::unix::fs::symlink(
+            dir.path().join("secret.txt"),
+            dir.path().join("site/leak.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            get(&grant, "/leak.txt").response.status(),
+            StatusCode::FORBIDDEN
+        );
         // A symlink to a sibling inside the root is fine.
-        std::os::unix::fs::symlink(dir.path().join("site/app.js"), dir.path().join("site/alias.js"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("site/app.js"),
+            dir.path().join("site/alias.js"),
+        )
+        .unwrap();
         assert_eq!(get(&grant, "/alias.js").response.status(), StatusCode::OK);
     }
 
@@ -1080,7 +1137,10 @@ mod tests {
             })
         );
         assert_eq!(grant.mode(), DocMode::Safe);
-        assert_eq!(grant.state("t").reset.as_ref().map(|r| r.path.as_str()), Some("app.js"));
+        assert_eq!(
+            grant.state("t").reset.as_ref().map(|r| r.path.as_str()),
+            Some("app.js")
+        );
         // Safe mode serves it (no script runs under the safe CSP anyway).
         let again = get(&grant, "/app.js");
         assert_eq!(again.response.status(), StatusCode::OK);
@@ -1125,7 +1185,8 @@ mod tests {
         // Both targets predate the approval by a wide margin.
         for name in ["old.js", "new.js"] {
             let file = File::options().write(true).open(site.join(name)).unwrap();
-            file.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+                .unwrap();
         }
         std::os::unix::fs::symlink(site.join("old.js"), site.join("alias.js")).unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -1155,7 +1216,8 @@ mod tests {
         write(&site, "v2/lazy.js", b"v2()");
         for name in ["v1/lazy.js", "v2/lazy.js"] {
             let file = File::options().write(true).open(site.join(name)).unwrap();
-            file.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+                .unwrap();
         }
         std::os::unix::fs::symlink(site.join("v1"), site.join("vendor")).unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -1166,7 +1228,10 @@ mod tests {
         std::os::unix::fs::symlink(site.join("v2"), site.join("vendor")).unwrap();
         let served = get(&grant, "/vendor/lazy.js");
         assert_eq!(served.response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(served.reset.as_ref().map(|r| r.reason), Some(DocResetReason::Newer));
+        assert_eq!(
+            served.reset.as_ref().map(|r| r.reason),
+            Some(DocResetReason::Newer)
+        );
         assert_eq!(grant.mode(), DocMode::Safe);
     }
 
@@ -1182,7 +1247,8 @@ mod tests {
         write(&site, "v2/lazy.js", b"v2()");
         for name in ["v1/lazy.js", "v2/lazy.js"] {
             let file = File::options().write(true).open(site.join(name)).unwrap();
-            file.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+            file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+                .unwrap();
         }
         // `assets -> linked` (relative), `linked -> v1` (absolute).
         std::os::unix::fs::symlink("linked", site.join("assets")).unwrap();
@@ -1190,7 +1256,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         grant.set_mode(DocMode::Dynamic);
         std::thread::sleep(Duration::from_millis(20));
-        assert_eq!(get(&grant, "/assets/lazy.js").response.status(), StatusCode::OK);
+        assert_eq!(
+            get(&grant, "/assets/lazy.js").response.status(),
+            StatusCode::OK
+        );
         assert_eq!(get(&grant, "/assets/lazy.js").response.body(), b"v1()");
         std::fs::remove_file(site.join("linked")).unwrap();
         std::os::unix::fs::symlink(site.join("v2"), site.join("linked")).unwrap();
@@ -1238,7 +1307,9 @@ mod tests {
         std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
         let canonical = std::fs::canonicalize(real.join("a.txt")).unwrap();
         assert!(open_beneath(&canonical).is_ok());
-        let through_link = std::fs::canonicalize(dir.path()).unwrap().join("link/a.txt");
+        let through_link = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("link/a.txt");
         assert!(open_beneath(&through_link).is_err());
         assert!(open_beneath(Path::new("relative/a.txt")).is_err());
     }
@@ -1270,7 +1341,10 @@ mod tests {
             .unwrap();
         let served = grant.serve(&request);
         assert_eq!(served.response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(served.response.headers()[header::CONTENT_RANGE], "bytes 10-19/100");
+        assert_eq!(
+            served.response.headers()[header::CONTENT_RANGE],
+            "bytes 10-19/100"
+        );
         assert_eq!(served.response.body().len(), 10);
         assert_eq!(parse_range("bytes=90-", 100), Some((90, 99)));
         assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
@@ -1329,7 +1403,10 @@ mod tests {
         // before the handler sees it, and a guest handed the mapped one is
         // still asking for itself.
         let mapped = Request::builder()
-            .uri(format!("{DOC_SCHEME}://{}/index.html", mapped_host(mine.host())))
+            .uri(format!(
+                "{DOC_SCHEME}://{}/index.html",
+                mapped_host(mine.host())
+            ))
             .body(Vec::new())
             .unwrap();
         assert_eq!(mine.serve(&mapped).response.status(), StatusCode::OK);
@@ -1340,25 +1417,31 @@ mod tests {
         let own = "doc-1111";
         assert_eq!(
             document_url(own, Path::new("a b/c#d.html")),
-            "codeg-doc://doc-1111/a%20b/c%23d.html"
+            "harness-studio-doc://doc-1111/a%20b/c%23d.html"
         );
         assert_eq!(
             document_url(own, Path::new("index.html")),
-            "codeg-doc://doc-1111/index.html"
+            "harness-studio-doc://doc-1111/index.html"
         );
-        let doc = Url::parse("codeg-doc://doc-1111/other.html").unwrap();
+        let doc = Url::parse("harness-studio-doc://doc-1111/other.html").unwrap();
         assert!(is_document_url(&doc, own));
-        assert!(is_document_url(&Url::parse("https://codeg-doc.doc-1111/x").unwrap(), own));
-        assert!(!is_document_url(&Url::parse("https://example.com/").unwrap(), own));
+        assert!(is_document_url(
+            &Url::parse("https://harness-studio-doc.doc-1111/x").unwrap(),
+            own
+        ));
+        assert!(!is_document_url(
+            &Url::parse("https://example.com/").unwrap(),
+            own
+        ));
         // Not every host that merely begins with the mapped prefix: that one
         // is registrable by anyone, and a guest may navigate to its own.
         assert!(!is_document_url(
-            &Url::parse("https://codeg-doc.example.com/steal").unwrap(),
+            &Url::parse("https://harness-studio-doc.example.com/steal").unwrap(),
             own
         ));
         assert_eq!(
             guest_navigation(
-                &Url::parse("https://codeg-doc.example.com/steal").unwrap(),
+                &Url::parse("https://harness-studio-doc.example.com/steal").unwrap(),
                 own,
                 true
             ),
@@ -1368,45 +1451,49 @@ mod tests {
         // no leak — the handler that answers is this guest's — but the origin
         // would be the other document's, and so would the storage.
         for other in [
-            "codeg-doc://doc-2222/other.html",
-            "https://codeg-doc.doc-2222/other.html",
+            "harness-studio-doc://doc-2222/other.html",
+            "https://harness-studio-doc.doc-2222/other.html",
         ] {
             let other = Url::parse(other).unwrap();
             assert!(!is_document_url(&other, own), "{other}");
         }
         assert_eq!(
-            guest_navigation(&Url::parse("codeg-doc://doc-2222/x").unwrap(), own, true),
+            guest_navigation(
+                &Url::parse("harness-studio-doc://doc-2222/x").unwrap(),
+                own,
+                true
+            ),
             GuestNavigation::Scheme
         );
         // A host that differs only in case is not this one: the `url` crate
         // leaves an opaque host as written, so an exact match is the rule
         // and refusing is the safe side of it.
         assert!(!is_document_url(
-            &Url::parse("codeg-doc://DOC-1111/x").unwrap(),
+            &Url::parse("harness-studio-doc://DOC-1111/x").unwrap(),
             own
         ));
         // A port is a different origin even with the right host — a guest
         // could otherwise give itself a second `localStorage` by asking for
         // one. The default port of a special scheme is not a port.
         assert!(!is_document_url(
-            &Url::parse("codeg-doc://doc-1111:8080/x").unwrap(),
+            &Url::parse("harness-studio-doc://doc-1111:8080/x").unwrap(),
             own
         ));
         assert!(!is_document_url(
-            &Url::parse("codeg-doc://doc-1111:80/x").unwrap(),
+            &Url::parse("harness-studio-doc://doc-1111:80/x").unwrap(),
             own
         ));
         assert!(!is_document_url(
-            &Url::parse("http://codeg-doc.doc-1111:8080/x").unwrap(),
+            &Url::parse("http://harness-studio-doc.doc-1111:8080/x").unwrap(),
             own
         ));
         assert!(is_document_url(
-            &Url::parse("http://codeg-doc.doc-1111:80/x").unwrap(),
+            &Url::parse("http://harness-studio-doc.doc-1111:80/x").unwrap(),
             own
         ));
         assert_eq!(
             guest_navigation(
-                &Url::parse("codeg-doc://doc-1111:8080/x").unwrap(),
+                &Url::parse("harness-studio-doc://doc-1111:8080/x").unwrap(),
                 own,
                 true
             ),
@@ -1417,7 +1504,10 @@ mod tests {
         let engine = engine_url(&doc);
         assert!(is_document_url(&engine, own));
         if cfg!(target_os = "windows") {
-            assert_eq!(engine.as_str(), "http://codeg-doc.doc-1111/other.html");
+            assert_eq!(
+                engine.as_str(),
+                "http://harness-studio-doc.doc-1111/other.html"
+            );
         } else {
             assert_eq!(engine, doc);
         }
@@ -1482,7 +1572,7 @@ mod tests {
         let grant = DocGrant::new(ws.clone(), entry_c).unwrap();
         assert_eq!(
             grant.document_url(),
-            format!("codeg-doc://{}/docs/report.html", grant.host())
+            format!("harness-studio-doc://{}/docs/report.html", grant.host())
         );
         let state = grant.state("t1");
         assert_eq!(state.mode, DocMode::Safe);
@@ -1527,13 +1617,19 @@ mod tests {
         guests.unbind("t1");
         assert!(guests.for_tab("t1").is_none());
         assert_eq!(guests.tabs_of(&first), vec!["t2".to_string()]);
-        assert_eq!(doc_label("t1"), "codeg-doc-t1");
+        assert_eq!(doc_label("t1"), "harness-studio-doc-t1");
     }
 
     #[test]
     fn content_types_by_extension() {
-        assert_eq!(content_type(Path::new("A.HTML")), "text/html; charset=utf-8");
-        assert_eq!(content_type(Path::new("x.mjs")), "text/javascript; charset=utf-8");
+        assert_eq!(
+            content_type(Path::new("A.HTML")),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            content_type(Path::new("x.mjs")),
+            "text/javascript; charset=utf-8"
+        );
         assert_eq!(content_type(Path::new("x.woff2")), "font/woff2");
         assert_eq!(content_type(Path::new("x.bin")), "application/octet-stream");
         assert_eq!(content_type(Path::new("noext")), "application/octet-stream");

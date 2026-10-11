@@ -40,7 +40,7 @@
 //! `task_id` by reloading the child's recorded agent session — a continuation
 //! of the original task, never a new iteration on it.
 //!
-//! Result durability: child output is NOT stored in codeg's DB, so the broker
+//! Result durability: child output is NOT stored in harness_studio's DB, so the broker
 //! caches the completed text in `completed` (parent-scoped, FIFO-capped). Once
 //! evicted, [`DelegationBroker::get_task_status`] falls back to the DB for the
 //! task's terminal STATUS (via [`ChildStatusLookup`]); the full output is always
@@ -111,7 +111,7 @@ pub trait ConversationDepthLookup: Send + Sync {
 
 /// Status-level facts the broker recovers from a child conversation row when a
 /// task's in-memory completed-cache entry was evicted. Carries NO result text —
-/// child output isn't stored in codeg's DB; the full result lives in the
+/// child output isn't stored in harness_studio's DB; the full result lives in the
 /// child's own session (viewable via the frontend's child-session sheet).
 #[derive(Debug, Clone)]
 pub struct ChildStatusRecord {
@@ -1017,7 +1017,7 @@ fn attach_blocked(report: &mut DelegationTaskReport, blocked: BlockedOn) {
     // step with the tool description in `tool_schema.json`.
     report.message = Some(format!(
         "Running.\n{BLOCKED_LINE_PREFIX} {what}\nThe sub-agent is parked until \
-         a human answers in Codeg — it is not making progress. Tell the user, \
+         a human answers in HarnessStudio — it is not making progress. Tell the user, \
          then wait again."
     ));
     report.blocked_on = Some(blocked);
@@ -1306,7 +1306,7 @@ struct PendingToolCall {
     /// True when the entry came from an identity-less MCP announcement
     /// (Cursor's `"MCP: tool"` + empty input — see
     /// `lifecycle::CURSOR_IDENTITYLESS_MCP_TITLE`). Such an id belongs to
-    /// *some* codeg-mcp call whose identity only the companion round-trip can
+    /// *some* harness-studio-mcp call whose identity only the companion round-trip can
     /// reveal, so it is additionally claimable by
     /// [`DelegationBroker::rewrite_identityless_tool_call`] (the
     /// `get_delegation_status` / `cancel_delegation` call-time rename), and a
@@ -1396,7 +1396,7 @@ const IDENTITYLESS_RENAME_POLL_ATTEMPTS: usize = 30;
 pub struct DelegationBroker {
     spawner: Arc<dyn ConnectionSpawner>,
     depth_lookup: Arc<dyn ConversationDepthLookup>,
-    /// Writer for `meta["codeg.delegation"]` on the parent's active
+    /// Writer for `meta["harness_studio.delegation"]` on the parent's active
     /// `delegate_to_agent` ToolCallState. Defaults to a no-op so tests
     /// that aren't exercising the meta lifecycle don't need to wire
     /// anything; production constructs the broker with the
@@ -1807,7 +1807,7 @@ impl DelegationBroker {
     /// Restore the identity of a pending identity-less MCP tool call at
     /// companion round-trip time: claim the oldest such candidate for this
     /// parent and rewrite its live `title` + `raw_input` to the actual
-    /// codeg-mcp tool (`get_delegation_status` / `cancel_delegation`) with
+    /// harness-studio-mcp tool (`get_delegation_status` / `cancel_delegation`) with
     /// its real arguments — flipping the card from the generic "MCP: tool"
     /// WHILE the call runs, instead of only at the completion-time result
     /// sniff (which, for a `wait_ms`-blocked status long-poll, can be minutes
@@ -3183,7 +3183,8 @@ impl DelegationBroker {
         for (task, duration_ms) in drained {
             // The child already disconnected/errored — disconnect-only teardown
             // (no spawner `cancel`, there's no live turn to interrupt).
-            self.teardown_canceled_child(&task, duration_ms, false).await;
+            self.teardown_canceled_child(&task, duration_ms, false)
+                .await;
         }
         self.result_notify.notify_waiters();
     }
@@ -4360,10 +4361,8 @@ impl DelegationBroker {
                 let canceled_duration_ms = {
                     let mut inner = self.pending.inner.lock().await;
                     if inner.running.remove(&call_id).is_some() {
-                        let outcome = canceled_outcome(
-                            ctx.child_conversation_id,
-                            "canceled before await",
-                        );
+                        let outcome =
+                            canceled_outcome(ctx.child_conversation_id, "canceled before await");
                         let duration_ms = started_at.elapsed().as_millis() as u64;
                         inner.insert_completed(
                             &call_id,
@@ -4473,7 +4472,7 @@ impl DelegationBroker {
     }
 
     /// How many delegation calls are parked awaiting a child's `TurnComplete`
-    /// right now. Surfaced by the codeg-mcp service-status indicator so the
+    /// right now. Surfaced by the harness-studio-mcp service-status indicator so the
     /// popover can say the service is actually carrying traffic, not just
     /// listening.
     pub async fn running_delegation_count(&self) -> usize {
@@ -4556,7 +4555,7 @@ impl ConversationDepthLookup for DbDepthLookup {
 }
 
 /// `ChildStatusLookup` over the live `AppDatabase`. Recovers a delegation
-/// task's terminal status (NOT its text — child output isn't in codeg's DB)
+/// task's terminal status (NOT its text — child output isn't in harness_studio's DB)
 /// from the child conversation row once its in-memory result was evicted.
 pub struct DbChildStatusLookup {
     pub db: Arc<crate::db::AppDatabase>,
@@ -4993,7 +4992,10 @@ mod tests {
         let first = broker
             .get_task_status("parent-conn", Some(1), &task_id, StatusWait::Infinite)
             .await;
-        assert_eq!(first.blocked_on.map(|b| b.request_id).as_deref(), Some("req-1"));
+        assert_eq!(
+            first.blocked_on.map(|b| b.request_id).as_deref(),
+            Some("req-1")
+        );
 
         // Same prompt, still unanswered: a bounded wait now runs to its deadline
         // rather than returning immediately.
@@ -5019,7 +5021,10 @@ mod tests {
             started.elapsed() < Duration::from_millis(2_000),
             "a NEW blocking prompt must wake the wait"
         );
-        assert_eq!(third.blocked_on.map(|b| b.request_id).as_deref(), Some("req-2"));
+        assert_eq!(
+            third.blocked_on.map(|b| b.request_id).as_deref(),
+            Some("req-2")
+        );
     }
 
     /// The delivery-failure valve: marking a block reported is not proof the
@@ -7089,7 +7094,7 @@ mod tests {
         for call in &calls {
             let inner = call
                 .meta
-                .get("codeg.delegation")
+                .get("harness_studio.delegation")
                 .unwrap()
                 .as_object()
                 .unwrap();
@@ -7344,7 +7349,7 @@ mod tests {
         assert_eq!(first.parent_tool_use_id, "pt-real");
         let inner_first = first
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -7372,7 +7377,7 @@ mod tests {
         let second = &calls[1];
         let inner_second = second
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -7415,7 +7420,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let inner = calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -7498,14 +7503,14 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let running = calls[0]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
         assert_eq!(running.get("status").unwrap().as_str().unwrap(), "running");
         let failed = calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -7593,14 +7598,14 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let running = calls[0]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
         assert_eq!(running.get("status").unwrap().as_str().unwrap(), "running");
         let completed = calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -7772,14 +7777,14 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let running = calls[0]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
         assert_eq!(running.get("status").unwrap().as_str().unwrap(), "running");
         let failed = calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -8187,7 +8192,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let inner = calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -8821,7 +8826,7 @@ mod tests {
 
     #[tokio::test]
     async fn emitter_records_after_meta_write_on_complete_call() {
-        // Frontend's snapshot-recovery path reads `meta["codeg.delegation"]`
+        // Frontend's snapshot-recovery path reads `meta["harness_studio.delegation"]`
         // first and the live event second; if the emit lands before the
         // meta write, a snapshot taken between them would see "running"
         // meta paired with a "completed" event. Enforce meta-before-emit
@@ -8869,7 +8874,7 @@ mod tests {
         assert_eq!(event_calls.len(), 1);
         let inner_second = meta_calls[1]
             .meta
-            .get("codeg.delegation")
+            .get("harness_studio.delegation")
             .unwrap()
             .as_object()
             .unwrap();
@@ -8889,7 +8894,7 @@ mod tests {
     // `InternalEventBus` (the lifecycle/pet/chat-channel subscriber path).
     // These tests exercise that real fanout end-to-end so a regression in
     // `get_state_and_emitter` lookup, `emit_with_state` routing, or the
-    // `EventEmitter::WebOnly { bus, .. }` wiring is caught here even when
+    // `EventEmitter::Local { bus, .. }` wiring is caught here even when
     // every mock-backed test stays green.
 
     #[tokio::test]
@@ -8897,18 +8902,18 @@ mod tests {
         use crate::acp::delegation::event_emitter::ConnectionManagerEventEmitter;
         use crate::acp::manager::ConnectionManager;
         use crate::acp::types::AcpEvent;
-        use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+        use crate::events::{EventBroadcaster, EventEmitter};
 
-        // Real ConnectionManager + fake parent wired to a WebOnly emitter so
+        // Real ConnectionManager + fake parent wired to a Local emitter so
         // the InternalEventBus gets typed envelopes and we can subscribe to
         // verify the lifecycle-path delivery alongside the per-connection
         // stream delivery.
         let manager = ConnectionManager::new();
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
-        let parent_emitter = EventEmitter::test_web_only(broadcaster);
+        let broadcaster = Arc::new(EventBroadcaster::new());
+        let parent_emitter = EventEmitter::test_local(broadcaster);
         let bus = parent_emitter
             .acp_event_bus()
-            .expect("WebOnly emitter must expose an InternalEventBus");
+            .expect("Local emitter must expose an InternalEventBus");
         manager
             .insert_test_connection("parent-conn", AgentType::ClaudeCode, None, parent_emitter)
             .await;
@@ -8989,7 +8994,7 @@ mod tests {
         }
 
         // InternalEventBus (lifecycle/pet/chat-channel subscriber path) must
-        // also receive the same envelope — proves the WebOnly emitter's bus
+        // also receive the same envelope — proves the Local emitter's bus
         // arm in `emit_with_state` is reached.
         let bus_envelope = loop {
             let env = tokio::time::timeout(Duration::from_millis(500), bus_rx.recv())
@@ -9013,21 +9018,21 @@ mod tests {
         use crate::acp::delegation::event_emitter::ConnectionManagerEventEmitter;
         use crate::acp::manager::ConnectionManager;
         use crate::acp::types::AcpEvent;
-        use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+        use crate::events::{EventBroadcaster, EventEmitter};
 
         // Web/server delivery shape: a real ConnectionManager + a fake parent on
-        // a WebOnly emitter. `DelegationStarted` must land on the PARENT's
+        // a Local emitter. `DelegationStarted` must land on the PARENT's
         // per-connection stream (the WS attach path the frontend subscribes to
         // in web/server mode) AND the InternalEventBus — mirroring the
         // completed-path invariant. This is the regression lock for the
         // web-mode live-delegation gap: before moving the emit to the parent
         // stream, started rode the (un-attached) child stream and was lost here.
         let manager = ConnectionManager::new();
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
-        let parent_emitter = EventEmitter::test_web_only(broadcaster);
+        let broadcaster = Arc::new(EventBroadcaster::new());
+        let parent_emitter = EventEmitter::test_local(broadcaster);
         let bus = parent_emitter
             .acp_event_bus()
-            .expect("WebOnly emitter must expose an InternalEventBus");
+            .expect("Local emitter must expose an InternalEventBus");
         manager
             .insert_test_connection("parent-conn", AgentType::ClaudeCode, None, parent_emitter)
             .await;
@@ -9091,7 +9096,10 @@ mod tests {
                 // The event labels the card even when the parent tool call's
                 // raw_input never carried the arguments (identity-less hosts).
                 assert_eq!(task_preview, "do x");
-                assert!(!task_id.is_empty(), "broker-minted task id must ride the event");
+                assert!(
+                    !task_id.is_empty(),
+                    "broker-minted task id must ride the event"
+                );
             }
             other => panic!("expected DelegationStarted, got {other:?}"),
         }
@@ -9437,11 +9445,9 @@ mod tests {
         let mock = Arc::new(MockSpawner::new());
         let lookup = Arc::new(MockResumeLookup::default());
         *lookup.ctx.lock().await = ctx;
-        let broker = DelegationBroker::new(
-            mock.clone() as Arc<dyn ConnectionSpawner>,
-            shallow_lookup(),
-        )
-        .with_status_lookup(lookup.clone() as Arc<dyn ChildStatusLookup>);
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup())
+                .with_status_lookup(lookup.clone() as Arc<dyn ChildStatusLookup>);
         enable_delegation(&broker).await;
         (mock, lookup, broker)
     }
@@ -9470,7 +9476,8 @@ mod tests {
     #[tokio::test]
     async fn resume_after_interruption_runs_under_same_id_then_completes() {
         let (mock, _lookup, broker) = resume_harness(Some(resume_ctx(TaskStatus::Canceled))).await;
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
 
         let mut req = resume_request("task-1");
@@ -9479,7 +9486,10 @@ mod tests {
         assert_eq!(ack.status, TaskStatus::Running);
         assert_eq!(ack.task_id.as_deref(), Some("task-1"));
         assert_eq!(ack.child_conversation_id, Some(42));
-        assert!(ack.message.unwrap().starts_with("Delegation resumed. task_id=task-1"));
+        assert!(ack
+            .message
+            .unwrap()
+            .starts_with("Delegation resumed. task_id=task-1"));
 
         // The spawn resumed the recorded agent session in the recorded dir.
         let spawns = mock.resume_spawn_args.lock().await;
@@ -9542,7 +9552,8 @@ mod tests {
         assert_eq!(canceled.status, TaskStatus::Canceled);
         assert_eq!(broker.completed_count().await, 1);
 
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
         let ack = broker.resume_delegation(resume_request(&task_id)).await;
         assert_eq!(ack.status, TaskStatus::Running);
@@ -9660,7 +9671,8 @@ mod tests {
 
         // No live connection → the stranded row resumes.
         let (mock, _lookup, broker) = resume_harness(Some(resume_ctx(TaskStatus::Running))).await;
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
         let ack = broker.resume_delegation(resume_request("task-1")).await;
         assert_eq!(ack.status, TaskStatus::Running);
@@ -9762,7 +9774,8 @@ mod tests {
     #[tokio::test]
     async fn resume_send_failure_disconnects_and_unreserves() {
         let (mock, _lookup, broker) = resume_harness(Some(resume_ctx(TaskStatus::Canceled))).await;
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Err(SpawnerError::Send("stdin closed".into())))
             .await;
         let report = broker.resume_delegation(resume_request("task-1")).await;
@@ -9820,11 +9833,18 @@ mod tests {
         assert_eq!(report.error_code.as_deref(), Some(NOT_RESUMABLE_CODE));
         assert!(report.message.unwrap().contains("already in progress"));
         assert!(mock.resume_spawn_args.lock().await.is_empty());
-        assert!(broker.pending.inner.lock().await.resuming.contains("task-1"));
+        assert!(broker
+            .pending
+            .inner
+            .lock()
+            .await
+            .resuming
+            .contains("task-1"));
 
         // A successful resume releases its own claim.
         let (mock, _lookup, broker) = resume_harness(Some(resume_ctx(TaskStatus::Canceled))).await;
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
         let ack = broker.resume_delegation(resume_request("task-1")).await;
         assert_eq!(ack.status, TaskStatus::Running);
@@ -9859,7 +9879,8 @@ mod tests {
     #[tokio::test]
     async fn resumed_task_cancels_like_any_running_task() {
         let (mock, _lookup, broker) = resume_harness(Some(resume_ctx(TaskStatus::Canceled))).await;
-        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2"))).await;
+        mock.queue_resume_spawn(Ok(ResumedSpawn::fresh("child-conn-2")))
+            .await;
         mock.queue_resume_send(Ok(())).await;
         let ack = broker.resume_delegation(resume_request("task-1")).await;
         assert_eq!(ack.status, TaskStatus::Running);

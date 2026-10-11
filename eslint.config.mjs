@@ -45,6 +45,7 @@ const eslintConfig = defineConfig([
     // `.gitignore` — but flat config has no such default, so without this
     // `pnpm eslint .` fails the repo on files that are not in the repo.
     ".docs/**",
+    "logs/**",
     // Playwright's aria tree, vendored byte-for-byte so that updating it is a
     // copy rather than a merge (browser-agent/vendor/playwright/VENDOR.md).
     // It is written against Playwright's lint and compiler settings, not ours.

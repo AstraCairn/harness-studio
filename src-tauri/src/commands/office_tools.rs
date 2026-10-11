@@ -3,7 +3,7 @@
 //!
 //! Skills are loaded dynamically from the OfficeCLI binary (`officecli
 //! load_skill <id>`) and placed in the same central store
-//! (`~/.codeg/skills/<id>/`) used by built-in experts. Enabling a skill for
+//! (`~/.harnessstudio/skills/<id>/`) used by built-in experts. Enabling a skill for
 //! an agent reuses the expert system's symlink mechanism.
 
 use std::collections::BTreeMap;
@@ -18,6 +18,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::acp::types::AgentSkillScope;
+use crate::app_error::AppCommandError;
 use crate::commands::acp::{
     preferred_scope_skill_dir, remove_skill_entry, resolve_command_on_path, scoped_skill_dirs,
     skill_storage_spec, validate_skill_id,
@@ -26,11 +27,10 @@ use crate::commands::experts::{
     central_experts_dir, classify_link, create_link_raw, path_is_symlink, read_link_target,
     ExpertInstallStatus, ExpertLinkState, LinkOp, LinkOpResult,
 };
-use crate::app_error::AppCommandError;
 use crate::commands::folders::resolve_tree_path;
+use crate::events::EventEmitter;
 use crate::models::agent::AgentType;
 use crate::process::{collect_lines_lossy, tokio_command};
-use crate::web::event_bridge::EventEmitter;
 
 // ─── Error type ─────────────────────────────────────────────────────────
 
@@ -112,8 +112,8 @@ pub struct SkillSyncReport {
 // ─── Skill metadata (hardcoded — OfficeCLI has no list command) ────────
 
 struct SkillDef {
-    /// Canonical skill identity used throughout codeg: the central-store
-    /// directory name (`~/.codeg/skills/<id>/`) and the agent invocation
+    /// Canonical skill identity used throughout harness_studio: the central-store
+    /// directory name (`~/.harnessstudio/skills/<id>/`) and the agent invocation
     /// name (`/<id>`). Matches the SKILL.md frontmatter `name:` so the
     /// directory and the skill's self-declared name agree.
     id: &'static str,
@@ -329,9 +329,9 @@ pub(crate) fn resolve_officecli() -> Option<PathBuf> {
 /// Directory to prepend to a spawned agent's `PATH` so agent-invoked
 /// `officecli …` (from an enabled office skill) resolves immediately after a
 /// fresh install — before `install.ps1`'s persistent User-PATH change reaches
-/// already-running processes (codeg and the agents it spawns). Returns `None`
+/// already-running processes (harness_studio and the agents it spawns). Returns `None`
 /// once `officecli` is on `PATH` (the injection then self-deactivates) or when
-/// it isn't installed. Also closes the latent gap where a GUI-launched codeg on
+/// it isn't installed. Also closes the latent gap where a GUI-launched harness_studio on
 /// Unix doesn't inherit `~/.local/bin` on `PATH`.
 pub(crate) fn officecli_agent_path_dir() -> Option<PathBuf> {
     if resolve_command_on_path("officecli").is_some() {
@@ -363,7 +363,7 @@ fn officecli_runtime_dependency_hint(stderr: &str) -> Option<String> {
             "officecli could not start: the server is missing the ICU library its \
              embedded .NET runtime needs. Install it in the runtime image and restart \
              (Debian/Ubuntu: `apt-get install -y libicu72`; Alpine: `apk add icu-libs`), \
-             or upgrade to a codeg image that already includes it."
+             or upgrade to a harness_studio image that already includes it."
                 .to_string(),
         );
     }
@@ -490,7 +490,7 @@ fn emit_officecli_install_event(
     kind: OfficecliInstallEventKind,
     payload: impl Into<String>,
 ) {
-    crate::web::event_bridge::emit_event(
+    crate::events::emit_event(
         emitter,
         OFFICECLI_INSTALL_EVENT,
         OfficecliInstallEvent {
@@ -653,13 +653,18 @@ pub(crate) async fn officecli_install_core(
         Some(version) => format!("OfficeCLI {version} installed successfully"),
         None => "OfficeCLI installed successfully".to_string(),
     };
-    emit_officecli_install_event(emitter, &task_id, OfficecliInstallEventKind::Completed, done);
+    emit_officecli_install_event(
+        emitter,
+        &task_id,
+        OfficecliInstallEventKind::Completed,
+        done,
+    );
     Ok(info)
 }
 
 // ─── Official installer (shell out, mirror-first) ──────────────────────
 //
-// codeg installs OfficeCLI by running the vendor's official installer script —
+// harness_studio installs OfficeCLI by running the vendor's official installer script —
 // `install.sh` on Unix, `install.ps1` on Windows — mirror-first (the
 // CN-reachable `d.officecli.ai`) with a GitHub-raw fallback. This mirrors how
 // iOfficeAI's own AionUi backend installs OfficeCLI, keeps both platforms
@@ -923,7 +928,7 @@ pub async fn officecli_uninstall() -> Result<OfficecliInfo, OfficeToolsError> {
                 }
                 let state = classify_link(&candidate, &central);
                 let should_remove = match state {
-                    ExpertLinkState::LinkedToCodeg => true,
+                    ExpertLinkState::LinkedToHarnessStudio => true,
                     ExpertLinkState::Broken => {
                         // Only remove broken links whose target was our
                         // central skill dir (not user-owned danglers).
@@ -1033,7 +1038,10 @@ pub async fn officecli_sync_skills() -> Result<SkillSyncReport, OfficeToolsError
                 report.errors.push(msg);
             }
             Err(e) => {
-                tracing::warn!("[office] load_skill {} could not be spawned: {e}", def.load_id);
+                tracing::warn!(
+                    "[office] load_skill {} could not be spawned: {e}",
+                    def.load_id
+                );
                 report
                     .errors
                     .push(format!("{}: command error: {e}", def.id));
@@ -1106,7 +1114,7 @@ fn link_one_locked(
         }
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             match classify_link(&link_path, &central) {
-                ExpertLinkState::LinkedToCodeg => {}
+                ExpertLinkState::LinkedToHarnessStudio => {}
                 ExpertLinkState::BlockedByRealDirectory => {
                     return Err(OfficeToolsError::NameCollision {
                         path: link_path.to_string_lossy().to_string(),
@@ -1179,7 +1187,7 @@ fn unlink_one_locked(skill_id: &str, agent_type: AgentType) -> Result<(), Office
         }
         let state = classify_link(&candidate, &central);
         let should_remove = match state {
-            ExpertLinkState::LinkedToCodeg => true,
+            ExpertLinkState::LinkedToHarnessStudio => true,
             ExpertLinkState::Broken => read_link_target(&candidate)
                 .map(|t| t.starts_with(&central))
                 .unwrap_or(false),
@@ -1289,8 +1297,7 @@ pub async fn officecli_skill_list_all_install_statuses(
                 Err(_) => continue,
             };
             let state = classify_link(&link_path, &expected);
-            let target_path =
-                read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
+            let target_path = read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
             out.push(ExpertInstallStatus {
                 expert_id: def.id.to_string(),
                 agent_type: agent,
@@ -1335,7 +1342,7 @@ pub(crate) fn is_office_path(path: &Path) -> bool {
 
 /// Render an office file (.docx/.xlsx/.pptx) to self-contained HTML via
 /// `officecli view <file> html`, for the in-app preview. Runs officecli in
-/// codeg's own process (not the agent's command sandbox), so it is unaffected
+/// harness_studio's own process (not the agent's command sandbox), so it is unaffected
 /// by the sandbox restrictions that can break officecli inside an agent turn.
 ///
 /// `path` is relative to `root_path`; the resolved target is canonicalized and
@@ -1504,7 +1511,10 @@ mod tests {
             .expect("batch returns Ok");
         assert_eq!(results.len(), 2);
         // Unknown skills fail their own op without aborting the batch.
-        assert!(results.iter().all(|r| !r.ok && r.error.is_some()), "{results:?}");
+        assert!(
+            results.iter().all(|r| !r.ok && r.error.is_some()),
+            "{results:?}"
+        );
     }
 
     #[tokio::test]
@@ -1613,7 +1623,10 @@ mod tests {
         let msg = officecli_run_failure_message("   ");
         assert!(!msg.is_empty());
         // No dangling "officecli error:" with nothing after it.
-        assert!(!msg.contains("officecli error:"), "no empty raw tail: {msg}");
+        assert!(
+            !msg.contains("officecli error:"),
+            "no empty raw tail: {msg}"
+        );
     }
 
     #[test]
@@ -1644,7 +1657,10 @@ mod tests {
             let github = script
                 .find("raw.githubusercontent.com")
                 .expect("github URL present");
-            assert!(mirror < github, "mirror must precede github for {os:?}: {script}");
+            assert!(
+                mirror < github,
+                "mirror must precede github for {os:?}: {script}"
+            );
         }
     }
 
@@ -1667,9 +1683,7 @@ mod tests {
 
         // The hardening preamble must run before the first network fetch, and
         // `$ProgressPreference` must also reach the vendor script run via `iex`.
-        let tls = win
-            .find("SecurityProtocol")
-            .expect("sets SecurityProtocol");
+        let tls = win.find("SecurityProtocol").expect("sets SecurityProtocol");
         let progress = win
             .find("$ProgressPreference")
             .expect("sets $ProgressPreference");
@@ -1717,17 +1731,24 @@ mod tests {
         // and `wait`s — so the tree outlives our short timeout.
         let child = tokio_command("sh")
             .arg("-c")
-            .arg(format!("sleep 30 & echo $! > '{}'; wait", pidfile.display()))
+            .arg(format!(
+                "sleep 30 & echo $! > '{}'; wait",
+                pidfile.display()
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn sh");
 
-        let (status, _stdout, _stderr) =
-            stream_install_or_kill_tree(child, Duration::from_millis(300), "test", &EventEmitter::Noop)
-                .await
-                .expect("no io error");
+        let (status, _stdout, _stderr) = stream_install_or_kill_tree(
+            child,
+            Duration::from_millis(300),
+            "test",
+            &EventEmitter::Noop,
+        )
+        .await
+        .expect("no io error");
         assert!(status.is_none(), "expected a timeout (no exit status)");
 
         // Grandchild pid is written almost immediately; poll briefly for it.
@@ -1775,5 +1796,4 @@ mod tests {
         assert!(tail.starts_with('…'));
         assert!(tail.chars().skip(1).all(|c| c == 'あ'));
     }
-
 }

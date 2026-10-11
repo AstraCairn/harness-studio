@@ -24,7 +24,6 @@ type TipKey =
   | "shortcutsAuxPanel"
   | "shortcutsTerminalSidebar"
   | "customShortcuts"
-  | "webService"
   | "fusionMode"
   | "quickMessages"
   | "experts"
@@ -84,7 +83,6 @@ const TIPS: TipDef[] = [
     }),
   },
   { key: "customShortcuts" },
-  { key: "webService" },
   { key: "fusionMode" },
   { key: "quickMessages" },
   { key: "experts" },

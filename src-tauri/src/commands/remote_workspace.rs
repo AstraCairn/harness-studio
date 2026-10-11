@@ -206,7 +206,7 @@ pub async fn open_remote_workspace(
     _id: i32,
 ) -> Result<(), AppCommandError> {
     Err(AppCommandError::configuration_invalid(
-        "Remote workspaces are disabled in HarnessStudio",
+        "Remote workspaces are disabled in harness studio",
     ))
 }
 
@@ -218,6 +218,6 @@ pub(crate) fn build_remote_workspace_window(
     _focus: bool,
 ) -> Result<(), AppCommandError> {
     Err(AppCommandError::configuration_invalid(
-        "Remote workspaces are disabled in HarnessStudio",
+        "Remote workspaces are disabled in harness studio",
     ))
 }

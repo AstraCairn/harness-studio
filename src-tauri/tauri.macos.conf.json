@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "externalBin": ["binaries/codeg-mcp"],
+    "externalBin": ["binaries/harness-studio-mcp"],
     "macOS": {
       "files": {
-        "Helpers/codeg-computer-helper.app": "binaries/codeg-computer-helper.app"
+        "Helpers/harness-studio-computer-helper.app": "binaries/harness-studio-computer-helper.app"
       }
     }
   }

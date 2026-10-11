@@ -1,7 +1,7 @@
 //! macOS shim on top of `WKWebView` / `WKUserContentController` (objc2).
 //!
-//! The helper script and the `codegBrowser` message handler live in the
-//! `WKContentWorld` named `codeg`: a separate JavaScript global for the same
+//! The helper script and the `harnessStudioBrowser` message handler live in the
+//! `WKContentWorld` named `harness_studio`: a separate JavaScript global for the same
 //! DOM, invisible to page scripts and immune to their prototype tampering.
 //! `WKContentWorld` needs macOS 11; older systems fall back to the page world
 //! (reported as `ChannelKind::Legacy`).
@@ -13,20 +13,22 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, DeclaredClass, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{
+    define_class, msg_send, sel, DeclaredClass, MainThreadMarker, MainThreadOnly, Message,
+};
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSImageCompressionFactor, NSView, NSWindow,
 };
 use objc2_foundation::{
-    ns_string, NSArray, NSDate, NSDictionary, NSError, NSNumber, NSProcessInfo, NSString, NSURL,
-    NSURLErrorFailingURLErrorKey, NSUUID,
+    ns_string, NSArray, NSDate, NSDictionary, NSError, NSNumber, NSProcessInfo, NSString,
+    NSURLErrorFailingURLErrorKey, NSURL, NSUUID,
 };
 use objc2_web_kit::{
-    WKContentWorld, WKFindConfiguration, WKFindResult, WKNavigation, WKNavigationAction,
-    WKNavigationActionPolicy, WKNavigationDelegate, WKScriptMessage, WKScriptMessageHandler,
-    WKSnapshotConfiguration, WKUIDelegate, WKUserContentController, WKUserScript,
-    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataRecord,
-    WKWebsiteDataStore, WKContentRuleList, WKContentRuleListStore,
+    WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKFindConfiguration, WKFindResult,
+    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
+    WKScriptMessage, WKScriptMessageHandler, WKSnapshotConfiguration, WKUIDelegate,
+    WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataRecord, WKWebsiteDataStore,
 };
 use tauri_runtime_wry::wry::{self, WebViewExtMacOS};
 
@@ -34,8 +36,8 @@ use super::super::channel::MessageSink;
 use super::super::hooks::{classify_load_error, LoadFailure};
 use super::super::profile::{self, BrowserProxy, ProxyScheme};
 
-pub const WORLD_NAME: &str = "codeg";
-pub const HANDLER_NAME: &str = "codegBrowser";
+pub const WORLD_NAME: &str = "harness_studio";
+pub const HANDLER_NAME: &str = "harnessStudioBrowser";
 
 thread_local! {
     // Controllers that already carry our handler + scripts. A popup created
@@ -52,14 +54,14 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[ivars = HandlerIvars]
-    pub struct CodegMessageHandler;
+    pub struct HarnessStudioMessageHandler;
 
-    unsafe impl NSObjectProtocol for CodegMessageHandler {}
+    unsafe impl NSObjectProtocol for HarnessStudioMessageHandler {}
 
-    unsafe impl WKScriptMessageHandler for CodegMessageHandler {
+    unsafe impl WKScriptMessageHandler for HarnessStudioMessageHandler {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn did_receive(
-            this: &CodegMessageHandler,
+            this: &HarnessStudioMessageHandler,
             _controller: &WKUserContentController,
             message: &WKScriptMessage,
         ) {
@@ -81,7 +83,7 @@ define_class!(
     }
 );
 
-impl CodegMessageHandler {
+impl HarnessStudioMessageHandler {
     fn new(sink: MessageSink, mtm: MainThreadMarker) -> Retained<Self> {
         let this = mtm.alloc::<Self>().set_ivars(HandlerIvars { sink });
         // SAFETY: plain NSObject init.
@@ -94,7 +96,7 @@ fn mtm() -> Result<MainThreadMarker, String> {
 }
 
 /// Content worlds (macOS 11+): decided at runtime, not compile time, because
-/// codeg sets no minimumSystemVersion.
+/// harness_studio sets no minimumSystemVersion.
 pub fn supports_content_world(controller: &WKUserContentController) -> bool {
     controller.respondsToSelector(sel!(addScriptMessageHandler:contentWorld:name:))
 }
@@ -118,31 +120,32 @@ pub fn install_world(
         // place already, and the sink resolves the tab per message.
         return Ok(supports_content_world(&controller));
     }
-    let handler = CodegMessageHandler::new(sink, mtm);
+    let handler = HarnessStudioMessageHandler::new(sink, mtm);
     let proto = ProtocolObject::from_ref(&*handler);
     // SAFETY: main thread, live controller; WebKit retains the handler.
     unsafe {
         if supports_content_world(&controller) {
-            let world = WKContentWorld::worldWithName(ns_string!("codeg"), mtm);
+            let world = WKContentWorld::worldWithName(ns_string!("harness_studio"), mtm);
             controller.addScriptMessageHandler_contentWorld_name(
                 proto,
                 &world,
-                ns_string!("codegBrowser"),
+                ns_string!("harnessStudioBrowser"),
             );
             for source in scripts {
-                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
-                    mtm.alloc(),
-                    &NSString::from_str(source),
-                    WKUserScriptInjectionTime::AtDocumentStart,
-                    false,
-                    &world,
-                );
+                let script =
+                    WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                        mtm.alloc(),
+                        &NSString::from_str(source),
+                        WKUserScriptInjectionTime::AtDocumentStart,
+                        false,
+                        &world,
+                    );
                 controller.addUserScript(&script);
             }
             add_page_scripts(&controller, page_scripts, mtm);
             Ok(true)
         } else {
-            controller.addScriptMessageHandler_name(proto, ns_string!("codegBrowser"));
+            controller.addScriptMessageHandler_name(proto, ns_string!("harnessStudioBrowser"));
             for source in scripts {
                 let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
                     mtm.alloc(),
@@ -181,7 +184,7 @@ unsafe fn add_page_scripts(
     }
 }
 
-/// Evaluate `expression` in the `codeg` world of the main frame. The result
+/// Evaluate `expression` in the `harness_studio` world of the main frame. The result
 /// arrives as the JSON string `{"ok":true,"value":…}` or
 /// `{"ok":false,"error":…}` so no platform value conversion is needed.
 pub fn eval_in_world(
@@ -214,7 +217,7 @@ pub fn eval_in_world(
     );
     // SAFETY: main thread, live webview.
     unsafe {
-        let world = WKContentWorld::worldWithName(ns_string!("codeg"), mtm);
+        let world = WKContentWorld::worldWithName(ns_string!("harness_studio"), mtm);
         wk.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
             &NSString::from_str(&wrapped),
             None,
@@ -276,7 +279,11 @@ pub fn snapshot_jpeg(
 
 /// # Safety
 /// Main thread, live image.
-unsafe fn encode_jpeg(image: &NSImage, quality: f64, mtm: MainThreadMarker) -> Result<(Vec<u8>, u32, u32), String> {
+unsafe fn encode_jpeg(
+    image: &NSImage,
+    quality: f64,
+    mtm: MainThreadMarker,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let cg = image
         .CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
         .ok_or_else(|| "snapshot has no bitmap".to_string())?;
@@ -346,10 +353,11 @@ pub fn find_string(
 ) -> Result<(), String> {
     let mtm = mtm()?;
     let wk = webview.webview();
-    let block = RcBlock::<dyn Fn(NonNull<WKFindResult>)>::new(move |result: NonNull<WKFindResult>| {
-        // SAFETY: WebKit hands us a live result for the duration of the call.
-        callback(unsafe { result.as_ref().matchFound() });
-    });
+    let block =
+        RcBlock::<dyn Fn(NonNull<WKFindResult>)>::new(move |result: NonNull<WKFindResult>| {
+            // SAFETY: WebKit hands us a live result for the duration of the call.
+            callback(unsafe { result.as_ref().matchFound() });
+        });
     // SAFETY: main thread, live webview.
     unsafe {
         let configuration = WKFindConfiguration::new(mtm);
@@ -411,7 +419,11 @@ pub fn stop_loading(webview: &wry::WebView) {
 pub fn current_url(webview: &wry::WebView) -> Option<String> {
     let wk = WebViewExtMacOS::webview(webview);
     // SAFETY: main thread; WebKit hands back an owned NSURL / NSString.
-    unsafe { wk.URL().and_then(|u| u.absoluteString()).map(|s| s.to_string()) }
+    unsafe {
+        wk.URL()
+            .and_then(|u| u.absoluteString())
+            .map(|s| s.to_string())
+    }
 }
 
 /// `WKWebView.isLoading`. wry has no navigation-failure callback, so this is
@@ -498,8 +510,7 @@ pub fn open_devtools(webview: &wry::WebView) -> bool {
 /// open, because WebKit reports its closing no other way.
 pub fn devtools_visible(webview: &wry::WebView) -> bool {
     with_inspector(webview, |inspector| unsafe {
-        let can_ask: bool =
-            objc2::msg_send![inspector, respondsToSelector: objc2::sel!(isVisible)];
+        let can_ask: bool = objc2::msg_send![inspector, respondsToSelector: objc2::sel!(isVisible)];
         can_ask && objc2::msg_send![inspector, isVisible]
     })
     .unwrap_or(false)
@@ -563,7 +574,12 @@ pub fn debug_view(webview: &wry::WebView) -> serde_json::Value {
             wk.isHiddenOrHasHiddenAncestor(),
             wk.window().is_some(),
             wk.superview().is_some(),
-            [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+            [
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+            ],
             wk.isLoading(),
             wk.URL().is_some(),
         )
@@ -602,7 +618,7 @@ pub use super::{NavigationEvent, NavigationSink};
 thread_local! {
     /// Wrappers by `WKWebView` pointer, kept alive here (`navigationDelegate`
     /// is a weak property).
-    static NAV_DELEGATES: RefCell<HashMap<usize, Retained<CodegNavigationDelegate>>> =
+    static NAV_DELEGATES: RefCell<HashMap<usize, Retained<HarnessStudioNavigationDelegate>>> =
         RefCell::new(HashMap::new());
     /// Whether the navigation action currently being decided targets the main
     /// frame. Set around the forward to wry, whose synchronous call into the
@@ -636,11 +652,11 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[ivars = NavigationDelegateIvars]
-    pub struct CodegNavigationDelegate;
+    pub struct HarnessStudioNavigationDelegate;
 
-    unsafe impl NSObjectProtocol for CodegNavigationDelegate {}
+    unsafe impl NSObjectProtocol for HarnessStudioNavigationDelegate {}
 
-    impl CodegNavigationDelegate {
+    impl HarnessStudioNavigationDelegate {
         #[unsafe(method(respondsToSelector:))]
         fn responds_to_selector(&self, selector: Sel) -> bool {
             self.class().responds_to(selector) || self.ivars().inner.respondsToSelector(selector)
@@ -652,7 +668,7 @@ define_class!(
         }
     }
 
-    unsafe impl WKNavigationDelegate for CodegNavigationDelegate {
+    unsafe impl WKNavigationDelegate for HarnessStudioNavigationDelegate {
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn decide_policy(
             &self,
@@ -768,7 +784,7 @@ define_class!(
     }
 );
 
-impl CodegNavigationDelegate {
+impl HarnessStudioNavigationDelegate {
     fn new(
         inner: Retained<ProtocolObject<dyn WKNavigationDelegate>>,
         sink: NavigationSink,
@@ -898,7 +914,10 @@ fn apply_user_agent(webview: &WKWebView, url: &tauri::Url) {
 }
 
 /// Wrap the webview's navigation delegate. Idempotent per webview.
-pub fn install_navigation_delegate(webview: &wry::WebView, sink: NavigationSink) -> Result<(), String> {
+pub fn install_navigation_delegate(
+    webview: &wry::WebView,
+    sink: NavigationSink,
+) -> Result<(), String> {
     let mtm = mtm()?;
     let wk = webview.webview();
     let key = Retained::as_ptr(&wk) as usize;
@@ -909,7 +928,7 @@ pub fn install_navigation_delegate(webview: &wry::WebView, sink: NavigationSink)
     // SAFETY: main thread, live webview.
     let inner = unsafe { wk.navigationDelegate() }
         .ok_or_else(|| "the webview has no navigation delegate to wrap".to_string())?;
-    let delegate = CodegNavigationDelegate::new(inner, sink, mtm);
+    let delegate = HarnessStudioNavigationDelegate::new(inner, sink, mtm);
     // SAFETY: main thread; the wrapper is retained in `NAV_DELEGATES` below,
     // which is what keeps the weak `navigationDelegate` valid.
     unsafe { wk.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -943,7 +962,7 @@ pub use super::PageCloseSink;
 thread_local! {
     /// Wrappers by `WKWebView` pointer, kept alive here (`UIDelegate` is a
     /// weak property). Dropped with the navigation wrapper above.
-    static UI_DELEGATES: RefCell<HashMap<usize, Retained<CodegUIDelegate>>> =
+    static UI_DELEGATES: RefCell<HashMap<usize, Retained<HarnessStudioUIDelegate>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -956,11 +975,11 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[ivars = UIDelegateIvars]
-    pub struct CodegUIDelegate;
+    pub struct HarnessStudioUIDelegate;
 
-    unsafe impl NSObjectProtocol for CodegUIDelegate {}
+    unsafe impl NSObjectProtocol for HarnessStudioUIDelegate {}
 
-    impl CodegUIDelegate {
+    impl HarnessStudioUIDelegate {
         #[unsafe(method(respondsToSelector:))]
         fn responds_to_selector(&self, selector: Sel) -> bool {
             self.class().responds_to(selector) || self.ivars().inner.respondsToSelector(selector)
@@ -972,7 +991,7 @@ define_class!(
         }
     }
 
-    unsafe impl WKUIDelegate for CodegUIDelegate {
+    unsafe impl WKUIDelegate for HarnessStudioUIDelegate {
         #[unsafe(method(webViewDidClose:))]
         fn web_view_did_close(&self, _webview: &WKWebView) {
             (self.ivars().sink)();
@@ -980,13 +999,15 @@ define_class!(
     }
 );
 
-impl CodegUIDelegate {
+impl HarnessStudioUIDelegate {
     fn new(
         inner: Retained<ProtocolObject<dyn WKUIDelegate>>,
         sink: PageCloseSink,
         mtm: MainThreadMarker,
     ) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(UIDelegateIvars { inner, sink });
+        let this = mtm
+            .alloc::<Self>()
+            .set_ivars(UIDelegateIvars { inner, sink });
         // SAFETY: plain NSObject init.
         unsafe { msg_send![super(this), init] }
     }
@@ -1006,7 +1027,7 @@ pub fn install_page_close_hook(webview: &wry::WebView, sink: PageCloseSink) -> R
     // SAFETY: main thread, live webview.
     let inner = unsafe { wk.UIDelegate() }
         .ok_or_else(|| "the webview has no UI delegate to wrap".to_string())?;
-    let delegate = CodegUIDelegate::new(inner, sink, mtm);
+    let delegate = HarnessStudioUIDelegate::new(inner, sink, mtm);
     // SAFETY: main thread; the wrapper is retained in `UI_DELEGATES` above,
     // which is what keeps the weak `UIDelegate` valid.
     unsafe { wk.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -1111,11 +1132,17 @@ pub fn profile_configuration(
         configuration
     };
     if profile::is_remote_profile(profile_id) {
-        let rules = LOOPBACK_RULE_LIST.with(|slot| slot.borrow().clone()).ok_or_else(|| {
-            format!("browser profile {profile_id} cannot keep its pages off this computer yet")
-        })?;
+        let rules = LOOPBACK_RULE_LIST
+            .with(|slot| slot.borrow().clone())
+            .ok_or_else(|| {
+                format!("browser profile {profile_id} cannot keep its pages off this computer yet")
+            })?;
         // SAFETY: main thread; the controller is the configuration's own.
-        unsafe { configuration.userContentController().addContentRuleList(&rules) };
+        unsafe {
+            configuration
+                .userContentController()
+                .addContentRuleList(&rules)
+        };
     }
     Ok(configuration)
 }
@@ -1147,7 +1174,7 @@ pub fn document_configuration(mtm: MainThreadMarker) -> Retained<WKWebViewConfig
 // port of the same number is not.
 
 /// Identifier of the list in the app's content-rule-list store.
-const LOOPBACK_RULES_ID: &str = "codeg-remote-egress-loopback";
+const LOOPBACK_RULES_ID: &str = "harness-studio-remote-egress-loopback";
 
 /// Everything addressed to this machine by a literal name, blocked: every
 /// resource type (no `resource-type`), so documents, frames, subresources and
@@ -1174,7 +1201,9 @@ thread_local! {
 /// Compile the loopback rules if that has not been done this run; `done`
 /// hears how it went, on the main thread. A remote profile's tabs cannot be
 /// built before this succeeds (`profile_configuration`).
-pub fn prepare_loopback_rules(done: Box<dyn Fn(Result<(), String>) + 'static>) -> Result<(), String> {
+pub fn prepare_loopback_rules(
+    done: Box<dyn Fn(Result<(), String>) + 'static>,
+) -> Result<(), String> {
     let mtm = mtm()?;
     if LOOPBACK_RULE_LIST.with(|slot| slot.borrow().is_some()) {
         done(Ok(()));
@@ -1349,7 +1378,13 @@ pub fn remove_profile_store(
         done(result);
     });
     // SAFETY: main thread; a valid identifier and a live block.
-    unsafe { WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&identifier, &handler, mtm) };
+    unsafe {
+        WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
+            &identifier,
+            &handler,
+            mtm,
+        )
+    };
     Ok(())
 }
 
@@ -1365,29 +1400,31 @@ pub fn clear_shared_store_except_app(done: impl Fn() + 'static) -> Result<(), St
     let done = std::rc::Rc::new(done);
     let removing_store = store.clone();
     let removing_types = types.clone();
-    let fetched = RcBlock::new(move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
-        // SAFETY: WebKit passes a live array on the main thread.
-        let records = unsafe { records.as_ref() };
-        let victims: Vec<Retained<WKWebsiteDataRecord>> = records
-            .iter()
-            .filter(|record| {
-                // SAFETY: live record.
-                let name = unsafe { record.displayName() };
-                !is_app_origin(&name.to_string())
-            })
-            .collect();
-        let victims = NSArray::from_retained_slice(&victims);
-        let done = done.clone();
-        let finished = RcBlock::new(move || done());
-        // SAFETY: main thread; all three arguments are live.
-        unsafe {
-            removing_store.removeDataOfTypes_forDataRecords_completionHandler(
-                &removing_types,
-                &victims,
-                &finished,
-            );
-        }
-    });
+    let fetched = RcBlock::new(
+        move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
+            // SAFETY: WebKit passes a live array on the main thread.
+            let records = unsafe { records.as_ref() };
+            let victims: Vec<Retained<WKWebsiteDataRecord>> = records
+                .iter()
+                .filter(|record| {
+                    // SAFETY: live record.
+                    let name = unsafe { record.displayName() };
+                    !is_app_origin(&name.to_string())
+                })
+                .collect();
+            let victims = NSArray::from_retained_slice(&victims);
+            let done = done.clone();
+            let finished = RcBlock::new(move || done());
+            // SAFETY: main thread; all three arguments are live.
+            unsafe {
+                removing_store.removeDataOfTypes_forDataRecords_completionHandler(
+                    &removing_types,
+                    &victims,
+                    &finished,
+                );
+            }
+        },
+    );
     // SAFETY: main thread.
     unsafe { store.fetchDataRecordsOfTypes_completionHandler(&types, &fetched) };
     Ok(())
@@ -1400,16 +1437,18 @@ pub fn default_store_record_names(done: impl Fn(Vec<String>) + 'static) -> Resul
     // SAFETY: main thread; WebKit owns the store.
     let store = unsafe { WKWebsiteDataStore::defaultDataStore(mtm) };
     let types = unsafe { WKWebsiteDataStore::allWebsiteDataTypes(mtm) };
-    let fetched = RcBlock::new(move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
-        // SAFETY: WebKit passes a live array on the main thread.
-        let records = unsafe { records.as_ref() };
-        let names = records
-            .iter()
-            // SAFETY: live record.
-            .map(|record| unsafe { record.displayName() }.to_string())
-            .collect();
-        done(names);
-    });
+    let fetched = RcBlock::new(
+        move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
+            // SAFETY: WebKit passes a live array on the main thread.
+            let records = unsafe { records.as_ref() };
+            let names = records
+                .iter()
+                // SAFETY: live record.
+                .map(|record| unsafe { record.displayName() }.to_string())
+                .collect();
+            done(names);
+        },
+    );
     // SAFETY: main thread.
     unsafe { store.fetchDataRecordsOfTypes_completionHandler(&types, &fetched) };
     Ok(())
@@ -1443,7 +1482,7 @@ mod network {
     type SetFailoverAllowed = unsafe extern "C" fn(*mut NSObject, bool);
 
     /// Connections to these hosts never go through the proxy: pages served
-    /// from this machine (dev servers, codeg's own bridges) are the point of
+    /// from this machine (dev servers, harness_studio's own bridges) are the point of
     /// the built-in browser and must keep working whatever the proxy would do
     /// with them — the exception every browser and the `NO_PROXY` convention
     /// make. A remote-egress profile wants the opposite, and gets none.
@@ -1472,9 +1511,15 @@ mod network {
         let (create_host, create_socks5, create_http_connect, add_excluded_domain) = unsafe {
             (
                 std::mem::transmute::<*mut c_void, CreateHost>(symbol("nw_endpoint_create_host")?),
-                std::mem::transmute::<*mut c_void, CreateSocks5>(symbol("nw_proxy_config_create_socksv5")?),
-                std::mem::transmute::<*mut c_void, CreateHttpConnect>(symbol("nw_proxy_config_create_http_connect")?),
-                std::mem::transmute::<*mut c_void, AddExcludedDomain>(symbol("nw_proxy_config_add_excluded_domain")?),
+                std::mem::transmute::<*mut c_void, CreateSocks5>(symbol(
+                    "nw_proxy_config_create_socksv5",
+                )?),
+                std::mem::transmute::<*mut c_void, CreateHttpConnect>(symbol(
+                    "nw_proxy_config_create_http_connect",
+                )?),
+                std::mem::transmute::<*mut c_void, AddExcludedDomain>(symbol(
+                    "nw_proxy_config_add_excluded_domain",
+                )?),
             )
         };
         let host = CString::new(proxy.host.as_str()).map_err(|e| format!("proxy host: {e}"))?;
@@ -1483,7 +1528,12 @@ mod network {
         // (+1), which `Retained::from_raw` takes over.
         unsafe {
             let endpoint = Retained::from_raw(create_host(host.as_ptr(), port.as_ptr()))
-                .ok_or_else(|| format!("cannot describe proxy endpoint {}:{}", proxy.host, proxy.port))?;
+                .ok_or_else(|| {
+                    format!(
+                        "cannot describe proxy endpoint {}:{}",
+                        proxy.host, proxy.port
+                    )
+                })?;
             let endpoint_ptr = Retained::as_ptr(&endpoint) as *mut NSObject;
             let config = match proxy.scheme {
                 ProxyScheme::Http => create_http_connect(endpoint_ptr, std::ptr::null_mut()),

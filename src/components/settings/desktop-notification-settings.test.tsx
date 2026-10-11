@@ -253,7 +253,7 @@ describe("the permission card", () => {
   })
 
   it("hides the test button where notifications cannot exist at all", () => {
-    // A `codeg-server` over plain http:// on a LAN address — no secure
+    // A `harness-studio-server` over plain http:// on a LAN address — no secure
     // context, so there is nothing to test.
     permission.mockReturnValue("unsupported")
     renderSection()
@@ -273,7 +273,7 @@ describe("the permission card", () => {
 
     await waitFor(() =>
       expect(sendTest).toHaveBeenCalledWith(
-        "Codeg",
+        "harness studio",
         "Desktop notifications are working."
       )
     )
@@ -284,25 +284,27 @@ describe("the delivering identity", () => {
   it("names the app the OS files the notifications under", async () => {
     permission.mockReturnValue("managed_by_os")
     identity.mockResolvedValue({
-      bundleId: "app.codeg",
-      requestedBundleId: "app.codeg",
+      bundleId: "com.harnessstudio.desktop",
+      requestedBundleId: "com.harnessstudio.desktop",
       degraded: false,
     })
     renderSection()
     expandSection()
 
-    expect(await screen.findByText("app.codeg")).toBeInTheDocument()
+    expect(
+      await screen.findByText("com.harnessstudio.desktop")
+    ).toBeInTheDocument()
     expect(screen.getByText("Delivered as")).toBeInTheDocument()
   })
 
   it("warns when delivery has fallen back to another app", async () => {
     // The failure this row exists for: a build that could not claim its own
     // identifier posts as Terminal, so every switch the user can see under
-    // "codeg" in System Settings governs nothing at all.
+    // "harness_studio" in System Settings governs nothing at all.
     permission.mockReturnValue("managed_by_os")
     identity.mockResolvedValue({
       bundleId: "com.apple.Terminal",
-      requestedBundleId: "app.codeg",
+      requestedBundleId: "com.harnessstudio.desktop",
       degraded: true,
     })
     renderSection()

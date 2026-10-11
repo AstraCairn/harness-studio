@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::Serialize;
 
+use crate::events::{emit_event, EventEmitter};
 use crate::logging::init::{build_env_filter, ReloadHandle};
 use crate::logging::{LogSettings, LOG_APPENDED_EVENT};
-use crate::web::event_bridge::{emit_event, EventEmitter};
 
 /// Hard cap on retained records regardless of byte total — defense against a
 /// flood of tiny events. Generous: the viewer shows recent history and the
@@ -132,7 +132,7 @@ pub struct LogHub {
 
 static LOG_HUB: OnceLock<Arc<LogHub>> = OnceLock::new();
 
-/// The process-global [`LogHub`], or `None` before init (or in `codeg-mcp`,
+/// The process-global [`LogHub`], or `None` before init (or in `harness-studio-mcp`,
 /// which installs a stderr-only subscriber with no hub).
 pub fn log_hub() -> Option<&'static Arc<LogHub>> {
     LOG_HUB.get()
@@ -287,12 +287,12 @@ mod tests {
 
     #[tokio::test]
     async fn record_buffers_and_emits_without_deadlock() {
-        use crate::web::event_bridge::{EventEmitter, WebEventBroadcaster};
+        use crate::events::{EventBroadcaster, EventEmitter};
 
         let hub = LogHub::new_detached();
-        let broadcaster = Arc::new(WebEventBroadcaster::new());
+        let broadcaster = Arc::new(EventBroadcaster::new());
         let mut rx = broadcaster.subscribe();
-        hub.set_emitter(EventEmitter::test_web_only(broadcaster.clone()));
+        hub.set_emitter(EventEmitter::test_local(broadcaster.clone()));
 
         // Must return (no deadlock between the buffer lock and the emit path)
         // and both buffer and emit the record.

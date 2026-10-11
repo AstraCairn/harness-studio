@@ -1,5 +1,5 @@
 //! Commands for managing **custom ACP agents** — agents the user registers by
-//! supplying ACP-registry information rather than agents codeg ships support
+//! supplying ACP-registry information rather than agents harness_studio ships support
 //! for.
 //!
 //! The whole surface is deliberately thin: add / edit / remove a definition,
@@ -21,8 +21,8 @@ use crate::acp::{custom_registry, registry};
 use crate::commands::acp::emit_acp_agents_updated;
 use crate::db::service::custom_agent_service;
 use crate::db::AppDatabase;
+use crate::events::EventEmitter;
 use crate::models::agent::AgentType;
-use crate::web::event_bridge::EventEmitter;
 
 /// A registered custom agent, as shown in the settings list.
 #[derive(Debug, Clone, Serialize)]
@@ -50,7 +50,7 @@ pub struct CustomAgentInfo {
     /// Mirrors [`CustomAgentDef::version_probe`] for the edit form.
     pub version_probe: Option<String>,
     /// Mirrors [`CustomAgentDef::supports_mcp`] — backs the settings toggle
-    /// that decides whether codeg-mcp rides along on `session/new`.
+    /// that decides whether harness-studio-mcp rides along on `session/new`.
     pub supports_mcp: bool,
     /// False when the stored definition cannot produce launch metadata (e.g.
     /// a binary-only agent with no release for this platform). The row still
@@ -86,7 +86,9 @@ fn info_from_def(def: &CustomAgentDef) -> CustomAgentInfo {
     }
 }
 
-pub async fn acp_list_custom_agents_core(db: &AppDatabase) -> Result<Vec<CustomAgentInfo>, AcpError> {
+pub async fn acp_list_custom_agents_core(
+    db: &AppDatabase,
+) -> Result<Vec<CustomAgentInfo>, AcpError> {
     let defs = custom_agent_service::list_defs(&db.conn)
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
@@ -141,7 +143,7 @@ pub async fn acp_delete_custom_agent_core(
     // transcripts is what actually loses history, so it is opt-in.
     if delete_transcripts {
         if let Err(e) = crate::acp_transcript::remove_agent_transcripts_in(
-            &crate::paths::codeg_acp_transcripts_root(),
+            &crate::paths::harness_studio_acp_transcripts_root(),
             &registry_id,
         ) {
             tracing::warn!("[custom-agent] failed to remove transcripts for {registry_id}: {e}");
@@ -151,7 +153,7 @@ pub async fn acp_delete_custom_agent_core(
     Ok(())
 }
 
-/// Fetch the public ACP registry, annotated with which entries codeg already
+/// Fetch the public ACP registry, annotated with which entries harness_studio already
 /// ships natively and which the user has already added.
 pub async fn acp_fetch_registry_catalog_core(
     db: &AppDatabase,
@@ -191,21 +193,20 @@ pub async fn acp_add_registry_agent_core(
         .any(|a| registry::registry_id_for(a) == registry_id)
     {
         return Err(AcpError::protocol(format!(
-            "{registry_id} is already built into codeg"
+            "{registry_id} is already built into harness_studio"
         )));
     }
     let catalog = acp_fetch_registry_catalog_core(db).await?;
     let entry = catalog
         .iter()
         .find(|e| e.registry_id == registry_id)
-        .ok_or_else(|| {
-            AcpError::protocol(format!("{registry_id} is not in the ACP registry"))
-        })?;
+        .ok_or_else(|| AcpError::protocol(format!("{registry_id} is not in the ACP registry")))?;
 
     let kind = match distribution_kind.as_deref() {
-        Some(raw) => Some(CustomDistributionKind::parse(raw).ok_or_else(|| {
-            AcpError::protocol(format!("unknown distribution kind: {raw}"))
-        })?),
+        Some(raw) => Some(
+            CustomDistributionKind::parse(raw)
+                .ok_or_else(|| AcpError::protocol(format!("unknown distribution kind: {raw}")))?,
+        ),
         None => None,
     };
 
@@ -271,7 +272,7 @@ fn expand_home(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-/// Largest icon codeg will inline. Registry marks are 650 B–5 KB SVGs, so this
+/// Largest icon harness_studio will inline. Registry marks are 650 B–5 KB SVGs, so this
 /// is far above anything real; it exists so a hostile or mistyped URL cannot
 /// push an arbitrary blob into the database.
 pub const MAX_ICON_BYTES: usize = 256 * 1024;
@@ -804,7 +805,7 @@ mod tests {
         // HOME is pinned so a parallel test rewriting it cannot flip the
         // expansion mid-test; expectations still derive from `dirs::home_dir()`
         // itself, which ignores $HOME on Windows.
-        temp_env::with_var("HOME", Some("/tmp/codeg-skills-home"), || {
+        temp_env::with_var("HOME", Some("/tmp/harness-studio-skills-home"), || {
             let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
 
             // Blank input reads as "not declared".
@@ -849,11 +850,17 @@ mod tests {
             Some(uploaded.as_str())
         );
         // An oversized one is dropped rather than persisted.
-        let huge = format!("data:image/png;base64,{}", "A".repeat(MAX_ICON_DATA_URL_CHARS));
+        let huge = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(MAX_ICON_DATA_URL_CHARS)
+        );
         assert_eq!(normalize_icon(Some(huge)).await, None);
         // Anything that is not http(s) is dropped, never fetched — notably
         // `file://`, which would otherwise read local disk.
-        assert_eq!(normalize_icon(Some("file:///etc/passwd".into())).await, None);
+        assert_eq!(
+            normalize_icon(Some("file:///etc/passwd".into())).await,
+            None
+        );
         assert_eq!(normalize_icon(Some("/local/path.svg".into())).await, None);
         assert_eq!(normalize_icon(Some("   ".into())).await, None);
         assert_eq!(normalize_icon(None).await, None);
@@ -893,8 +900,14 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
-        assert_eq!(inline_icon(&format!("http://{addr}/declared.png")).await, None);
-        assert_eq!(inline_icon(&format!("http://{addr}/chunked.png")).await, None);
+        assert_eq!(
+            inline_icon(&format!("http://{addr}/declared.png")).await,
+            None
+        );
+        assert_eq!(
+            inline_icon(&format!("http://{addr}/chunked.png")).await,
+            None
+        );
         // An icon within the cap still round-trips into a data URL.
         let small = inline_icon(&format!("http://{addr}/small.png"))
             .await

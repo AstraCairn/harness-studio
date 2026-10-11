@@ -43,7 +43,7 @@ fn parse_public_key(minisign_pub_text: &str) -> Result<PublicKey, String> {
 /// The embedded release-signing public key.
 fn embedded_public_key() -> Result<PublicKey, String> {
     if TAURI_PUBKEY_B64.is_empty() {
-        return Err("HarnessStudio release signing key is not configured".to_string());
+        return Err("harness studio release signing key is not configured".to_string());
     }
     parse_public_key(&unwrap_base64(TAURI_PUBKEY_B64)?)
 }
@@ -96,10 +96,8 @@ mod tests {
 
     #[test]
     fn garbage_signature_is_rejected() {
-        let pk = parse_public_key(
-            "RWSIetYVwnaMSCgK8itX6mqf0qbuguyjngf6Ze9BeWuekSFi8+vvwzYn",
-        )
-        .unwrap();
+        let pk =
+            parse_public_key("RWSIetYVwnaMSCgK8itX6mqf0qbuguyjngf6Ze9BeWuekSFi8+vvwzYn").unwrap();
         let err = verify_minisign(&pk, b"hello", "not a signature").unwrap_err();
         assert!(err.contains("parse") || err.contains("signature"));
     }

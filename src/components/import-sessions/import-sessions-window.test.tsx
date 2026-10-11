@@ -96,7 +96,7 @@ function scanFixture(): ScanResult {
       {
         path: "/tmp/alpha",
         name: "alpha",
-        exists_in_codeg: false,
+        exists_in_harness_studio: false,
         folder_id: null,
         agent_types: ["claude_code", "codex"],
         sessions: [
@@ -108,7 +108,7 @@ function scanFixture(): ScanResult {
       {
         path: "/tmp/beta",
         name: "beta",
-        exists_in_codeg: true,
+        exists_in_harness_studio: true,
         folder_id: 7,
         agent_types: ["gemini"],
         sessions: [
@@ -178,7 +178,7 @@ describe("ImportSessionsWindow", () => {
     // All five sessions render as rows under their folders.
     expect(screen.getByText("Alpha one")).toBeVisible()
     expect(screen.getByText("Beta gone")).toBeVisible()
-    // The not-in-codeg folder carries the "New" badge; the existing one not.
+    // The not-in-harness_studio folder carries the "New" badge; the existing one not.
     const alphaHeader = screen
       .getByText("alpha")
       .closest("[data-folder-path]") as HTMLElement

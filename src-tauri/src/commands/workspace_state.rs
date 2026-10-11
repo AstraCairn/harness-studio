@@ -1,5 +1,5 @@
 use crate::app_error::AppCommandError;
-use crate::web::event_bridge::EventEmitter;
+use crate::events::EventEmitter;
 use crate::workspace_state::WorkspaceSnapshotResponse;
 
 pub(crate) async fn start_workspace_state_stream_core(

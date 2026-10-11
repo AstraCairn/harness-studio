@@ -86,18 +86,18 @@ export type ParsedMeta = {
 
 /**
  * Extract delegation state from a `ToolCallState.meta` value. Returns
- * `null` when the meta doesn't carry the `codeg.delegation` sub-object —
+ * `null` when the meta doesn't carry the `harness_studio.delegation` sub-object —
  * caller falls back to the live binding / `parseInput` chain.
  *
  * The shape mirrors what the broker writes via `DelegationMetaWriter`:
- *   `{ "codeg.delegation": { status, child_connection_id?,
+ *   `{ "harness_studio.delegation": { status, child_connection_id?,
  *     child_conversation_id?, error_code?, task_preview?, task_id? } }`
  */
 export function parseDelegationMeta(
   meta: Record<string, unknown> | null | undefined
 ): ParsedMeta | null {
   if (!meta || typeof meta !== "object") return null
-  const inner = meta["codeg.delegation"]
+  const inner = meta["harness_studio.delegation"]
   if (!inner || typeof inner !== "object" || Array.isArray(inner)) return null
   const obj = inner as Record<string, unknown>
   const rawStatus = obj["status"]

@@ -28,8 +28,8 @@ use crate::acp::delegation::broker::{DelegationBroker, DelegationConfig};
 use crate::acp::delegation::types::AgentDelegationDefaults;
 use crate::app_error::AppCommandError;
 use crate::db::service::app_metadata_service;
+use crate::events::{emit_event, EventEmitter, DELEGATION_SETTINGS_CHANGED_EVENT};
 use crate::models::AgentType;
-use crate::web::event_bridge::{emit_event, EventEmitter, DELEGATION_SETTINGS_CHANGED_EVENT};
 
 pub const KEY_DELEGATION_ENABLED: &str = "delegation.enabled";
 pub const KEY_DELEGATION_DEPTH: &str = "delegation.depth_limit";
@@ -62,7 +62,7 @@ pub struct DelegationSettings {
     pub enabled: bool,
     pub depth_limit: u32,
     /// Per-agent default overrides applied by the delegation broker when
-    /// codeg-mcp spawns a subagent. Empty map → no overrides anywhere,
+    /// harness-studio-mcp spawns a subagent. Empty map → no overrides anywhere,
     /// which is the pre-existing behavior.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_defaults: BTreeMap<AgentType, AgentDelegationDefaults>,
@@ -184,7 +184,9 @@ pub async fn set_delegation_enabled_core(
         .await
         .map_err(AppCommandError::from)?;
     let settings = load_delegation_settings(conn).await;
-    broker.set_config(settings.clone().into_broker_config()).await;
+    broker
+        .set_config(settings.clone().into_broker_config())
+        .await;
     emit_event(emitter, DELEGATION_SETTINGS_CHANGED_EVENT, &settings);
     Ok(settings)
 }

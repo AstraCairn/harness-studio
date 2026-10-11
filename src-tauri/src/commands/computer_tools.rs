@@ -8,7 +8,7 @@
 //!
 //! Separate from `commands::computer`, which is the desktop feature itself and
 //! exists only in the desktop build: these switches are read by the shared
-//! codeg-mcp plumbing (injection, the service-status popover), so they compile
+//! harness-studio-mcp plumbing (injection, the service-status popover), so they compile
 //! in server mode too — where computer use is simply never advertised.
 //!
 //! **Off by default.** It hands an agent a view of the user's screen.
@@ -30,7 +30,7 @@ use crate::computer::keys::Platform;
 use crate::computer::stop_shortcut::StopShortcut;
 use crate::computer::types::ActDelivery;
 use crate::db::service::app_metadata_service;
-use crate::web::event_bridge::{emit_event, EventEmitter, COMPUTER_TOOLS_SETTINGS_CHANGED_EVENT};
+use crate::events::{emit_event, EventEmitter, COMPUTER_TOOLS_SETTINGS_CHANGED_EVENT};
 
 pub const KEY_COMPUTER_TOOLS_ENABLED: &str = "computer_tools.enabled";
 
@@ -825,7 +825,7 @@ mod tests {
     }
 
     /// A stored spelling this platform cannot register — a database carried
-    /// over from another platform's codeg — reads as the default: the record
+    /// over from another platform's harness_studio — reads as the default: the record
     /// shows the shortcut in force.
     #[tokio::test]
     async fn a_foreign_stored_shortcut_reads_as_the_default() {

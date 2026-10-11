@@ -13,7 +13,7 @@
 //! the current official catalog **verbatim** (minus any the user removed) and
 //! append the user's custom entries.
 //!
-//! The official catalog is sourced at runtime from the codex codeg actually
+//! The official catalog is sourced at runtime from the codex harness_studio actually
 //! launches (see [`crate::acp::codex_catalog_source`]); this module is the pure,
 //! snapshot-in / catalog-out core. We store a **compact** intent
 //! ([`CodexModelConfig`]: sparse `customs` + `excluded_officials`) so the set of
@@ -39,12 +39,12 @@ use crate::app_error::{AppCommandError, AppErrorCode};
 const BUNDLED_SNAPSHOT: &str = include_str!("../../resources/codex/bundled-catalog.json");
 
 /// File name (relative to `CODEX_HOME`) of the generated catalog codex reads.
-pub const CATALOG_REL: &str = "codeg-model-catalog.json";
+pub const CATALOG_REL: &str = "harness-studio-model-catalog.json";
 /// File name (relative to `CODEX_HOME`) of the compact source list we round-trip
 /// back into the editor when no DB provider owns the list (api-key mode).
-pub const SOURCE_REL: &str = "codeg-model-catalog.source.json";
+pub const SOURCE_REL: &str = "harness-studio-model-catalog.source.json";
 
-/// Fields codeg owns/derives itself, so they are never captured as `overrides`
+/// Fields harness_studio owns/derives itself, so they are never captured as `overrides`
 /// when importing a pre-existing catalog: `slug`/`display_name`/`context_window`
 /// map to dedicated compact fields, and `visibility`/`supported_in_api`/
 /// `priority`/`upgrade` are force-set by [`expand_to_catalog`].
@@ -77,7 +77,13 @@ fn enum_spec_for(key: &str) -> Option<EnumSpec> {
         "default_reasoning_summary" => spec(&["auto", "concise", "detailed", "none"], false),
         "default_verbosity" => spec(&["low", "medium", "high"], true),
         "shell_type" => spec(
-            &["default", "local", "unified_exec", "disabled", "shell_command"],
+            &[
+                "default",
+                "local",
+                "unified_exec",
+                "disabled",
+                "shell_command",
+            ],
             false,
         ),
         // Only `freeform` is a variant; `function` would reject the whole catalog.
@@ -418,7 +424,7 @@ pub fn default_slug(config: &CodexModelConfig, snapshot: &[Value]) -> Option<Str
 /// applies** — i.e. "feature off", so codex should use its own catalog
 /// untouched. Removals of models codex has since retired to `hide` are ghosts:
 /// [`expand_to_catalog`] ignores them, so a config carrying only ghosts would
-/// have codeg replace the whole model table (freezing the official list) for a
+/// have harness_studio replace the whole model table (freezing the official list) for a
 /// result identical to codex's own. Treating it as empty hands control back.
 pub fn is_effectively_empty(config: &CodexModelConfig, snapshot: &[Value]) -> bool {
     if !config.customs.is_empty() {
@@ -542,7 +548,7 @@ pub fn parse_model_config(raw: Option<&str>) -> CodexModelConfig {
 }
 
 /// Adopt a **pre-existing** `{"models":[ ModelInfo, ... ]}` catalog (one the user
-/// configured by hand, or codeg's own catalog when its source sidecar is missing)
+/// configured by hand, or harness_studio's own catalog when its source sidecar is missing)
 /// into the compact config, reconciled against the live official catalog:
 /// non-official models become `customs`, listable officials **absent** from the
 /// foreign catalog are recorded as `excluded_officials` (the user removed them),
@@ -657,9 +663,10 @@ pub fn write_catalog_files(
     }
 
     std::fs::create_dir_all(codex_home).map_err(|e| io_err("create codex home", e))?;
-    let catalog = serde_json::to_string_pretty(&expand_to_catalog(&config, snapshot)).map_err(|e| {
-        AppCommandError::new(AppErrorCode::IoError, format!("serialize catalog: {e}"))
-    })?;
+    let catalog =
+        serde_json::to_string_pretty(&expand_to_catalog(&config, snapshot)).map_err(|e| {
+            AppCommandError::new(AppErrorCode::IoError, format!("serialize catalog: {e}"))
+        })?;
     std::fs::write(&catalog_path, catalog).map_err(|e| io_err("write catalog file", e))?;
     std::fs::write(&source_path, raw_compact).map_err(|e| io_err("write catalog source", e))?;
 
@@ -797,7 +804,7 @@ mod tests {
             .min_by_key(|m| priority_of(m))
             .unwrap();
         assert_eq!(slug_of(min), Some("gpt-6.1-sol"));
-        // The root `model` codeg writes for that config agrees.
+        // The root `model` harness_studio writes for that config agrees.
         assert_eq!(default_slug(&removal, &raw).as_deref(), Some("gpt-6.1-sol"));
 
         // A custom still leads, ahead of every official.
@@ -912,7 +919,10 @@ mod tests {
         // A removal that still applies keeps the takeover.
         assert!(!is_effectively_empty(&excluding(&["gpt-5.5"]), &s));
         // Mixed: the live one wins.
-        assert!(!is_effectively_empty(&excluding(&["gpt-5.4", "gpt-5.5"]), &s));
+        assert!(!is_effectively_empty(
+            &excluding(&["gpt-5.4", "gpt-5.5"]),
+            &s
+        ));
         // codex 0.155.1 DELETED gpt-5.2 and gpt-5.4-mini outright rather than
         // hiding them, which is the other way a stored exclusion goes stale. A
         // slug that is not in the catalog at all cannot be listable either, so
@@ -949,12 +959,21 @@ mod tests {
                 overrides: Map::from_iter([
                     // Invalid → must be dropped (would reject the whole catalog).
                     ("shell_type".into(), Value::String("bogus".into())),
-                    ("default_verbosity".into(), Value::String("screaming".into())),
+                    (
+                        "default_verbosity".into(),
+                        Value::String("screaming".into()),
+                    ),
                     // `function` is NOT a valid apply_patch variant on codex 0.144.
-                    ("apply_patch_tool_type".into(), Value::String("function".into())),
+                    (
+                        "apply_patch_tool_type".into(),
+                        Value::String("function".into()),
+                    ),
                     // Valid → must be kept.
                     ("supports_search_tool".into(), Value::Bool(true)),
-                    ("default_reasoning_summary".into(), Value::String("concise".into())),
+                    (
+                        "default_reasoning_summary".into(),
+                        Value::String("concise".into()),
+                    ),
                 ]),
             }],
             excluded_officials: Vec::new(),
@@ -997,8 +1016,15 @@ mod tests {
         };
         let cat = expand_to_catalog(&config, &snap());
         let x = find(&cat, "gw/n").expect("present");
-        for key in ["default_reasoning_summary", "web_search_tool_type", "shell_type"] {
-            assert!(!x.get(key).unwrap().is_null(), "{key} must keep the base value");
+        for key in [
+            "default_reasoning_summary",
+            "web_search_tool_type",
+            "shell_type",
+        ] {
+            assert!(
+                !x.get(key).unwrap().is_null(),
+                "{key} must keep the base value"
+            );
         }
         for key in ["apply_patch_tool_type", "tool_mode", "multi_agent_version"] {
             assert!(x.get(key).unwrap().is_null(), "{key} must accept null");
@@ -1189,7 +1215,10 @@ mod tests {
         gw.insert("slug".into(), Value::String("gw/opus".into()));
         // A field that genuinely differs from the clone base (its own description),
         // so import must capture it as an override.
-        gw.insert("description".into(), Value::String("My private gateway".into()));
+        gw.insert(
+            "description".into(),
+            Value::String("My private gateway".into()),
+        );
         let kept = s
             .iter()
             .find(|m| slug_of(m) == Some("gpt-5.5"))
@@ -1210,7 +1239,10 @@ mod tests {
         assert!(cfg.excluded_officials.iter().any(|x| x == "gpt-5.6-sol"));
         assert!(!cfg.excluded_officials.iter().any(|x| x == "gpt-5.5"));
         // Hidden official is never inferred-excluded.
-        assert!(!cfg.excluded_officials.iter().any(|x| x == "codex-auto-review"));
+        assert!(!cfg
+            .excluded_officials
+            .iter()
+            .any(|x| x == "codex-auto-review"));
         assert_eq!(cfg.default.as_deref(), Some("gpt-5.5"));
 
         // Round-trip: expanding reproduces gpt-5.5 + the custom, drops the
@@ -1227,7 +1259,10 @@ mod tests {
 
     #[test]
     fn write_and_clear_catalog_files() {
-        let dir = std::env::temp_dir().join(format!("codeg-catalog-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "harness-studio-catalog-test-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let s = snap();
         let raw = r#"{"customs":[{"slug":"gw/x","base":"gpt-5.6-sol"}],"default":"gw/x"}"#;
@@ -1242,7 +1277,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.join(CATALOG_REL)).unwrap()).unwrap();
         assert!(find(&cat, "gw/x").is_some());
         assert!(find(&cat, "gpt-5.6-sol").is_some()); // official auto-included
-        // Empty config clears files + signals key removal.
+                                                      // Empty config clears files + signals key removal.
         assert!(write_catalog_files(r#"{"customs":[]}"#, &dir, &s)
             .unwrap()
             .is_none());
@@ -1252,9 +1287,13 @@ mod tests {
         // A ghost-only config (removals of officials codex has since hidden)
         // behaves the same: the files go away and the caller is told to drop the
         // `model_catalog_json` key, so the two never get out of sync.
-        write_catalog_files(r#"{"customs":[{"slug":"gw/y","base":"gpt-5.6-sol"}]}"#, &dir, &s)
-            .unwrap()
-            .expect("seeded");
+        write_catalog_files(
+            r#"{"customs":[{"slug":"gw/y","base":"gpt-5.6-sol"}]}"#,
+            &dir,
+            &s,
+        )
+        .unwrap()
+        .expect("seeded");
         assert!(dir.join(CATALOG_REL).exists());
         let ghosts = r#"{"customs":[],"excludedOfficials":["gpt-5.4","gpt-5.4-mini"]}"#;
         assert!(write_catalog_files(ghosts, &dir, &s).unwrap().is_none());

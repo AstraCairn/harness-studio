@@ -1,6 +1,6 @@
 //! Custom (user-authored) skills management.
 //!
-//! The fourth "skill pack" in codeg's central store `~/.codeg/skills/<id>/`.
+//! The fourth "skill pack" in harness_studio's central store `~/.harnessstudio/skills/<id>/`.
 //! Unlike experts/science/office — which bundle *read-only* content into the
 //! binary — custom skills are created, edited, imported and deleted by the
 //! user. They live in the SAME central store and are enabled for an ACP agent
@@ -12,7 +12,7 @@
 //! store that holds a `SKILL.md` and whose id is NOT claimed by a bundled pack
 //! (experts ∪ science ∪ office). This keeps the store's disjoint-id-namespace
 //! safety model (see `science.rs`) holding for custom too, and lets a user drop
-//! a folder into `~/.codeg/skills` and have it appear on refresh. The startup
+//! a folder into `~/.harnessstudio/skills` and have it appear on refresh. The startup
 //! extraction of bundled packs is id-scoped (hash + manifest + backup, never a
 //! wipe), so it never touches unclaimed custom directories.
 //!
@@ -216,11 +216,7 @@ fn read_frontmatter_name(skill_md: &Path) -> Option<String> {
         // Only a top-level `name:` (no leading whitespace) counts.
         if !line.starts_with(|c: char| c.is_whitespace()) {
             if let Some(rest) = line.strip_prefix("name:") {
-                let val = rest
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .trim();
+                let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
                 if !val.is_empty() {
                     return Some(val.to_string());
                 }
@@ -260,7 +256,7 @@ fn collect_custom_ids() -> Result<Vec<String>, CustomSkillsError> {
         let entry = entry.map_err(|e| CustomSkillsError::Io(e.to_string()))?;
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        // Skip codeg-owned dotfiles (`.manifest.json`, `.manifest.science.json`).
+        // Skip harness-studio-owned dotfiles (`.manifest.json`, `.manifest.science.json`).
         if name.starts_with('.') {
             continue;
         }
@@ -299,8 +295,8 @@ pub async fn custom_list() -> Result<Vec<CustomSkillItem>, CustomSkillsError> {
 /// One-shot snapshot of every (custom skill, agent) link state — lets the matrix
 /// render the whole grid from a single round-trip.
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn custom_list_all_install_statuses() -> Result<Vec<ExpertInstallStatus>, CustomSkillsError>
-{
+pub async fn custom_list_all_install_statuses(
+) -> Result<Vec<ExpertInstallStatus>, CustomSkillsError> {
     let ids = collect_custom_ids()?;
     let agents = supported_agents();
     let mut out = Vec::with_capacity(ids.len() * agents.len());
@@ -312,8 +308,7 @@ pub async fn custom_list_all_install_statuses() -> Result<Vec<ExpertInstallStatu
                 Err(_) => continue,
             };
             let state = classify_link(&link_path, &expected);
-            let target_path =
-                read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
+            let target_path = read_link_target(&link_path).map(|p| p.to_string_lossy().to_string());
             out.push(ExpertInstallStatus {
                 expert_id: id.clone(),
                 agent_type: agent,
@@ -362,7 +357,7 @@ fn link_one_locked(
         Ok(is_copy) => copy_mode = is_copy,
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             match classify_link(&link_path, &central) {
-                ExpertLinkState::LinkedToCodeg => {} // idempotent success
+                ExpertLinkState::LinkedToHarnessStudio => {} // idempotent success
                 ExpertLinkState::BlockedByRealDirectory => {
                     return Err(CustomSkillsError::NameCollision {
                         path: link_path.to_string_lossy().to_string(),
@@ -402,7 +397,7 @@ fn link_one_locked(
 /// Remove one custom skill's link from one agent's skill dirs. **Assumes the
 /// mutation lock is already held.** Scans ALL of the agent's global dirs to
 /// handle shared-dir agents (`~/.agents/skills`). Only ever removes OUR links
-/// (LinkedToCodeg / Broken) — foreign links and real dirs are left untouched.
+/// (LinkedToHarnessStudio / Broken) — foreign links and real dirs are left untouched.
 fn unlink_one_locked(id: &str, agent_type: AgentType) -> Result<(), CustomSkillsError> {
     let id = validate_skill_id(id).map_err(|e| CustomSkillsError::Metadata(e.to_string()))?;
     let dirs = scoped_skill_dirs(agent_type, AgentSkillScope::Global, None)
@@ -417,7 +412,7 @@ fn unlink_one_locked(id: &str, agent_type: AgentType) -> Result<(), CustomSkills
         let state = classify_link(&candidate, &central);
         if matches!(
             state,
-            ExpertLinkState::LinkedToCodeg | ExpertLinkState::Broken
+            ExpertLinkState::LinkedToHarnessStudio | ExpertLinkState::Broken
         ) {
             remove_skill_entry(&candidate).map_err(|e| {
                 CustomSkillsError::Io(format!("remove link {}: {e}", candidate.display()))
@@ -597,8 +592,8 @@ pub async fn custom_import_from_agent(
     ids: Vec<String>,
 ) -> Result<Vec<CustomImportResult>, CustomSkillsError> {
     let _guard = mutation_lock().lock().await;
-    let spec = skill_storage_spec(agent_type)
-        .ok_or(CustomSkillsError::UnsupportedAgent(agent_type))?;
+    let spec =
+        skill_storage_spec(agent_type).ok_or(CustomSkillsError::UnsupportedAgent(agent_type))?;
     Ok(ids
         .iter()
         .map(|id| import_one_from_agent_locked(&spec, id))
@@ -612,9 +607,12 @@ fn import_one_from_agent_locked(spec: &SkillStorageSpec, raw_id: &str) -> Custom
     // Resolve the source on disk (a `<id>/` skill dir or a `<id>.md` file) from
     // the agent's GLOBAL skill dirs. Project-scoped skills are workspace-specific
     // and deliberately excluded from the shared store.
-    let Some(item) =
-        locate_existing_skill_across_dirs(&spec.global_dirs, spec.kind, raw_id, AgentSkillScope::Global)
-    else {
+    let Some(item) = locate_existing_skill_across_dirs(
+        &spec.global_dirs,
+        spec.kind,
+        raw_id,
+        AgentSkillScope::Global,
+    ) else {
         return CustomImportResult {
             id: raw_id.to_string(),
             name: raw_id.to_string(),
@@ -860,7 +858,7 @@ mod tests {
         // Absolute on every platform — a unix literal would not be on Windows.
         let dedicated = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("codeg-dedicated-skills");
+            .join("harness-studio-dedicated-skills");
 
         assert!(hydrate(std::slice::from_ref(&def)).is_empty());
         assert!(
@@ -914,12 +912,12 @@ mod tests {
     async fn apply_links_does_not_deadlock() {
         let ops = vec![
             LinkOp {
-                expert_id: "zzz-codeg-custom-batch-absent-aaa".into(),
+                expert_id: "zzz-harness-studio-custom-batch-absent-aaa".into(),
                 agent_type: AgentType::ClaudeCode,
                 enable: false,
             },
             LinkOp {
-                expert_id: "zzz-codeg-custom-batch-absent-bbb".into(),
+                expert_id: "zzz-harness-studio-custom-batch-absent-bbb".into(),
                 agent_type: AgentType::Codex,
                 enable: false,
             },
@@ -937,13 +935,13 @@ mod tests {
         let ops = vec![
             LinkOp {
                 // Idempotent disable of an absent link → ok.
-                expert_id: "zzz-codeg-custom-batch-absent".into(),
+                expert_id: "zzz-harness-studio-custom-batch-absent".into(),
                 agent_type: AgentType::ClaudeCode,
                 enable: false,
             },
             LinkOp {
                 // Enable of a skill with no central copy → fails its op.
-                expert_id: "zzz-codeg-custom-not-installed".into(),
+                expert_id: "zzz-harness-studio-custom-not-installed".into(),
                 agent_type: AgentType::ClaudeCode,
                 enable: true,
             },
@@ -951,7 +949,10 @@ mod tests {
         let results = custom_apply_links(ops).await.expect("batch returns Ok");
         assert_eq!(results.len(), 2);
         assert!(results[0].ok, "idempotent disable should succeed");
-        assert!(!results[1].ok, "enable of missing central skill should fail");
+        assert!(
+            !results[1].ok,
+            "enable of missing central skill should fail"
+        );
         assert!(results[1].error.is_some());
         assert!(results[1].status.is_none());
     }
@@ -961,8 +962,8 @@ mod tests {
         // Deleting ids with no central dir + no links is an idempotent success;
         // this never touches real content.
         let results = custom_delete_skills(vec![
-            "zzz-codeg-custom-delete-absent-1".into(),
-            "zzz-codeg-custom-delete-absent-2".into(),
+            "zzz-harness-studio-custom-delete-absent-1".into(),
+            "zzz-harness-studio-custom-delete-absent-2".into(),
         ])
         .await
         .expect("batch returns Ok");
@@ -973,10 +974,7 @@ mod tests {
     #[tokio::test]
     async fn create_and_save_reject_reserved_ids() {
         let created = custom_create_skill("writing-plans".into(), "x".into()).await;
-        assert!(matches!(
-            created,
-            Err(CustomSkillsError::ReservedId(_))
-        ));
+        assert!(matches!(created, Err(CustomSkillsError::ReservedId(_))));
         let saved = custom_save_skill("writing-plans".into(), "x".into()).await;
         assert!(matches!(saved, Err(CustomSkillsError::ReservedId(_))));
     }
@@ -988,15 +986,17 @@ mod tests {
         let results = custom_import_from_agent(
             AgentType::ClaudeCode,
             vec![
-                "zzz-codeg-custom-import-absent-1".into(),
-                "zzz-codeg-custom-import-absent-2".into(),
+                "zzz-harness-studio-custom-import-absent-1".into(),
+                "zzz-harness-studio-custom-import-absent-2".into(),
             ],
         )
         .await
         .expect("batch returns Ok");
         assert_eq!(results.len(), 2);
         assert!(
-            results.iter().all(|r| !r.ok && !r.skipped && r.error.is_some()),
+            results
+                .iter()
+                .all(|r| !r.ok && !r.skipped && r.error.is_some()),
             "{results:?}"
         );
     }
@@ -1037,7 +1037,9 @@ mod tests {
     #[test]
     fn validate_skill_id_rejects_traversal_and_separators() {
         // The load-bearing sanitizer every authoring path funnels through.
-        for bad in ["", "  ", "..", "../x", "a/b", "a\\b", ".hidden", "a:b", "a b"] {
+        for bad in [
+            "", "  ", "..", "../x", "a/b", "a\\b", ".hidden", "a:b", "a b",
+        ] {
             assert!(validate_skill_id(bad).is_err(), "must reject {bad:?}");
         }
         for good in ["my-skill", "a.b_c-1", "Skill123"] {
@@ -1120,7 +1122,10 @@ mod tests {
             assert!(res[0].ok, "link enable should succeed: {res:?}");
 
             let link = agent_link_path(AgentType::ClaudeCode, id).expect("link path");
-            assert!(path_is_symlink(&link), "agent link should exist after enable");
+            assert!(
+                path_is_symlink(&link),
+                "agent link should exist after enable"
+            );
 
             let dir = central_experts_dir().join(id);
             let del = custom_delete_skills(vec![id.into()])
@@ -1216,12 +1221,12 @@ mod tests {
             )
             .await
             .expect("batch returns Ok");
-            assert!(
-                del.iter().all(|r| !r.ok && r.error.is_some()),
-                "{del:?}"
-            );
+            assert!(del.iter().all(|r| !r.ok && r.error.is_some()), "{del:?}");
 
-            assert!(sentinel.is_file(), "sentinel outside the store must survive");
+            assert!(
+                sentinel.is_file(),
+                "sentinel outside the store must survive"
+            );
             assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep me");
         })
         .await;

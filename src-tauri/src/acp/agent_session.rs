@@ -1,14 +1,14 @@
 //! Per-session update routing on an ACP client connection.
 //!
-//! codeg sends `session/new`, `session/load` and `session/resume` itself —
+//! harness_studio sends `session/new`, `session/load` and `session/resume` itself —
 //! partly untyped, so it can read fields the typed responses drop (see
 //! `send_new_session_capturing_models`) — and then needs the session's updates
 //! routed to it. The official runtime only routes updates for sessions it
 //! started itself: `ConnectionTo::attach_session` is crate-private since
 //! `agent-client-protocol` 2.0. This is the same routing that method installs —
 //! a dynamic handler claiming every message from the agent that names this
-//! session id, feeding an unbounded channel — minus the prompt helpers codeg
-//! never used. codeg sends `session/prompt` itself and reads the stop reason off
+//! session id, feeding an unbounded channel — minus the prompt helpers harness_studio
+//! never used. harness_studio sends `session/prompt` itself and reads the stop reason off
 //! the response, so this channel only ever carries the agent's own messages,
 //! and it hands them out as plain [`Dispatch`]es rather than the runtime's
 //! `SessionMessage` (whose other variant, a stop reason, nothing here produces).
@@ -128,7 +128,7 @@ impl HandleDispatchFrom<Agent> for SessionRouter {
 
 /// The `sessionId` a request or notification names, if it names one as a
 /// string. A `null` (or otherwise non-string) id matches no session — the
-/// runtime's own router errors on it instead, which is why codeg claims the
+/// runtime's own router errors on it instead, which is why harness_studio claims the
 /// `null` ones, the shape agents actually send, before they get this far
 /// (`ClaimNullSessionIds`).
 fn dispatch_session_id(dispatch: &Dispatch) -> Option<&str> {
@@ -165,7 +165,7 @@ mod tests {
     }
 
     /// The whole contract, against the real runtime over an in-memory pipe:
-    /// codeg creates the session UNTYPED (as `send_new_session_capturing_models`
+    /// harness_studio creates the session UNTYPED (as `send_new_session_capturing_models`
     /// does), attaches afterwards, and still receives the update the agent sent
     /// BEFORE its `session/new` response — parked by the runtime because it
     /// carries a `sessionId`, and replayed into the router the moment it is
@@ -209,12 +209,10 @@ mod tests {
                 let mut session = AgentSession::attach(&cx, response)?;
                 assert_eq!(&*session.session_id().0, "s1");
 
-                let first = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    session.read_update(),
-                )
-                .await
-                .expect("the parked update is replayed into the new router")?;
+                let first =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), session.read_update())
+                        .await
+                        .expect("the parked update is replayed into the new router")?;
                 // Nothing else is routed here: the other session's frame stays
                 // parked for a router of its own.
                 let nothing_more = tokio::time::timeout(

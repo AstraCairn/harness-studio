@@ -175,7 +175,7 @@ pub fn serialize_snapshot(snapshot: &ConfigSnapshot) -> Result<Vec<u8>, AppComma
 
 pub fn parse_snapshot(bytes: &[u8]) -> Result<ConfigSnapshot, AppCommandError> {
     let snapshot: ConfigSnapshot = serde_json::from_slice(bytes).map_err(|e| {
-        AppCommandError::invalid_input("Not a codeg config snapshot")
+        AppCommandError::invalid_input("Not a harness_studio config snapshot")
             .with_detail(e.to_string())
             .with_i18n(CONFIG_SYNC_I18N_KEY_INVALID_SNAPSHOT, BTreeMap::new())
     })?;
@@ -212,7 +212,7 @@ pub fn validate_domains(snapshot: &ConfigSnapshot) -> Result<(), AppCommandError
 
 pub fn parse_manifest(bytes: &[u8]) -> Result<ConfigManifest, AppCommandError> {
     serde_json::from_slice(bytes).map_err(|e| {
-        AppCommandError::invalid_input("Not a codeg config manifest")
+        AppCommandError::invalid_input("Not a harness_studio config manifest")
             .with_detail(e.to_string())
             .with_i18n(CONFIG_SYNC_I18N_KEY_INVALID_SNAPSHOT, BTreeMap::new())
     })
@@ -291,7 +291,7 @@ fn reject_newer_schema(schema_version: u32) -> Result<(), AppCommandError> {
         params.insert("snapshotVersion".to_string(), schema_version.to_string());
         params.insert("appVersion".to_string(), SCHEMA_VERSION.to_string());
         return Err(AppCommandError::invalid_input(
-            "Config snapshot was written by a newer version of codeg",
+            "Config snapshot was written by a newer version of harness_studio",
         )
         .with_i18n(CONFIG_SYNC_I18N_KEY_NEWER_SCHEMA, params));
     }
@@ -362,7 +362,7 @@ fn unix_hostname() -> Option<String> {
 
 /// Where pre-apply rollback snapshots live.
 pub fn rollback_dir() -> PathBuf {
-    crate::paths::codeg_home_dir().join("config-snapshots")
+    crate::paths::harness_studio_home_dir().join("config-snapshots")
 }
 
 /// Write "what this machine looked like before the apply" next to the app's
@@ -815,10 +815,7 @@ mod tests {
         let mut tampered = bytes.clone();
         tampered.extend_from_slice(b"\n");
         let err = validate_manifest(&manifest, &tampered).expect_err("must reject");
-        assert_eq!(
-            err.i18n_key.as_deref(),
-            Some(CONFIG_SYNC_I18N_KEY_CHECKSUM)
-        );
+        assert_eq!(err.i18n_key.as_deref(), Some(CONFIG_SYNC_I18N_KEY_CHECKSUM));
     }
 
     #[test]
@@ -903,7 +900,10 @@ mod tests {
         .expect("bytes");
 
         let err = parse_snapshot(&bytes).expect_err("must refuse");
-        assert_eq!(err.i18n_key.as_deref(), Some(CONFIG_SYNC_I18N_KEY_BAD_DOMAIN));
+        assert_eq!(
+            err.i18n_key.as_deref(),
+            Some(CONFIG_SYNC_I18N_KEY_BAD_DOMAIN)
+        );
         assert_eq!(
             err.i18n_params
                 .as_ref()
@@ -998,7 +998,8 @@ mod tests {
         // this machine" about a file sitting right there, because the resolver
         // holds ids to an alphabet with no room for a space or a bracket.
         std::fs::copy(
-            dir.path().join(format!("{}.json", list_rollback_infos(dir.path())[0].id)),
+            dir.path()
+                .join(format!("{}.json", list_rollback_infos(dir.path())[0].id)),
             dir.path().join("config-20240101T000000001 (1).json"),
         )
         .expect("copy");
