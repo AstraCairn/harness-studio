@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="./public/icon-128x128.png" alt="Harness-Studio 图标" width="96" height="96" />
+<img src="./public/icon-128x128.png" alt="Harness Studio 图标" width="96" height="96" />
 
-# Harness-Studio
+# Harness Studio
 
 **把智能体、项目和工具放进同一个桌面工作台。**
 
@@ -14,9 +14,9 @@
 
 </div>
 
-![Harness-Studio 桌面工作区](./docs/images/harness-studio-workspace.png)
+![Harness Studio 桌面工作区](./docs/images/harness-studio-workspace.png)
 
-Harness-Studio 是一个围绕本地项目构建的多智能体桌面工作台。
+Harness Studio 是一个围绕本地项目构建的多智能体桌面工作台。
 你可以在同一个窗口中选择智能体、管理项目与会话、查看文件和代码差异，
 也可以将子任务交给其他智能体协作完成。
 
@@ -54,7 +54,7 @@ _配图来自本项目的桌面验收窗口。供应商页使用本地测试接�
 
 ## 开始使用
 
-1. 安装本项目构建的 Windows x64 安装包，启动 **Harness-Studio**。
+1. 安装本项目构建的 Windows x64 安装包，启动 **Harness Studio**。
 2. 在「设置 → 智能体」中配置需要使用的智能体，按提示完成安装和认证。
 3. 如需自定义接口，在「模型供应商」中配置地址、密钥和模型，再在智能体设置中选择相应供应商。
 4. 添加本地项目，选择智能体和模型，创建会话并开始工作。
